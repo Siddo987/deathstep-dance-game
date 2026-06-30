@@ -1,6 +1,6 @@
 {
   "name": "deathstep-server",
-  "version": "1.0.0",
+  "version": "0.7.0",
   "description": "Backend for Deathstep party game",
   "main": "index.js",
   "type": "module",

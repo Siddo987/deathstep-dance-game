@@ -1,4 +1,4 @@
-const CLIENT_ID = '66327082c48c4cdc89b9683ab178e415';
+const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID;
 const SCOPES = 'streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state';
 
 export const getRedirectUri = () => {

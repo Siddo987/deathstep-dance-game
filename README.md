@@ -63,7 +63,7 @@ Start the backend server:
 ```bash
 cd server
 npm start
-# Runs on http://localhost:8080
+# Runs on http://localhost:3001
 ```
 
 Start the frontend development server:
@@ -83,7 +83,7 @@ To build and run the full stack using Docker:
 docker build -t deathstep-dance-game .
 
 # Run the container
-docker run -p 8080:8080 deathstep-dance-game
+docker run -p 8080:80 deathstep-dance-game
 ```
 The application will be accessible at `http://localhost:8080`.
 
