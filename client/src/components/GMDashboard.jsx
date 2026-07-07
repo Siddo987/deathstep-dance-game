@@ -19,6 +19,7 @@ function GMDashboard({ room, onLeave }) {
   const [spotifyToken, setSpotifyToken] = useState(null);
   const [spotifyPlayerId, setSpotifyPlayerId] = useState(null);
   const [spotifyPlayer, setSpotifyPlayer] = useState(null);
+  const [showSpotifyModal, setShowSpotifyModal] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [playerStatus, setPlayerStatus] = useState('Initializing player...');
   const [searchQuery, setSearchQuery] = useState('');
@@ -31,7 +32,6 @@ function GMDashboard({ room, onLeave }) {
   const [playbackDuration, setPlaybackDuration] = useState(1);
 
   // New states
-  const [autoStartTimer, setAutoStartTimer] = useState(null);
   const [bypassRoleView, setBypassRoleView] = useState(false);
   const [bypassPaired, setBypassPaired] = useState(false);
 
@@ -135,58 +135,6 @@ function GMDashboard({ room, onLeave }) {
       window.onSpotifyWebPlaybackSDKReady();
     }
   }, [spotifyToken]);
-
-  React.useEffect(() => {
-    if (room.status === 'paired') {
-      const pairedPlayers = room.players.filter(p => room.couples.some(c => c.playerIds.includes(p.id)));
-      const allConfirmed = pairedPlayers.length > 0 && pairedPlayers.every(p => p.isConfirmed);
-      
-      if (allConfirmed && autoStartTimer === null) {
-        setAutoStartTimer(10);
-      } else if (!allConfirmed && autoStartTimer !== null) {
-        setAutoStartTimer(null);
-      }
-    } else if (room.status === 'role_reveal') {
-      const aliveCouples = room.couples ? room.couples.filter(c => c.status === 'alive') : [];
-      const allCouplesViewedRole = aliveCouples.length > 0 && aliveCouples.every(c => 
-        c.playerIds.some(id => {
-          const player = room.players.find(p => p.id === id);
-          return player && player.hasViewedRole;
-        })
-      );
-      const isSpotifyReady = !useSpotify || (selectedTrack && spotifyPlayer);
-      if (allCouplesViewedRole && isSpotifyReady && autoStartTimer === null) {
-        setAutoStartTimer(10);
-      } else if ((!allCouplesViewedRole || !isSpotifyReady) && autoStartTimer !== null) {
-        setAutoStartTimer(null);
-      }
-    } else if (room.status === 'dancing') {
-      const isMarked = room.pendingVictimId !== undefined;
-      if (isMarked && (!useSpotify || !isPlaying)) {
-        if (autoStartTimer === null) setAutoStartTimer(10);
-      } else {
-        if (autoStartTimer !== null) setAutoStartTimer(null);
-      }
-    } else {
-      setAutoStartTimer(null);
-    }
-  }, [room.status, room.players, room.couples, room.pendingVictimId, isPlaying, useSpotify, selectedTrack, spotifyPlayer]);
-
-  React.useEffect(() => {
-    if (autoStartTimer !== null && autoStartTimer > 0) {
-      const timer = setTimeout(() => setAutoStartTimer(autoStartTimer - 1), 1000);
-      return () => clearTimeout(timer);
-    } else if (autoStartTimer === 0) {
-      if (room.status === 'paired') {
-        handleStartGame();
-      } else if (room.status === 'role_reveal') {
-        handleStartDancing();
-      } else if (room.status === 'dancing') {
-        socket.emit('revealKill', { roomId: room.id });
-      }
-      setAutoStartTimer(null);
-    }
-  }, [autoStartTimer, room.status]);
 
   const menuRef = React.useRef();
 
@@ -520,9 +468,10 @@ function GMDashboard({ room, onLeave }) {
     );
   };
 
-  const renderSpotifyControls = (hideIfConnected = false) => {
+  const renderSpotifyControls = (hideIfConnected = false, isModal = false) => {
     if (!useSpotify) return null;
     if (hideIfConnected && spotifyToken) return null;
+    if (!isModal && selectedTrack) return null;
     
     return (
       <div style={{ marginBottom: '20px', padding: '15px', background: 'rgba(29, 185, 84, 0.1)', border: '1px solid #1db954', borderRadius: '8px' }}>
@@ -539,10 +488,21 @@ function GMDashboard({ room, onLeave }) {
           </button>
         ) : (
           <div>
-            <p style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
-              <strong style={{ color: spotifyPlayerId ? '#1db954' : 'var(--neon-red)' }}>{playerStatus}</strong><br/>
+            <div style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '5px' }}>
+                <strong style={{ color: spotifyPlayerId ? '#1db954' : 'var(--neon-red)' }}>{playerStatus}</strong>
+                {playerStatus.includes('Error') && (
+                  <button 
+                    className="cyber-button" 
+                    style={{ padding: '4px 8px', fontSize: '0.7rem', background: '#1db954', color: 'black', minWidth: 'auto', margin: 0 }}
+                    onClick={loginWithSpotify}
+                  >
+                    RETRY AUTH
+                  </button>
+                )}
+              </div>
               Select a track to play automatically when the dance starts!
-            </p>
+            </div>
             
             <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
               <input 
@@ -587,6 +547,37 @@ function GMDashboard({ room, onLeave }) {
                   <div style={{ fontSize: '0.8rem', color: '#1db954', textTransform: 'uppercase', fontWeight: 'bold' }}>SELECTED TRACK</div>
                   <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
                 </div>
+                {isModal && (
+                  <button 
+                    disabled={!spotifyPlayer}
+                    style={{ 
+                      width: '40px', height: '40px', borderRadius: '50%', padding: 0, 
+                      display: 'flex', justifyContent: 'center', alignItems: 'center', 
+                      background: spotifyPlayer ? '#1db954' : 'gray', color: 'black', border: 'none',
+                      cursor: spotifyPlayer ? 'pointer' : 'not-allowed', flexShrink: 0
+                    }}
+                    onClick={async () => {
+                      if (spotifyPlayer) {
+                        if (isPlaying) {
+                          spotifyPlayer.pause();
+                        } else {
+                          const state = await spotifyPlayer.getCurrentState();
+                          if (state && state.track_window.current_track.uri === selectedTrack.uri) {
+                            spotifyPlayer.resume();
+                          } else {
+                            playTrack(selectedTrack.uri, spotifyPlayerId).catch(console.error);
+                          }
+                        }
+                      }
+                    }}
+                  >
+                    {isPlaying ? (
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                    ) : (
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                    )}
+                  </button>
+                )}
                 <button 
                   style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.2rem' }}
                   onClick={() => setSelectedTrack(null)}
@@ -667,15 +658,29 @@ function GMDashboard({ room, onLeave }) {
           
           {/* 3-Dot Menu Container */}
           <div style={{ position: 'relative', zIndex: 100 }} ref={menuRef}>
-            <button 
-              className="kebab-menu-btn"
-              onClick={() => setShowMenu(!showMenu)} 
-              title="Menu"
-            >
-              <div className="kebab-dot"></div>
-              <div className="kebab-dot"></div>
-              <div className="kebab-dot"></div>
-            </button>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              {selectedTrack && (
+                <button 
+                  className="kebab-menu-btn pulse-animation" 
+                  onClick={() => setShowSpotifyModal(true)}
+                  title="Change Spotify Track"
+                  style={{ color: '#1db954' }}
+                >
+                  <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
+                    <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.84.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.38 4.26-1.26 11.28-1.02 15.72 1.621.539.3.719 1.02.419 1.56-.299.54-1.02.72-1.559.42z"/>
+                  </svg>
+                </button>
+              )}
+              <button 
+                className="kebab-menu-btn"
+                onClick={() => setShowMenu(!showMenu)} 
+                title="Menu"
+              >
+                <div className="kebab-dot"></div>
+                <div className="kebab-dot"></div>
+                <div className="kebab-dot"></div>
+              </button>
+            </div>
             {showMenu && (
               <div className="dropdown-menu">
                 {room.status !== 'lobby' && (
@@ -936,19 +941,8 @@ function GMDashboard({ room, onLeave }) {
               disabled={!canStart}
               style={{ width: '100%', opacity: canStart ? 1 : 0.5, cursor: canStart ? 'pointer' : 'not-allowed' }}
             >
-              {allConfirmed 
-                ? (autoStartTimer !== null ? `REVEAL ROLES (${autoStartTimer}s)` : 'REVEAL ROLES') 
-                : 'REVEAL ROLES'}
+              REVEAL ROLES
             </button>
-            
-            {autoStartTimer !== null && (
-              <button 
-                onClick={() => setAutoStartTimer(null)} 
-                style={{ marginTop: '10px', width: '100%', background: 'transparent', border: '1px solid var(--neon-red)', color: 'var(--neon-red)', padding: '10px', borderRadius: '5px', cursor: 'pointer' }}
-              >
-                CANCEL AUTO-START
-              </button>
-            )}
 
             {!allConfirmed && !bypassPaired && (
               <div style={{ textAlign: 'center' }}>
@@ -999,7 +993,7 @@ function GMDashboard({ room, onLeave }) {
               
               {(allCouplesViewedRole || bypassRoleView) && isSpotifyReady && (
                 <p style={{ color: '#00ff66', marginBottom: '20px' }}>
-                  All checks passed! You can start the music now.
+                  All checks passed! You can start the Game now!
                 </p>
               )}
               
@@ -1029,19 +1023,10 @@ function GMDashboard({ room, onLeave }) {
                 style={{ width: '100%', fontSize: '1.2rem', padding: '15px', opacity: canStart ? 1 : 0.5, cursor: canStart ? 'pointer' : 'not-allowed' }}
               >
                 {useSpotify 
-                  ? (autoStartTimer !== null ? `START DANCING (ROUND ${room.round}) & PLAY MUSIC (${autoStartTimer}s)` : `START DANCING (ROUND ${room.round}) & PLAY MUSIC`)
-                  : (autoStartTimer !== null ? `START DANCING (ROUND ${room.round}) (${autoStartTimer}s)` : `START DANCING (ROUND ${room.round})`)
+                  ? `START MUSIC & START DANCING`
+                  : `START DANCING (ROUND ${room.round})`
                 }
               </button>
-
-              {autoStartTimer !== null && (
-                <button 
-                  onClick={() => setAutoStartTimer(null)} 
-                  style={{ marginTop: '10px', width: '100%', background: 'transparent', border: '1px solid var(--neon-red)', color: 'var(--neon-red)', padding: '10px', borderRadius: '5px', cursor: 'pointer' }}
-                >
-                  CANCEL AUTO-START
-                </button>
-              )}
 
               {!allCouplesViewedRole && !bypassRoleView && (
                 <button 
@@ -1061,7 +1046,7 @@ function GMDashboard({ room, onLeave }) {
         const aliveCouplesToKill = aliveCouples.filter(c => c.role !== 'killer');
         return (
           <div style={{ marginBottom: '20px' }}>
-            {!selectedTrack ? renderSpotifyControls() : renderSpotifyPlaybackBar()}
+            {!selectedTrack && renderSpotifyControls()}
 
             <div style={{ padding: '20px', background: 'rgba(0,240,255,0.1)', border: '2px solid var(--neon-blue)', borderRadius: '10px', marginBottom: '20px', animation: 'pulse 2s infinite' }}>
               <h3 style={{ color: 'var(--neon-blue)', textAlign: 'center', margin: 0, letterSpacing: '2px' }}>🎵 DANCING IN PROGRESS 🎵</h3>
@@ -1104,17 +1089,8 @@ function GMDashboard({ room, onLeave }) {
                 style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }} 
                 onClick={handleRevealKill}
               >
-                {autoStartTimer !== null ? `REVEAL KILL TO PLAYERS (${autoStartTimer}s)` : 'REVEAL KILL TO PLAYERS'}
+                REVEAL KILL TO PLAYERS
               </button>
-
-              {autoStartTimer !== null && (
-                <button 
-                  onClick={() => setAutoStartTimer(null)} 
-                  style={{ marginTop: '10px', width: '100%', background: 'transparent', border: '1px solid var(--neon-red)', color: 'var(--neon-red)', padding: '10px', borderRadius: '5px', cursor: 'pointer' }}
-                >
-                  CANCEL AUTO-START
-                </button>
-              )}
             </div>
           </div>
         );
@@ -1204,7 +1180,7 @@ function GMDashboard({ room, onLeave }) {
         return (
           <div style={{ marginTop: '30px', padding: '20px', background: killersWon ? 'rgba(255,0,85,0.1)' : 'rgba(0,240,255,0.1)', border: `2px solid ${killersWon ? 'var(--neon-red)' : 'var(--neon-blue)'}`, borderRadius: '10px', textAlign: 'center' }}>
             <h3 style={{ color: killersWon ? 'var(--neon-red)' : 'var(--neon-blue)', marginBottom: '20px' }}>
-              {killersWon ? 'KILLERS WON' : 'DANCERS WON'}
+              {killersWon ? 'SIEG DER KILLER' : 'SIEG DER TÄNZER'}
             </h3>
             {killerCouple && (
               <p style={{ fontSize: '1.2rem', marginBottom: '15px', color: 'white' }}>
@@ -1212,10 +1188,10 @@ function GMDashboard({ room, onLeave }) {
               </p>
             )}
             <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
-              The game has ended.
+              Das Spiel ist beendet.
             </p>
             <button className="cyber-button pulse-animation" style={{ width: '100%' }} onClick={handleResetGame}>
-              BACK TO LOBBY / NEW ROUND
+              ZURÜCK ZUR LOBBY / NEUE RUNDE
             </button>
           </div>
         );
@@ -1263,6 +1239,20 @@ function GMDashboard({ room, onLeave }) {
         }}
         onCancel={() => setConfirmState(null)}
       />
+
+      {showSpotifyModal && (
+        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+          <div className="cyber-card" style={{ maxWidth: '600px', width: '90%', margin: '0 20px', border: '1px solid #1db954', position: 'relative' }}>
+            <button 
+              onClick={() => setShowSpotifyModal(false)}
+              style={{ position: 'absolute', top: '15px', right: '15px', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '1.5rem', cursor: 'pointer' }}
+            >
+              ✖
+            </button>
+            {renderSpotifyControls(false, true)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

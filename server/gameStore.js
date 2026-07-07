@@ -20,7 +20,7 @@ class GameStore {
       round: 0,
       players: [], // { id, socketId, name, danceRole: 'lead'|'follow'|'spectator', isConfirmed: false }
       couples: [], // { id, name, playerIds: [], role: 'dancer'|'killer', status: 'alive' }
-      votingRole: 'lead', // lead or follow
+      votingRole: 'follow', // lead or follow
       votes: {}, // { voterId: suspectCoupleId }
       victimId: null, // this will be a couple id
       pendingVictimId: null, // secretly marked before reveal
@@ -226,6 +226,17 @@ class GameStore {
 
     room.status = 'voting';
     room.votes = {};
+    return room;
+  }
+
+  delegateVote(roomId, coupleId, votingPlayerId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+
+    const couple = room.couples.find(c => c.id === coupleId);
+    if (couple) {
+      couple.votingPlayerId = votingPlayerId;
+    }
     return room;
   }
 

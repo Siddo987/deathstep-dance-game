@@ -188,6 +188,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('delegateVote', ({ roomId, coupleId, votingPlayerId }) => {
+    const room = gameStore.delegateVote(roomId, coupleId, votingPlayerId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', room);
+    }
+  });
+
   socket.on('castVote', ({ roomId, voterId, suspectId }) => {
     const room = gameStore.castVote(roomId, voterId, suspectId);
     if (room) {

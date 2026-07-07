@@ -96,11 +96,37 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
         </p>
         
         {me?.isConfirmed ? (
-          <p style={{ color: 'var(--neon-blue)' }}>
-            {room.players.filter(p => room.couples.some(c => c.playerIds.includes(p.id))).every(p => p.isConfirmed) 
-              ? 'All partners confirmed! Waiting for GM to start the game...' 
-              : 'Confirmed! Waiting for others...'}
-          </p>
+          <div>
+            <p style={{ color: 'var(--neon-blue)' }}>
+              {room.players.filter(p => room.couples.some(c => c.playerIds.includes(p.id))).every(p => p.isConfirmed) 
+                ? 'All partners confirmed! Waiting for GM to start the game...' 
+                : 'Confirmed! Waiting for others...'}
+            </p>
+            {me?.danceRole === room.votingRole && (
+              <div style={{ marginTop: '30px', padding: '15px', border: '1px solid var(--neon-purple)', borderRadius: '10px', background: 'rgba(0,0,0,0.3)' }}>
+                <h3 style={{ color: 'var(--text-main)', marginBottom: '15px', fontSize: '1rem' }}>Wessen Handy wird zur Abstimmung genutzt?</h3>
+                <div style={{ display: 'flex', gap: '10px' }}>
+                  <button 
+                    className={`cyber-button ${(!myCouple.votingPlayerId || myCouple.votingPlayerId === clientId) ? 'pulse-animation' : ''}`}
+                    style={{ flex: 1, opacity: (!myCouple.votingPlayerId || myCouple.votingPlayerId === clientId) ? 1 : 0.5, padding: '10px', fontSize: '0.9rem' }}
+                    onClick={() => socket.emit('delegateVote', { roomId: room.id, coupleId: myCouple.id, votingPlayerId: clientId })}
+                  >
+                    Mein Handy
+                  </button>
+                  <button 
+                    className={`cyber-button ${(myCouple.votingPlayerId && myCouple.votingPlayerId !== clientId) ? 'pulse-animation' : ''}`}
+                    style={{ flex: 1, opacity: (myCouple.votingPlayerId && myCouple.votingPlayerId !== clientId) ? 1 : 0.5, padding: '10px', fontSize: '0.9rem' }}
+                    onClick={() => {
+                      const partnerId = myCouple.playerIds.find(id => id !== clientId);
+                      socket.emit('delegateVote', { roomId: room.id, coupleId: myCouple.id, votingPlayerId: partnerId });
+                    }}
+                  >
+                    Handy des Partners
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         ) : (
           <button className="cyber-button pulse-animation" onClick={handleConfirm} style={{ width: '100%' }}>
             FIND THEM & CONFIRM
@@ -141,10 +167,10 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
           marginTop: '20px', 
           textShadow: playerWon ? '0 0 15px rgba(0,255,102,0.5)' : '0 0 15px rgba(255,42,85,0.5)' 
         }}>
-          {playerWon ? 'VICTORY' : 'GAME OVER'}
+          {playerWon ? 'SIEG' : 'GAME OVER'}
         </h2>
         <h3 style={{ marginBottom: killersWon ? '10px' : '20px', color: killersWon ? 'var(--neon-red)' : 'var(--neon-blue)' }}>
-          {killersWon ? '💀 THE KILLERS WON 💀' : '✨ THE DANCERS SURVIVED ✨'}
+          {killersWon ? '💀 DIE KILLER HABEN GESIEGT 💀' : '✨ DIE TÄNZER HABEN ÜBERLEBT ✨'}
         </h3>
         
         {killersWon && killerCouple && (
@@ -156,28 +182,28 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
         {(() => {
           if (role === 'killer') {
             if (killersWon) {
-              return <p style={{ color: '#00ff66', fontSize: '1.2rem', marginBottom: '20px' }}>You successfully eliminated the dancers!</p>;
+              return <p style={{ color: '#00ff66', fontSize: '1.2rem', marginBottom: '20px' }}>Ihr habt alle Tänzer erfolgreich eliminiert!</p>;
             } else {
-              return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>You were caught and eliminated.</p>;
+              return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>Ihr wurdet entlarvt und eliminiert.</p>;
             }
           } else {
             if (killersWon) {
               if (isEliminated) {
-                return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>You were eliminated by the killers.</p>;
+                return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>Ihr wurdet von den Killern eliminiert.</p>;
               } else {
-                return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>The killers outnumbered the dancers. You lost!</p>;
+                return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>Die Killer haben die Überhand gewonnen. Ihr habt verloren!</p>;
               }
             } else {
               if (isEliminated) {
-                return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>You were eliminated, but the remaining dancers survived.</p>;
+                return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>Ihr wurdet eliminiert, aber die restlichen Tänzer haben überlebt!</p>;
               } else {
-                return <p style={{ color: '#00ff66', fontSize: '1.2rem', marginBottom: '20px' }}>The killers were defeated! You survived!</p>;
+                return <p style={{ color: '#00ff66', fontSize: '1.2rem', marginBottom: '20px' }}>Die Killer wurden besiegt! Ihr habt überlebt!</p>;
               }
             }
           }
         })()}
         
-        <p style={{ color: 'var(--text-muted)' }}>Waiting for GM to start a new game...</p>
+        <p style={{ color: 'var(--text-muted)' }}>Warte auf den Spielleiter (GM) für eine neue Runde...</p>
       </div>
     );
   }
@@ -188,8 +214,8 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       <div className="cyber-card" style={{ textAlign: 'center', borderColor: 'var(--neon-red)', position: 'relative', paddingTop: '40px' }}>
         {playerNameTag}
         {leaveButton}
-        <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '20px', marginTop: '20px' }}>ELIMINATED</h2>
-        <p style={{ color: 'var(--text-muted)' }}>Please leave the dancefloor quietly.</p>
+        <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '20px', marginTop: '20px' }}>ELIMINIERT</h2>
+        <p style={{ color: 'var(--text-muted)' }}>Bitte verlasst leise die Tanzfläche.</p>
       </div>
     );
   }
@@ -197,7 +223,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
   const victimCouple = room.victimId ? room.couples.find(c => c.id === room.victimId) : null;
   const aliveSuspectCouples = room.couples.filter(c => c.status === 'alive' && c.id !== myCouple.id);
 
-  const canVote = me?.danceRole === room.votingRole;
+  const canVote = myCouple?.votingPlayerId 
+    ? myCouple.votingPlayerId === clientId 
+    : me?.danceRole === room.votingRole;
 
   return (
     <div className="cyber-card" style={{ textAlign: 'center', position: 'relative', paddingTop: '40px' }}>
@@ -244,7 +272,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       {(room.status === 'role_reveal' || room.status === 'dancing' || room.status === 'kill_reveal') && (
         <div style={{ marginTop: '20px' }}>
           <button 
-            className="cyber-button" 
+            className="cyber-button pulse-animation" 
             onMouseDown={() => {
               setShowRole(true);
               if (!me.hasViewedRole) socket.emit('roleViewed', { roomId: room.id, clientId });
@@ -258,19 +286,19 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
             onTouchEnd={() => setShowRole(false)}
             style={{ marginBottom: '20px', userSelect: 'none', WebkitUserSelect: 'none' }}
           >
-            PRESS AND HOLD TO REVEAL ROLE
+            GEDRÜCKT HALTEN UM DIE ROLLE ZU SEHEN
           </button>
 
           {showRole && (
             role === 'killer' ? (
               <div style={{ padding: '30px', background: 'rgba(255,0,85,0.1)', borderRadius: '12px', border: '1px solid var(--neon-red)' }}>
-                <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '15px' }}>🔪 YOU ARE THE KILLERS 🔪</h2>
-                <p style={{ fontSize: '1.1rem' }}>Eliminate other couples secretly while dancing.<br/><strong style={{color: 'white', marginTop: '10px', display: 'block'}}>You may only eliminate 1 couple per song/round by touching them.</strong></p>
+                <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '15px' }}>🔪 IHR SEID DIE KILLER 🔪</h2>
+                <p style={{ fontSize: '1.1rem' }}>Eliminiert heimlich andere Tänzer, während ihr tanzt.<br/><strong style={{color: 'white', marginTop: '10px', display: 'block'}}>WICHTIG: Ihr dürft maximal ein Paar pro Lied umbringen!</strong></p>
               </div>
             ) : (
               <div style={{ padding: '30px', background: 'rgba(0,240,255,0.1)', borderRadius: '12px', border: '1px solid var(--neon-blue)' }}>
-                <h2 style={{ color: 'var(--neon-blue)', fontSize: '1.8rem', marginBottom: '15px' }}>YOU ARE DANCERS</h2>
-                <p style={{ fontSize: '1.1rem' }}>Dance and survive! Don't let the killers get you.</p>
+                <h2 style={{ color: 'var(--neon-blue)', fontSize: '1.8rem', marginBottom: '15px' }}>IHR SEID TÄNZER</h2>
+                <p style={{ fontSize: '1.1rem' }}>Tanzt und überlebt! Lasst euch nicht von den Killern erwischen.</p>
               </div>
             )
           )}
