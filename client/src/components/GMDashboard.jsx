@@ -21,6 +21,7 @@ function GMDashboard({ room, onLeave }) {
   const [spotifyPlayer, setSpotifyPlayer] = useState(null);
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [hasSongFinished, setHasSongFinished] = useState(false);
   const [playerStatus, setPlayerStatus] = useState('Initializing player...');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
@@ -74,6 +75,16 @@ function GMDashboard({ room, onLeave }) {
     }, 1000);
     return () => clearInterval(interval);
   }, [spotifyPlayer, isPlaying]);
+
+  React.useEffect(() => {
+    if (playbackDuration > 0 && playbackProgress >= playbackDuration - 1500) {
+      setHasSongFinished(true);
+    }
+  }, [playbackProgress, playbackDuration]);
+
+  React.useEffect(() => {
+    setHasSongFinished(false);
+  }, [selectedTrack, room?.status, room?.round]);
 
   React.useEffect(() => {
     const token = localStorage.getItem('spotify_access_token');
@@ -547,37 +558,6 @@ function GMDashboard({ room, onLeave }) {
                   <div style={{ fontSize: '0.8rem', color: '#1db954', textTransform: 'uppercase', fontWeight: 'bold' }}>SELECTED TRACK</div>
                   <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
                 </div>
-                {isModal && (
-                  <button 
-                    disabled={!spotifyPlayer}
-                    style={{ 
-                      width: '40px', height: '40px', borderRadius: '50%', padding: 0, 
-                      display: 'flex', justifyContent: 'center', alignItems: 'center', 
-                      background: spotifyPlayer ? '#1db954' : 'gray', color: 'black', border: 'none',
-                      cursor: spotifyPlayer ? 'pointer' : 'not-allowed', flexShrink: 0
-                    }}
-                    onClick={async () => {
-                      if (spotifyPlayer) {
-                        if (isPlaying) {
-                          spotifyPlayer.pause();
-                        } else {
-                          const state = await spotifyPlayer.getCurrentState();
-                          if (state && state.track_window.current_track.uri === selectedTrack.uri) {
-                            spotifyPlayer.resume();
-                          } else {
-                            playTrack(selectedTrack.uri, spotifyPlayerId).catch(console.error);
-                          }
-                        }
-                      }
-                    }}
-                  >
-                    {isPlaying ? (
-                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                    ) : (
-                      <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                    )}
-                  </button>
-                )}
                 <button 
                   style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.2rem' }}
                   onClick={() => setSelectedTrack(null)}
@@ -659,7 +639,7 @@ function GMDashboard({ room, onLeave }) {
           {/* 3-Dot Menu Container */}
           <div style={{ position: 'relative', zIndex: 100 }} ref={menuRef}>
             <div style={{ display: 'flex', gap: '10px' }}>
-              {selectedTrack && (
+              {selectedTrack && room.status !== 'dancing' && (
                 <button 
                   className="kebab-menu-btn pulse-animation" 
                   onClick={() => setShowSpotifyModal(true)}
@@ -1046,11 +1026,57 @@ function GMDashboard({ room, onLeave }) {
         const aliveCouplesToKill = aliveCouples.filter(c => c.role !== 'killer');
         return (
           <div style={{ marginBottom: '20px' }}>
-            {!selectedTrack && renderSpotifyControls()}
-
             <div style={{ padding: '20px', background: 'rgba(0,240,255,0.1)', border: '2px solid var(--neon-blue)', borderRadius: '10px', marginBottom: '20px', animation: 'pulse 2s infinite' }}>
-              <h3 style={{ color: 'var(--neon-blue)', textAlign: 'center', margin: 0, letterSpacing: '2px' }}>🎵 DANCING IN PROGRESS 🎵</h3>
-              <p style={{ textAlign: 'center', color: 'white', marginTop: '10px' }}>Everyone is dancing! The killers can secretly eliminate one couple by touching them.</p>
+              <h3 style={{ color: 'var(--neon-blue)', textAlign: 'center', margin: 0, letterSpacing: '2px', marginBottom: '15px' }}>🎵 DANCING IN PROGRESS 🎵</h3>
+              
+              {useSpotify && selectedTrack && (
+                <div style={{ marginBottom: '15px' }}>
+                  {!hasSongFinished ? (
+                    <div style={{ padding: '10px', background: 'rgba(29, 185, 84, 0.2)', border: '1px solid #1db954', borderRadius: '5px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: '0.8rem', color: '#1db954', textTransform: 'uppercase', fontWeight: 'bold' }}>AKTUELLER SONG</div>
+                        <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
+                      </div>
+                      <button 
+                        disabled={!spotifyPlayer}
+                        style={{ 
+                          width: '40px', height: '40px', borderRadius: '50%', padding: 0, 
+                          display: 'flex', justifyContent: 'center', alignItems: 'center', 
+                          background: spotifyPlayer ? '#1db954' : 'gray', color: 'black', border: 'none',
+                          cursor: spotifyPlayer ? 'pointer' : 'not-allowed', flexShrink: 0
+                        }}
+                        onClick={async () => {
+                          if (spotifyPlayer) {
+                            if (isPlaying) {
+                              spotifyPlayer.pause();
+                            } else {
+                              const state = await spotifyPlayer.getCurrentState();
+                              if (state && state.track_window.current_track.uri === selectedTrack.uri) {
+                                spotifyPlayer.resume();
+                              } else {
+                                playTrack(selectedTrack.uri, spotifyPlayerId).catch(console.error);
+                              }
+                            }
+                          }
+                        }}
+                      >
+                        {isPlaying ? (
+                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+                        )}
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ padding: '10px', background: 'rgba(255, 0, 0, 0.2)', border: '1px solid var(--neon-red)', borderRadius: '5px', textAlign: 'center', color: 'var(--neon-red)', fontWeight: 'bold' }}>
+                      Das Lied ist vorbei!
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>Everyone is dancing! The killers can secretly eliminate one couple by touching them.</p>
             </div>
 
             <div style={{ background: 'rgba(0,0,0,0.5)', padding: '20px', borderRadius: '10px', border: '1px solid var(--neon-purple)' }}>
