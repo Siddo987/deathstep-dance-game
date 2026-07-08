@@ -4,6 +4,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [danceRole, setDanceRole] = useState('lead'); // 'lead' or 'follow'
+  const [isFlexible, setIsFlexible] = useState(false);
   const [view, setView] = useState('main'); // main, join
 
   React.useEffect(() => {
@@ -62,7 +63,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
         onChange={(e) => setPlayerName(e.target.value)}
       />
 
-      <div style={{ margin: '15px 0', display: 'flex', gap: '10px' }}>
+      <div style={{ margin: '15px 0 5px 0', display: 'flex', gap: '10px' }}>
         <button 
           className="cyber-button" 
           style={{ 
@@ -87,10 +88,23 @@ function Home({ onCreateRoom, onJoinRoom }) {
         </button>
       </div>
       
+      <div style={{ marginBottom: '20px', padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: '5px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <input 
+          type="checkbox" 
+          id="flexibleRole" 
+          checked={isFlexible} 
+          onChange={(e) => setIsFlexible(e.target.checked)} 
+          style={{ transform: 'scale(1.2)', cursor: 'pointer' }}
+        />
+        <label htmlFor="flexibleRole" style={{ color: 'white', cursor: 'pointer', fontSize: '0.9rem' }}>
+          Ich bin flexibel (kann zur Not auch die andere Rolle tanzen)
+        </label>
+      </div>
+      
       <button 
         className="cyber-button pulse-animation" 
         style={{ marginTop: '10px', marginBottom: '10px', width: '100%' }}
-        onClick={() => onJoinRoom(roomId, playerName, danceRole)}
+        onClick={() => onJoinRoom(roomId, playerName, danceRole, isFlexible)}
         disabled={!roomId || !playerName}
       >
         CONNECT

@@ -4,6 +4,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fs from 'fs';
 import gameStore from './gameStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -11,6 +12,7 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // Serve the built React static files
 app.use(express.static(path.join(__dirname, '../client/dist')));
@@ -33,22 +35,28 @@ io.on('connection', (socket) => {
     callback({ success: true, room });
   });
 
-  socket.on('joinRoom', ({ roomId, playerName, danceRole, clientId }, callback) => {
+  socket.on('joinRoom', ({ roomId, playerName, danceRole, isFlexible, clientId }, callback) => {
     const room = gameStore.getRoom(roomId);
     if (!room) {
       return callback({ success: false, message: 'Room not found.' });
     }
 
     let updatedRoom;
-    const existing = room.players.find(p => p.id === clientId || p.name === playerName);
+    const existingById = room.players.find(p => p.id === clientId);
+    const existingByName = room.players.find(p => p.name.toLowerCase() === playerName.toLowerCase());
     
-    if (existing) {
-      updatedRoom = gameStore.updatePlayerSocket(roomId, existing.id, socket.id);
+    if (existingById) {
+      // Reconnecting with same client ID
+      updatedRoom = gameStore.updatePlayerSocket(roomId, existingById.id, socket.id);
+      // Optionally update name/role if they changed it on the join screen? 
+      // For now, just reconnect them.
+    } else if (existingByName) {
+      return callback({ success: false, message: 'Dieser Name ist bereits vergeben. Bitte wähle einen anderen Namen.' });
     } else {
       if (room.status !== 'lobby') {
         return callback({ success: false, message: 'Game already in progress.' });
       }
-      updatedRoom = gameStore.addPlayer(roomId, playerName, danceRole, clientId, socket.id);
+      updatedRoom = gameStore.addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socket.id);
     }
 
     socket.join(roomId);
@@ -236,6 +244,24 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('User disconnected:', socket.id);
+  });
+});
+
+app.post('/api/feedback', (req, res) => {
+  const { name, message, timestamp } = req.body;
+  const feedbackData = `\n[${timestamp}] ${name || 'Anonymous'}: ${message}`;
+  
+  const dataDir = path.join(__dirname, 'data');
+  if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir);
+  }
+  
+  fs.appendFile(path.join(dataDir, 'feedback.txt'), feedbackData, (err) => {
+    if (err) {
+      console.error('Error saving feedback:', err);
+      return res.status(500).json({ success: false });
+    }
+    res.json({ success: true });
   });
 });
 

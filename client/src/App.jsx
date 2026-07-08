@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { socket } from './socket.js';
 import Home from './components/Home.jsx';
 import GMDashboard from './components/GMDashboard.jsx';
 import PlayerScreen from './components/PlayerScreen.jsx';
+import Feedback from './components/Feedback.jsx';
 import { AlertModal } from './components/Modal.jsx';
 
 function App() {
@@ -19,6 +20,8 @@ function App() {
     }
     return id;
   });
+
+  const isLeavingRef = useRef(false);
 
   useEffect(() => {
     // Force re-login once to get the new 'streaming' scope
@@ -68,8 +71,11 @@ function App() {
     });
 
     socket.on('roomDestroyed', () => {
+      if (isLeavingRef.current) return;
       handleLeaveRoom(false);
-      setAlertMessage("The GM has closed the ballroom.");
+      if (view !== 'gm') {
+        setAlertMessage("The GM has closed the ballroom.");
+      }
     });
 
     return () => {
@@ -97,6 +103,7 @@ function App() {
   }, []);
 
   const handleLeaveRoom = (emitToServer = true) => {
+    isLeavingRef.current = true;
     if (emitToServer) {
       const savedRoomId = localStorage.getItem('deathstep_room_id');
       if (savedRoomId) {
@@ -112,6 +119,7 @@ function App() {
   };
 
   const handleCreateRoom = () => {
+    isLeavingRef.current = false;
     socket.emit('createRoom', (response) => {
       if (response.success) {
         setRoom(response.room);
@@ -122,8 +130,9 @@ function App() {
     });
   };
 
-  const handleJoinRoom = (roomId, playerName, danceRole) => {
-    socket.emit('joinRoom', { roomId, playerName, danceRole, clientId }, (response) => {
+  const handleJoinRoom = (roomId, playerName, danceRole, isFlexible) => {
+    isLeavingRef.current = false;
+    socket.emit('joinRoom', { roomId, playerName, danceRole, isFlexible, clientId }, (response) => {
       if (response.success) {
         setRoom(response.room);
         localStorage.setItem('deathstep_room_id', response.room.id);
@@ -134,6 +143,17 @@ function App() {
       }
     });
   };
+
+  if (window.location.pathname === '/feedback') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Feedback />
+      </div>
+    );
+  }
 
   return (
     <div className="app-container">

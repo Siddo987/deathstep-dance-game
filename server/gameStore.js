@@ -34,7 +34,7 @@ class GameStore {
     return this.rooms.get(roomId);
   }
 
-  addPlayer(roomId, playerName, danceRole, clientId, socketId) {
+  addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socketId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     if (room.status !== 'lobby') return null; // Can't join mid-game right now
@@ -45,6 +45,7 @@ class GameStore {
       name: playerName,
       danceRole: danceRole, // 'lead', 'follow', or 'spectator'
       originalDanceRole: danceRole, // To reset after clearing pairs
+      isFlexible: !!isFlexible,
       isConfirmed: false,
       hasViewedRole: false
     };
@@ -144,6 +145,7 @@ class GameStore {
     room.players.forEach(p => p.hasViewedRole = false);
     room.status = 'role_reveal';
     room.round = 1;
+    room.endReason = null;
     return room;
   }
 
@@ -282,6 +284,7 @@ class GameStore {
     killers.forEach(k => k.status = 'eliminated');
     
     room.status = 'ended';
+    room.endReason = 'aborted';
     return room;
   }
 
@@ -306,6 +309,7 @@ class GameStore {
     room.votes = {};
     room.victimId = null;
     room.pendingVictimId = null;
+    room.endReason = null;
     room.couples = []; // Reset couples completely for a new pairing
     room.players.forEach(p => {
       p.isConfirmed = false;

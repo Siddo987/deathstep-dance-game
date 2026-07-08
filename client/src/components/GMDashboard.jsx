@@ -176,8 +176,24 @@ function GMDashboard({ room, onLeave }) {
     }
   };
 
-  const handleExecuteVote = (suspectCoupleId) => {
+  const handleExecuteVote = async (suspectCoupleId) => {
+    const aliveCouples = room.couples.filter(c => c.status === 'alive' && c.id !== suspectCoupleId);
+    const killersAlive = aliveCouples.some(c => c.role === 'killer');
+    const willEnd = !killersAlive || aliveCouples.length <= 2;
+
     socket.emit('executeVote', { roomId: room.id, suspectId: suspectCoupleId });
+
+    if (!willEnd && selectedTrack && spotifyToken) {
+      try {
+        await playTrack(selectedTrack.uri, spotifyPlayerId);
+      } catch (e) {
+        if (e.message === 'NO_ACTIVE_DEVICE') {
+          alert("Fehler: Kein aktives Spotify-Gerät gefunden!\n\nBitte warte, bis der Web Player den Status 'Ready' hat.");
+        } else {
+          console.error("Failed to play track", e);
+        }
+      }
+    }
   };
 
   const handleStartDancing = async () => {
@@ -341,10 +357,49 @@ function GMDashboard({ room, onLeave }) {
       return;
     }
 
-    const leads = unpaired.filter(p => p.danceRole === 'lead');
-    const follows = unpaired.filter(p => p.danceRole === 'follow');
-    const excessCount = Math.abs(leads.length - follows.length);
-    const baseCouplesCount = Math.min(leads.length, follows.length);
+    let leads = unpaired.filter(p => p.danceRole === 'lead');
+    let follows = unpaired.filter(p => p.danceRole === 'follow');
+    let excessCount = Math.abs(leads.length - follows.length);
+    let baseCouplesCount = Math.min(leads.length, follows.length);
+
+    if (excessCount > 0) {
+      const isLeadExcess = leads.length > follows.length;
+      let excessGroup = isLeadExcess ? leads : follows;
+      let missingGroup = isLeadExcess ? follows : leads;
+      const missingRole = isLeadExcess ? 'follow' : 'lead';
+      
+      const flexibleExcess = excessGroup.filter(p => p.isFlexible);
+      let swapsDone = 0;
+      
+      // Calculate how many swaps are strictly needed to avoid 4-person couples
+      // Math.max(0, Math.ceil((excessCount - baseCouplesCount) / 3))
+      // But we actually want to reach perfect balance if we can (excessCount == 0 or 1).
+      // optimalSwaps to get perfect balance is Math.floor(excessCount / 2).
+      const optimalSwaps = Math.floor(excessCount / 2);
+
+      while (flexibleExcess.length > 0 && swapsDone < optimalSwaps) {
+        const flexPlayer = flexibleExcess.pop();
+        
+        // Remove from excess group
+        const idx = excessGroup.findIndex(p => p.id === flexPlayer.id);
+        excessGroup.splice(idx, 1);
+        
+        // Update role
+        flexPlayer.danceRole = missingRole;
+        missingGroup.push(flexPlayer);
+        socket.emit('updatePlayerRole', { roomId: room.id, clientId: flexPlayer.id, newRole: missingRole });
+        
+        swapsDone++;
+      }
+
+      // Re-assign leads and follows after auto-swaps
+      leads = isLeadExcess ? excessGroup : missingGroup;
+      follows = isLeadExcess ? missingGroup : excessGroup;
+      
+      // Recalculate imbalance
+      excessCount = Math.abs(leads.length - follows.length);
+      baseCouplesCount = Math.min(leads.length, follows.length);
+    }
 
     if (excessCount === 0) {
       executePairing([...leads], [...follows], false);
@@ -361,45 +416,53 @@ function GMDashboard({ room, onLeave }) {
     }
   };
 
-  const handleToggleKickSelection = (playerId) => {
-    let selected = [...randomizerFlow.selectedToKick];
-    if (selected.includes(playerId)) {
-      selected = selected.filter(id => id !== playerId);
-    } else {
-      selected.push(playerId);
-    }
-    setRandomizerFlow({ ...randomizerFlow, selectedToKick: selected });
+  const handlePlayerActionChange = (playerId, action) => {
+    setRandomizerFlow({ 
+      ...randomizerFlow, 
+      playerActions: { ...randomizerFlow.playerActions, [playerId]: action } 
+    });
   };
 
   const executeMixedSelection = () => {
-    const minKickCount = Math.max(0, randomizerFlow.excessCount - randomizerFlow.baseCouplesCount);
+    let leads = [...randomizerFlow.leads];
+    let follows = [...randomizerFlow.follows];
     
-    if (randomizerFlow.selectedToKick.length < minKickCount) {
-      alert(`Bitte wähle mindestens ${minKickCount} Spieler zum Aussortieren aus. Ansonsten kommt es zu unzulässigen Paaren mit 4 Personen!`);
+    const actions = randomizerFlow.playerActions || {};
+    const selectedSwitch = Object.keys(actions).filter(id => actions[id] === 'switch');
+    const selectedSpectator = Object.keys(actions).filter(id => actions[id] === 'spectator');
+
+    const effectiveExcess = randomizerFlow.excessCount - (2 * selectedSwitch.length) - selectedSpectator.length;
+    const effectiveBase = randomizerFlow.baseCouplesCount + selectedSwitch.length;
+
+    const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
+
+    if (currentMinSwitchNeeded > 0) {
+      alert(`Deine Auswahl reicht noch nicht aus! Es müssen noch mehr Spieler die Rolle wechseln oder zuschauen, um 4er-Paare zu verhindern.`);
       return;
     }
     
-    let leads = [...randomizerFlow.leads];
-    let follows = [...randomizerFlow.follows];
-    const kickedPlayers = [];
-    
+    const targetRole = randomizerFlow.excessType === 'lead' ? 'follow' : 'lead';
+
+    selectedSwitch.forEach(id => {
+      socket.emit('updatePlayerRole', { roomId: room.id, clientId: id, newRole: targetRole });
+    });
+    selectedSpectator.forEach(id => {
+      socket.emit('updatePlayerRole', { roomId: room.id, clientId: id, newRole: 'spectator' });
+    });
+
     if (randomizerFlow.excessType === 'lead') {
-      randomizerFlow.selectedToKick.forEach(id => {
-        const idx = leads.findIndex(p => p.id === id);
-        if (idx !== -1) kickedPlayers.push(leads.splice(idx, 1)[0]);
-      });
+      const switched = leads.filter(p => selectedSwitch.includes(p.id));
+      leads = leads.filter(p => !selectedSwitch.includes(p.id) && !selectedSpectator.includes(p.id));
+      switched.forEach(p => p.danceRole = 'follow');
+      follows.push(...switched);
     } else {
-      randomizerFlow.selectedToKick.forEach(id => {
-        const idx = follows.findIndex(p => p.id === id);
-        if (idx !== -1) kickedPlayers.push(follows.splice(idx, 1)[0]);
-      });
+      const switched = follows.filter(p => selectedSwitch.includes(p.id));
+      follows = follows.filter(p => !selectedSwitch.includes(p.id) && !selectedSpectator.includes(p.id));
+      switched.forEach(p => p.danceRole = 'lead');
+      leads.push(...switched);
     }
     
-    kickedPlayers.forEach(p => {
-      socket.emit('updatePlayerRole', { roomId: room.id, clientId: p.id, newRole: 'spectator' });
-    });
-    
-    // Unselected players stay in the leads/follows arrays and are passed down to be threesomes
+    setRandomizerFlow(null);
     executePairing(leads, follows, true);
   };
 
@@ -413,6 +476,10 @@ function GMDashboard({ room, onLeave }) {
 
   const handleCreateManualCouple = () => {
     if (currentGroup.length < 2) return;
+    if (currentGroup.length > 3) {
+      alert("Es können maximal 3er-Gruppen gebildet werden!");
+      return;
+    }
     const names = currentGroup.map(id => room.players.find(p => p.id === id)?.name).join(' & ');
     setPendingCouples([
       ...pendingCouples,
@@ -430,6 +497,20 @@ function GMDashboard({ room, onLeave }) {
 
   const handleReleasePairs = () => {
     if (pendingCouples.length === 0) return alert("No couples to release!");
+    
+    if (pendingCouples.length <= 2) {
+      alert("Du brauchst mindestens 3 Paare, um das Spiel zu spielen! Bitte erstelle mehr Paare.");
+      return;
+    }
+    
+    if (pendingCouples.length === 3) {
+      setConfirmState({
+        message: 'Achtung: Das Spiel macht spieltechnisch eigentlich erst ab 4 Paaren richtig Sinn. Willst du diese 3 Paare wirklich freigeben?',
+        onConfirm: () => socket.emit('releasePairs', { roomId: room.id, generatedCouples: pendingCouples })
+      });
+      return;
+    }
+
     socket.emit('releasePairs', { roomId: room.id, generatedCouples: pendingCouples });
   };
 
@@ -723,74 +804,140 @@ function GMDashboard({ room, onLeave }) {
             </button>
           </div>
 
-          {/* IN-PAGE RANDOMIZER FLOW DIALOGS */}
+          {/* RANDOMIZER FLOW MODAL */}
           {randomizerFlow && (
-            <div style={{ padding: '20px', background: 'rgba(0,240,255,0.05)', border: '1px solid var(--neon-blue)', borderRadius: '10px', marginBottom: '20px' }}>
-              <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>Unbalanced Pairs!</h3>
+            <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+              <div className="cyber-card" style={{ maxWidth: '600px', width: '90%', margin: '0 20px', border: '1px solid var(--neon-blue)', position: 'relative', maxHeight: '90vh', overflowY: 'auto' }}>
+                <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>⚠️ Rollen-Verteilung ungleich!</h3>
               
               {randomizerFlow.step === 'mixed_selection' && (() => {
-                const minKickCount = Math.max(0, randomizerFlow.excessCount - randomizerFlow.baseCouplesCount);
+                const actions = randomizerFlow.playerActions || {};
+                const selectedSwitchCount = Object.keys(actions).filter(id => actions[id] === 'switch').length;
+                const selectedSpectatorCount = Object.keys(actions).filter(id => actions[id] === 'spectator').length;
+
+                const effectiveExcess = randomizerFlow.excessCount - (2 * selectedSwitchCount) - selectedSpectatorCount;
+                const effectiveBase = randomizerFlow.baseCouplesCount + selectedSwitchCount;
+
+                const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
+                const originalMinSwitchNeeded = Math.max(0, Math.ceil((randomizerFlow.excessCount - randomizerFlow.baseCouplesCount) / 3));
+                
+                const isSelectionValid = currentMinSwitchNeeded === 0;
+
+                const excessRoleName = randomizerFlow.excessType === 'lead' ? 'Leads' : 'Follows';
+                const missingRoleName = randomizerFlow.excessType === 'lead' ? 'Follows' : 'Leads';
+
+                const renderSkipAllowedText = () => {
+                  if (randomizerFlow.excessCount === 1) {
+                    return (
+                      <p style={{ margin: 0, color: 'white' }}>
+                        Wir haben 1 {excessRoleName} zu viel. Du kannst diesen {excessRoleName} entweder einem Paar als 3. Person zuteilen lassen, oder unten auswählen, ob wer stattdessen zuschauen soll.
+                      </p>
+                    );
+                  } else if (randomizerFlow.excessCount % 2 === 0) {
+                    return (
+                      <p style={{ margin: 0, color: 'white' }}>
+                        Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Wenn du unten genau {randomizerFlow.excessCount / 2} Spieler auswählst, die ihre Rolle wechseln, geht es perfekt auf und es entstehen nur normale 2er-Paare!<br/>
+                        <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Alternativ kannst du auch Leute zuschauen lassen oder sie als 3. Person verteilen.</span>
+                      </p>
+                    );
+                  } else {
+                    return (
+                      <div style={{ margin: 0, color: 'white' }}>
+                        Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Das geht leider nicht perfekt in 2er-Paaren auf.<br/>
+                        <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Deine Optionen:</span>
+                        <ul style={{ margin: '5px 0 0 20px', padding: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                          <li><strong>Zuteilen:</strong> Mache einfach {randomizerFlow.excessCount} Paare zu 3er-Paaren.</li>
+                          <li><strong>Mischen:</strong> Lass Leute die Rolle wechseln UND teile den Rest als 3. Person auf.</li>
+                          <li><strong>Zuschauen:</strong> Lass 1 Person zuschauen und wechsle bei den restlichen die Rolle, für perfekte 2er-Paare.</li>
+                        </ul>
+                      </div>
+                    );
+                  }
+                };
+
                 return (
                   <div>
-                    <p style={{ marginBottom: '15px' }}>
-                      Es gibt <strong>{randomizerFlow.excessCount} überschüssige {randomizerFlow.excessType === 'lead' ? 'Leads' : 'Follows'}</strong>.
-                    </p>
-                    <p style={{ marginBottom: '15px', color: 'var(--neon-blue)' }}>
-                      Select who becomes a <strong>Spectator</strong>.<br/>
-                      Everyone not selected will be distributed as a 3rd person to the {randomizerFlow.baseCouplesCount} base couples! (You can create a maximum of {randomizerFlow.baseCouplesCount} 3-person couples).
-                    </p>
-                    {randomizerFlow.excessCount >= 2 && (
-                      <p style={{ marginBottom: '15px', color: 'var(--neon-purple)', fontStyle: 'italic' }}>
-                        💡 Tip: With such a large excess, you can also click "Cancel" and manually change the role of some players in the list below (e.g. make Leads into Follows) so they can dance together.
-                      </p>
-                    )}
-                    
-                    {minKickCount > 0 && (
-                      <div style={{ padding: '10px', background: 'rgba(255,0,85,0.2)', border: '1px solid var(--neon-red)', borderRadius: '5px', marginBottom: '15px' }}>
-                        ⚠️ Da es nur {randomizerFlow.baseCouplesCount} Basis-Paare gibt, musst du <strong>mindestens {minKickCount}</strong> Spieler zu Zuschauern machen, um 4er-Paare zu verhindern!
+                    {originalMinSwitchNeeded > 0 ? (
+                      <div style={{ padding: '15px', background: 'rgba(255,0,85,0.2)', border: '1px solid var(--neon-red)', borderRadius: '5px', marginBottom: '15px' }}>
+                        <p style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>
+                          Achtung: Wir haben <strong>{randomizerFlow.excessCount} {excessRoleName} zu viel!</strong> Das sind zu viele, um sie einfach als 3. Person zu verteilen (es würden 4er-Paare entstehen).
+                        </p>
+                        <p style={{ margin: '15px 0 10px 0', color: 'white' }}>
+                          Du musst ausgleichen. Du hast zwei Möglichkeiten:
+                        </p>
+                        <ul style={{ margin: '0 0 15px 20px', padding: 0, color: 'var(--text-muted)' }}>
+                          <li style={{ marginBottom: '5px' }}><strong style={{ color: 'var(--neon-blue)' }}>Rolle wechseln (Sehr effektiv!):</strong> 1 Wechsel löst das Problem für bis zu 3 Leute, da wir ein komplett neues Paar gewinnen!</li>
+                          <li><strong style={{ color: 'var(--neon-purple)' }}>Zuschauen lassen:</strong> Die Person pausiert in dieser Runde (löst das Problem für 1 Person).</li>
+                        </ul>
+                        <p style={{ margin: 0, color: 'var(--neon-red)', fontWeight: 'bold' }}>
+                          👉 Wähle unten Aktionen aus. Der 'Auswahl bestätigen'-Button wird automatisch grün, sobald das Gleichgewicht wiederhergestellt ist!
+                        </p>
+                        <div style={{ marginTop: '15px', padding: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
+                          💡 <strong>Pro-Tipp für perfekte 2er-Paare:</strong> Damit es absolut perfekt aufgeht, müssten genau <strong>{Math.floor(randomizerFlow.excessCount / 2)} Personen</strong> die Rolle wechseln{randomizerFlow.excessCount % 2 !== 0 ? ' und 1 Person zuschauen' : ''}.
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ padding: '15px', background: 'rgba(0,240,255,0.1)', border: '1px solid var(--neon-blue)', borderRadius: '5px', marginBottom: '15px' }}>
+                        {renderSkipAllowedText()}
                       </div>
                     )}
                     
                     <div className="couple-list" style={{ marginBottom: '15px' }}>
                       {(randomizerFlow.excessType === 'lead' ? randomizerFlow.leads : randomizerFlow.follows).map(p => {
-                        const isSelected = randomizerFlow.selectedToKick.includes(p.id);
+                        const currentAction = actions[p.id] || 'none';
                         return (
                           <div key={p.id} 
-                               onClick={() => handleToggleKickSelection(p.id)}
                                style={{ 
                                  padding: '10px', 
-                                 cursor: 'pointer',
-                                 border: isSelected ? '1px solid var(--neon-red)' : '1px solid var(--text-muted)',
-                                 background: isSelected ? 'rgba(255,0,85,0.2)' : 'rgba(0,0,0,0.5)',
+                                 border: currentAction !== 'none' ? '1px solid var(--neon-blue)' : '1px solid var(--text-muted)',
+                                 background: currentAction !== 'none' ? 'rgba(0,240,255,0.2)' : 'rgba(0,0,0,0.5)',
                                  borderRadius: '5px',
                                  display: 'flex',
                                  alignItems: 'center',
+                                 justifyContent: 'space-between',
                                  gap: '10px'
                                }}>
-                            <div style={{ 
-                              width: '20px', height: '20px', borderRadius: '4px', 
-                              border: isSelected ? '2px solid var(--neon-red)' : '2px solid var(--text-muted)',
-                              background: isSelected ? 'var(--neon-red)' : 'transparent',
-                              display: 'flex', justifyContent: 'center', alignItems: 'center', flexShrink: 0
-                            }}>
-                              {isSelected && <span style={{ color: 'white', fontSize: '14px', fontWeight: 'bold' }}>✗</span>}
-                            </div>
-                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>
+                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, fontWeight: currentAction !== 'none' ? 'bold' : 'normal' }}>
                               {p.name}
                             </span>
+                            <select 
+                              value={currentAction}
+                              onChange={(e) => handlePlayerActionChange(p.id, e.target.value)}
+                              style={{ 
+                                background: 'rgba(0,0,0,0.8)', color: 'white', 
+                                border: '1px solid var(--neon-blue)', borderRadius: '5px', 
+                                padding: '5px', outline: 'none', cursor: 'pointer',
+                                fontSize: '0.9rem'
+                              }}
+                            >
+                              <option value="none">Als 3. Person</option>
+                              <option value="switch">Wechsel zu {missingRoleName}</option>
+                              <option value="spectator">Zuschauen</option>
+                            </select>
                           </div>
                         )
                       })}
                     </div>
-                    <div style={{ display: 'flex', gap: '10px' }}>
-                      <button className="cyber-button" onClick={executeMixedSelection} style={{ flex: 1 }}>
-                        Auswahl bestätigen ({randomizerFlow.selectedToKick.length}/{randomizerFlow.excessCount})
+                    <div style={{ display: 'flex', gap: '10px', flexDirection: 'column' }}>
+                      <button 
+                        className={isSelectionValid ? "cyber-button pulse-animation" : "cyber-button disabled"} 
+                        onClick={() => executeMixedSelection()} 
+                        style={{ 
+                          width: '100%', 
+                          opacity: isSelectionValid ? 1 : 0.5, 
+                          cursor: isSelectionValid ? 'pointer' : 'not-allowed',
+                          ...(isSelectionValid ? { background: 'rgba(29, 185, 84, 0.2)', border: '1px solid #1db954', color: '#1db954' } : { border: '1px solid var(--text-muted)' })
+                        }}
+                        disabled={!isSelectionValid}
+                      >
+                        Auswahl bestätigen (Paare bilden)
                       </button>
-                      <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ flex: 1 }}>Abbrechen</button>
+                      <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ width: '100%' }}>Abbrechen</button>
                     </div>
                   </div>
                 );
               })()}
+              </div>
             </div>
           )}
 
@@ -823,7 +970,7 @@ function GMDashboard({ room, onLeave }) {
                           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', 
                           color: currentGroup.includes(p.id) ? 'white' : 'var(--text-muted)' 
                         }}>
-                          {p.name}
+                          {p.name} {p.isFlexible && <span title="Flexible Role">🔄</span>}
                         </span>
                       </div>
                       <select 
@@ -854,8 +1001,19 @@ function GMDashboard({ room, onLeave }) {
                 ))}
               </div>
               {currentGroup.length > 0 && (
-                <button className="cyber-button" style={{ marginTop: '10px', width: '100%', borderColor: 'var(--neon-purple)' }} onClick={handleCreateManualCouple}>
-                  Create Group ({currentGroup.length})
+                <button 
+                  className={currentGroup.length > 3 ? "cyber-button disabled" : "cyber-button"} 
+                  style={{ 
+                    marginTop: '10px', 
+                    width: '100%', 
+                    borderColor: currentGroup.length > 3 ? 'var(--text-muted)' : 'var(--neon-purple)',
+                    opacity: currentGroup.length > 3 ? 0.5 : 1,
+                    cursor: currentGroup.length > 3 ? 'not-allowed' : 'pointer'
+                  }} 
+                  onClick={handleCreateManualCouple}
+                  disabled={currentGroup.length > 3}
+                >
+                  {currentGroup.length > 3 ? "Max. 3 Personen!" : `Create Group (${currentGroup.length})`}
                 </button>
               )}
             </div>
@@ -909,7 +1067,7 @@ function GMDashboard({ room, onLeave }) {
             <div className="couple-list" style={{ marginBottom: '20px' }}>
               {pairedPlayers.map(p => (
                 <div key={p.id} style={{ padding: '10px', border: p.isConfirmed ? '1px solid var(--neon-blue)' : '1px solid var(--neon-red)', borderRadius: '5px', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>{p.name} ({p.danceRole})</span>
+                  <span>{p.name} {p.isFlexible && <span title="Flexible Role">🔄</span>} ({p.danceRole})</span>
                   <span style={{ color: p.isConfirmed ? 'var(--neon-blue)' : 'var(--neon-red)' }}>{p.isConfirmed ? 'Ready' : 'Waiting...'}</span>
                 </div>
               ))}
@@ -930,7 +1088,7 @@ function GMDashboard({ room, onLeave }) {
                   onClick={() => setBypassPaired(true)} 
                   style={{ marginTop: '15px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
                 >
-                  Bypass check and start anyway
+                  Bypass check and reveal anyway
                 </button>
               </div>
             )}
@@ -961,7 +1119,9 @@ function GMDashboard({ room, onLeave }) {
               {!isSpotifyReady && (
                 <div style={{ padding: '10px', background: 'rgba(255,42,85,0.1)', border: '1px solid var(--neon-red)', borderRadius: '5px', marginBottom: '20px' }}>
                   <strong style={{ color: 'var(--neon-red)' }}>⚠️ MUSIC NOT READY ⚠️</strong><br/>
-                  <span style={{ color: 'white' }}>Please select a song using the Spotify search above.</span>
+                  <span style={{ color: 'white' }}>
+                    {!selectedTrack ? 'Please select a song using the Spotify search above.' : 'Player is initializing... Please wait.'}
+                  </span>
                 </div>
               )}
 
@@ -1135,11 +1295,11 @@ function GMDashboard({ room, onLeave }) {
                   💀 <strong>{victimCouple.name}</strong> were eliminated!
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                  <button className="cyber-button pulse-animation" onClick={handleStartDiscussion} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
-                    START DISCUSSION PHASE
+                  <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
+                    PROCEED TO VOTING (SKIP DISCUSSION)
                   </button>
-                  <button className="cyber-button" onClick={handleProceedToVoting} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
-                    PROCEED TO VOTING (SKIP)
+                  <button className="cyber-button" onClick={handleStartDiscussion} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
+                    START DISCUSSION PHASE
                   </button>
                 </div>
               </>
@@ -1200,6 +1360,21 @@ function GMDashboard({ room, onLeave }) {
       )}
 
       {room.status === 'ended' && (() => {
+        if (room.endReason === 'aborted') {
+          return (
+            <div style={{ marginTop: '30px', padding: '20px', background: 'rgba(255,255,255,0.1)', border: '2px solid var(--text-muted)', borderRadius: '10px', textAlign: 'center' }}>
+              <h3 style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
+                SPIEL ABGEBROCHEN
+              </h3>
+              <p style={{ color: 'white', marginBottom: '20px' }}>
+                Das Spiel wurde vorzeitig beendet.
+              </p>
+              <button className="cyber-button pulse-animation" style={{ width: '100%' }} onClick={handleResetGame}>
+                ZURÜCK ZUR LOBBY / NEUE RUNDE
+              </button>
+            </div>
+          );
+        }
         const winners = room.couples.filter(c => c.status === 'alive');
         const killersWon = winners.some(c => c.role === 'killer');
         const killerCouple = room.couples.find(c => c.role === 'killer');
