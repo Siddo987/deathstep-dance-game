@@ -41,9 +41,17 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
   );
 
   const playerNameTag = me ? (
-    <div style={{ position: 'absolute', top: '15px', left: '15px', color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left' }}>
+    <div style={{ position: 'absolute', top: '15px', left: '15px', color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left', zIndex: 5 }}>
       <strong>{me.name}</strong><br/>
       <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>{me.danceRole.toUpperCase()}</span>
+      {myCouple && myCouple.playerIds && myCouple.playerIds.length > 1 && (
+        <div style={{ marginTop: '4px', fontSize: '0.85rem', color: 'var(--neon-blue)' }}>
+          w/ {myCouple.playerIds.filter(id => id !== clientId).map(id => room.players.find(p => p.id === id)?.name).filter(Boolean).join(' & ')}
+        </div>
+      )}
+      <div style={{ marginTop: '4px', fontSize: '0.75rem', opacity: 0.5, letterSpacing: '1px' }}>
+        ROOM: {room.id}
+      </div>
     </div>
   ) : null;
 
@@ -150,6 +158,20 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
   }
 
   if (room.status === 'ended') {
+    if (room.endReason === 'aborted') {
+      return (
+        <div className="cyber-card" style={{ textAlign: 'center', position: 'relative', paddingTop: '40px' }}>
+          {playerNameTag}
+          {leaveButton}
+          <h2 className="glitch-text" style={{ color: 'var(--text-muted)', fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px', textShadow: 'none' }}>
+            SPIEL ABGEBROCHEN
+          </h2>
+          <h3 style={{ color: 'var(--text-muted)' }}>
+            Das Spiel wurde vorzeitig durch den GM beendet.
+          </h3>
+        </div>
+      );
+    }
     const winners = room.couples.filter(c => c.status === 'alive');
     const killersWon = winners.some(c => c.role === 'killer');
     const killerCouple = room.couples.find(c => c.role === 'killer');
@@ -271,6 +293,30 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       
       {(room.status === 'role_reveal' || room.status === 'dancing' || room.status === 'kill_reveal') && (
         <div style={{ marginTop: '20px' }}>
+          {room.status === 'role_reveal' && me?.danceRole === room.votingRole && (
+            <div style={{ marginBottom: '30px', padding: '15px', border: '1px solid var(--neon-purple)', borderRadius: '10px', background: 'rgba(0,0,0,0.3)' }}>
+              <h3 style={{ color: 'var(--text-main)', marginBottom: '15px', fontSize: '1rem' }}>Wessen Handy wird zur Abstimmung genutzt?</h3>
+              <div style={{ display: 'flex', gap: '10px' }}>
+                <button 
+                  className={`cyber-button ${(!myCouple.votingPlayerId || myCouple.votingPlayerId === clientId) ? 'pulse-animation' : ''}`}
+                  style={{ flex: 1, opacity: (!myCouple.votingPlayerId || myCouple.votingPlayerId === clientId) ? 1 : 0.5, padding: '10px', fontSize: '0.9rem' }}
+                  onClick={() => socket.emit('delegateVote', { roomId: room.id, coupleId: myCouple.id, votingPlayerId: clientId })}
+                >
+                  Mein Handy
+                </button>
+                <button 
+                  className={`cyber-button ${(myCouple.votingPlayerId && myCouple.votingPlayerId !== clientId) ? 'pulse-animation' : ''}`}
+                  style={{ flex: 1, opacity: (myCouple.votingPlayerId && myCouple.votingPlayerId !== clientId) ? 1 : 0.5, padding: '10px', fontSize: '0.9rem' }}
+                  onClick={() => {
+                    const partnerId = myCouple.playerIds.find(id => id !== clientId);
+                    socket.emit('delegateVote', { roomId: room.id, coupleId: myCouple.id, votingPlayerId: partnerId });
+                  }}
+                >
+                  Handy des Partners
+                </button>
+              </div>
+            </div>
+          )}
           <button 
             className="cyber-button pulse-animation" 
             onMouseDown={() => {
@@ -322,7 +368,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
           {!canVote ? (
             <div style={{ padding: '30px', borderRadius: '12px', border: '1px solid var(--text-muted)' }}>
               <h3 style={{ color: 'var(--text-muted)' }}>PARTNER IS VOTING</h3>
-              <p style={{ marginTop: '10px' }}>In this game, the <strong>{room.votingRole.toUpperCase()}</strong> casts the vote for the couple.</p>
+              <p style={{ marginTop: '10px' }}>
+                Based on the selection made at the beginning of the round, your partner is casting the vote for your couple on their device.
+              </p>
             </div>
           ) : !hasVoted ? (
             <>
