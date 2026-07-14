@@ -1,20 +1,45 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
 import { ConfirmModal } from './Modal.jsx';
 import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify } from '../spotify.js';
+import { getCookieConsent } from './CookieBanner.jsx';
+import coupleIcon from './couple_icon.png';
+import {
+  MessageCircle, Crown, X, PhoneOff, Repeat, Scissors, AlertTriangle, Lightbulb,
+  Music2, Skull, Sparkles, EyeOff, Eye, Check, Plus, Minus, LogOut, Flag,
+  Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone
+} from 'lucide-react';
 
-function GMDashboard({ room, onLeave }) {
+function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMessage }) {
+  const spotifyAllowed = getCookieConsent()?.spotify === true;
+
   const [pendingCouples, setPendingCouples] = useState([]);
-  const [currentGroup, setCurrentGroup] = useState([]); 
-  
+  const [currentGroup, setCurrentGroup] = useState([]);
+
   // State for the randomizer dialog flow
   const [randomizerFlow, setRandomizerFlow] = useState(null);
   const [showMenu, setShowMenu] = useState(false);
+  const [showCouplesModal, setShowCouplesModal] = useState(false);
+  const [showTeamModal, setShowTeamModal] = useState(false);
+  const [showChatModal, setShowChatModal] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const [seenChatCount, setSeenChatCount] = useState(0);
   const [confirmState, setConfirmState] = useState(null);
-  
-  // Spotify State
+  const [privacyMode, setPrivacyMode] = useState(() => {
+    return localStorage.getItem('deathstep_privacy_mode') === 'true';
+  });
+
+  const PRIVACY_MASK = '**********';
+  const maskName = (name) => (privacyMode && name) ? PRIVACY_MASK : name;
+  const maskCombinedName = (combinedName) => {
+    if (!combinedName || !privacyMode) return combinedName;
+    return combinedName.split(' & ').map(() => PRIVACY_MASK).join(' & ');
+  };
+
+  // Spotify State - the whole feature is unavailable unless consented to in the cookie banner
   const [useSpotify, setUseSpotify] = useState(() => {
-    return localStorage.getItem('deathstep_use_spotify') === 'true';
+    return spotifyAllowed && localStorage.getItem('deathstep_use_spotify') === 'true';
   });
   const [spotifyToken, setSpotifyToken] = useState(null);
   const [spotifyPlayerId, setSpotifyPlayerId] = useState(null);
@@ -36,6 +61,50 @@ function GMDashboard({ room, onLeave }) {
   const [bypassRoleView, setBypassRoleView] = useState(false);
   const [bypassPaired, setBypassPaired] = useState(false);
 
+  // Manual (phoneless) player form
+  const [manualPlayerName, setManualPlayerName] = useState('');
+  const [manualDanceRole, setManualDanceRole] = useState('lead');
+  const [manualIsFlexible, setManualIsFlexible] = useState(false);
+
+  // Killer setting
+  const [killerCount, setKillerCount] = useState(() => room.couples?.length >= 9 ? 2 : 1);
+
+  // GM vote-on-behalf selections during voting phase, keyed by voting couple's id
+  const [gmVoteSelections, setGmVoteSelections] = useState({});
+
+  // Voting countdown, shown to the GM purely as an informational hint (it never
+  // gates any GM action - the GM can always execute a vote regardless of timer).
+  const gmServerOffsetRef = React.useRef(0);
+  React.useEffect(() => {
+    if (room.serverTime) {
+      gmServerOffsetRef.current = room.serverTime - Date.now();
+    }
+  }, [room.serverTime]);
+
+  const [gmVotingTimeLeft, setGmVotingTimeLeft] = useState(0);
+  React.useEffect(() => {
+    if (room.status === 'voting' && room.votingEndTime) {
+      const updateTimer = () => {
+        const estimatedServerTime = Date.now() + gmServerOffsetRef.current;
+        setGmVotingTimeLeft(Math.max(0, Math.ceil((room.votingEndTime - estimatedServerTime) / 1000)));
+      };
+      updateTimer();
+      const interval = setInterval(updateTimer, 1000);
+      return () => clearInterval(interval);
+    } else {
+      setGmVotingTimeLeft(0);
+    }
+  }, [room.status, room.votingEndTime]);
+
+  const isSpotifyReady = !useSpotify || (selectedTrack && spotifyPlayer);
+
+  // Update default killer count when couples array changes
+  React.useEffect(() => {
+    if (room.status === 'lobby') {
+      setKillerCount(room.couples?.length >= 9 ? 2 : 1);
+    }
+  }, [room.couples?.length, room.status]);
+
   React.useEffect(() => {
     if (room.status !== 'paired') setBypassPaired(false);
     if (room.status !== 'role_reveal') setBypassRoleView(false);
@@ -44,6 +113,35 @@ function GMDashboard({ room, onLeave }) {
   React.useEffect(() => {
     localStorage.setItem('deathstep_use_spotify', useSpotify);
   }, [useSpotify]);
+
+  React.useEffect(() => {
+    if (!spotifyAllowed && useSpotify) {
+      setUseSpotify(false);
+    }
+  }, [spotifyAllowed]);
+
+  React.useEffect(() => {
+    localStorage.setItem('deathstep_privacy_mode', privacyMode);
+  }, [privacyMode]);
+
+  const chatEndRef = React.useRef(null);
+  React.useEffect(() => {
+    if (showChatModal) {
+      chatEndRef.current?.scrollIntoView({ block: 'end' });
+      // While the chat is open, everything (including messages that arrive live) counts as seen.
+      setSeenChatCount(gmChatMessages.length);
+    }
+  }, [showChatModal, gmChatMessages]);
+
+  // Never notify for the GM's own messages, and never while the chat is already open.
+  const unreadChatCount = showChatModal ? 0 : gmChatMessages.slice(seenChatCount).filter(m => m.senderName !== myGmName).length;
+
+  // Ensure music is paused if we leave the dancing phase
+  React.useEffect(() => {
+    if (room.status !== 'dancing' && spotifyPlayer) {
+      spotifyPlayer.pause().catch(e => console.error("Auto-pause failed", e));
+    }
+  }, [room.status, spotifyPlayer]);
 
   React.useEffect(() => {
     if (selectedTrack) {
@@ -93,6 +191,17 @@ function GMDashboard({ room, onLeave }) {
     }
   }, []);
 
+  // Only fetch Spotify's SDK from their CDN once the GM has actually opted
+  // into the Spotify integration - never load third-party scripts by default.
+  React.useEffect(() => {
+    if (!useSpotify) return;
+    if (document.getElementById('spotify-sdk-script')) return;
+    const script = document.createElement('script');
+    script.id = 'spotify-sdk-script';
+    script.src = 'https://sdk.scdn.co/spotify-player.js';
+    document.body.appendChild(script);
+  }, [useSpotify]);
+
   React.useEffect(() => {
     if (!spotifyToken) return;
 
@@ -120,7 +229,7 @@ function GMDashboard({ room, onLeave }) {
               const newPosition = pb.position + elapsed;
               playTrack(pb.uri, device_id, newPosition).catch(e => console.error(e));
             }
-          } catch(e) {}
+          } catch (e) { }
         }
       });
 
@@ -162,7 +271,11 @@ function GMDashboard({ room, onLeave }) {
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id });
+    socket.emit('startGame', { roomId: room.id, killerCount });
+  };
+
+  const handleRejoinResponse = (requestId, accept) => {
+    socket.emit('respondToRejoinRequest', { roomId: room.id, requestId, accept });
   };
 
   const handleReportKill = (victimCoupleId) => {
@@ -257,6 +370,7 @@ function GMDashboard({ room, onLeave }) {
         setPendingCouples([]);
         setCurrentGroup([]);
         setRandomizerFlow(null);
+        setPrivacyMode(false);
       }
     });
   };
@@ -277,11 +391,52 @@ function GMDashboard({ room, onLeave }) {
     socket.emit('updatePlayerRole', { roomId: room.id, clientId, newRole });
   };
 
+  const handleAddManualPlayer = () => {
+    const name = manualPlayerName.trim();
+    if (!name) return;
+    socket.emit('addManualPlayer', { roomId: room.id, playerName: name, danceRole: manualDanceRole, isFlexible: manualIsFlexible }, (response) => {
+      if (response.success) {
+        setManualPlayerName('');
+        setManualIsFlexible(false);
+      } else {
+        alert(response.message || 'Konnte Spieler nicht hinzufügen.');
+      }
+    });
+  };
+
   const handleKickPlayer = (clientId) => {
     setConfirmState({
       message: 'Diesen Spieler endgültig aus dem Raum entfernen?',
       onConfirm: () => socket.emit('kickPlayer', { roomId: room.id, clientId })
     });
+  };
+
+  const handleKickCouple = (coupleId, coupleName) => {
+    setConfirmState({
+      message: `Paar "${maskName(coupleName)}" endgültig aus dem Spiel werfen? Beide Partner werden entfernt.`,
+      onConfirm: () => socket.emit('kickCouple', { roomId: room.id, coupleId })
+    });
+  };
+
+  const handlePromoteToGM = (playerId, playerName) => {
+    setConfirmState({
+      message: `"${maskName(playerName)}" zum Spielleiter (GM) befördern? Diese Person erhält vollen Zugriff auf das GM-Dashboard und wird, falls bereits verpaart, aus ihrem Paar entfernt (der Partner fliegt dann ebenfalls raus).`,
+      onConfirm: () => socket.emit('promoteToGM', { roomId: room.id, playerId })
+    });
+  };
+
+  const handleRemoveCoGM = (gmId, gmName) => {
+    setConfirmState({
+      message: `"${maskName(gmName)}" die GM-Rechte entziehen?`,
+      onConfirm: () => socket.emit('removeCoGM', { roomId: room.id, gmId })
+    });
+  };
+
+  const handleSendChat = () => {
+    const text = chatInput.trim();
+    if (!text) return;
+    onSendGMChatMessage(text);
+    setChatInput('');
   };
 
   const handleDissolvePendingCouple = (index) => {
@@ -294,6 +449,29 @@ function GMDashboard({ room, onLeave }) {
     socket.emit('setVotingRole', { roomId: room.id, role: e.target.value });
   };
 
+  const handleGmConfirmCouple = (coupleId) => {
+    socket.emit('gmConfirmCouple', { roomId: room.id, coupleId });
+  };
+
+  const handleGmMarkCoupleRoleViewed = (coupleId) => {
+    socket.emit('gmMarkCoupleRoleViewed', { roomId: room.id, coupleId });
+  };
+
+  const handleGmCastVote = (voterCoupleId, suspectCoupleId) => {
+    socket.emit('gmCastVote', { roomId: room.id, coupleId: voterCoupleId, suspectId: suspectCoupleId });
+  };
+
+  const handleGmDelegateVote = (coupleId, votingPlayerId) => {
+    socket.emit('delegateVote', { roomId: room.id, coupleId, votingPlayerId });
+  };
+
+  const isCoupleFullyPhoneless = (couple) => couple.playerIds.every(id => {
+    const player = room.players.find(p => p.id === id);
+    return player && player.hasNoPhone;
+  });
+
+  const getCoupleMembers = (couple) => couple.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+
   // --- Pairing Logic ---
 
   const getUnpairedPlayers = () => {
@@ -301,21 +479,38 @@ function GMDashboard({ room, onLeave }) {
     return room.players.filter(p => !pairedIds.includes(p.id));
   };
 
+  const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  const hasPhone = (p) => !p.hasNoPhone;
+
   const executePairing = (leads, follows, makeThreesomes) => {
     const newCouples = [...pendingCouples];
     let spectatorsToUpdate = [];
-    
+
     // Determine how many base 1-to-1 couples we can form
     const baseCouplesCount = Math.min(leads.length, follows.length);
-    
-    // Form base 1-to-1 couples first
+
+    // Form base 1-to-1 couples first. Players without a phone are matched with a
+    // phone-having partner from the other role whenever one is still available,
+    // so a couple never ends up with nobody able to use the app.
     for (let i = 0; i < baseCouplesCount; i++) {
-      const lIndex = Math.floor(Math.random() * leads.length);
-      const fIndex = Math.floor(Math.random() * follows.length);
-      
-      const l = leads.splice(lIndex, 1)[0];
-      const f = follows.splice(fIndex, 1)[0];
-      
+      const noPhoneLeads = leads.filter(p => !hasPhone(p));
+      const noPhoneFollows = follows.filter(p => !hasPhone(p));
+
+      let l, f;
+      if (noPhoneLeads.length > 0 && follows.some(hasPhone)) {
+        l = pickRandom(noPhoneLeads);
+        f = pickRandom(follows.filter(hasPhone));
+      } else if (noPhoneFollows.length > 0 && leads.some(hasPhone)) {
+        f = pickRandom(noPhoneFollows);
+        l = pickRandom(leads.filter(hasPhone));
+      } else {
+        l = pickRandom(leads);
+        f = pickRandom(follows);
+      }
+
+      leads.splice(leads.indexOf(l), 1);
+      follows.splice(follows.indexOf(f), 1);
+
       newCouples.push({
         name: `${l.name} & ${f.name}`,
         playerIds: [l.id, f.id]
@@ -324,22 +519,46 @@ function GMDashboard({ room, onLeave }) {
 
     if (makeThreesomes) {
       const remainingPlayers = [...leads, ...follows]; // One of these is empty
+      const coupleHasPhone = (c) => c.playerIds.some(id => {
+        const player = room.players.find(pl => pl.id === id);
+        return player && hasPhone(player);
+      });
+
       while (remainingPlayers.length > 0) {
         const pIndex = Math.floor(Math.random() * remainingPlayers.length);
         const p = remainingPlayers.splice(pIndex, 1)[0];
-        
+
         // Find couples that currently have exactly 2 players (to avoid 4-person groups)
         const availableCouples = newCouples.filter(c => c.playerIds.length === 2);
-        
+
         if (availableCouples.length > 0) {
-           const cIndex = Math.floor(Math.random() * availableCouples.length);
-           availableCouples[cIndex].name += ` & ${p.name}`;
-           availableCouples[cIndex].playerIds.push(p.id);
+          // Prefer fixing a phoneless base couple with a phone-having 3rd person,
+          // and avoid adding a phoneless 3rd person to an already-phoneless couple.
+          let candidates = availableCouples;
+          if (hasPhone(p)) {
+            const withoutPhone = availableCouples.filter(c => !coupleHasPhone(c));
+            if (withoutPhone.length > 0) candidates = withoutPhone;
+          } else {
+            const withPhone = availableCouples.filter(c => coupleHasPhone(c));
+            if (withPhone.length > 0) candidates = withPhone;
+          }
+
+          const chosen = pickRandom(candidates);
+          chosen.name += ` & ${p.name}`;
+          chosen.playerIds.push(p.id);
         } else {
-           // Fallback if no 2-person couples left (should be blocked by UI check)
-           spectatorsToUpdate.push(p);
+          // Fallback if no 2-person couples left (should be blocked by UI check)
+          spectatorsToUpdate.push(p);
         }
       }
+    }
+
+    const phonelessCouples = newCouples.filter(c => !c.playerIds.some(id => {
+      const player = room.players.find(pl => pl.id === id);
+      return player && hasPhone(player);
+    }));
+    if (phonelessCouples.length > 0) {
+      alert(`Achtung: ${phonelessCouples.length} Paar(e) haben kein Handy dabei (${phonelessCouples.map(c => maskName(c.name)).join(', ')})! Bitte manuell nachbessern, z.B. über "Clear Pairs" und eine andere Rollenverteilung.`);
     }
 
     setPendingCouples(newCouples);
@@ -367,10 +586,10 @@ function GMDashboard({ room, onLeave }) {
       let excessGroup = isLeadExcess ? leads : follows;
       let missingGroup = isLeadExcess ? follows : leads;
       const missingRole = isLeadExcess ? 'follow' : 'lead';
-      
+
       const flexibleExcess = excessGroup.filter(p => p.isFlexible);
       let swapsDone = 0;
-      
+
       // Calculate how many swaps are strictly needed to avoid 4-person couples
       // Math.max(0, Math.ceil((excessCount - baseCouplesCount) / 3))
       // But we actually want to reach perfect balance if we can (excessCount == 0 or 1).
@@ -379,23 +598,23 @@ function GMDashboard({ room, onLeave }) {
 
       while (flexibleExcess.length > 0 && swapsDone < optimalSwaps) {
         const flexPlayer = flexibleExcess.pop();
-        
+
         // Remove from excess group
         const idx = excessGroup.findIndex(p => p.id === flexPlayer.id);
         excessGroup.splice(idx, 1);
-        
+
         // Update role
         flexPlayer.danceRole = missingRole;
         missingGroup.push(flexPlayer);
         socket.emit('updatePlayerRole', { roomId: room.id, clientId: flexPlayer.id, newRole: missingRole });
-        
+
         swapsDone++;
       }
 
       // Re-assign leads and follows after auto-swaps
       leads = isLeadExcess ? excessGroup : missingGroup;
       follows = isLeadExcess ? missingGroup : excessGroup;
-      
+
       // Recalculate imbalance
       excessCount = Math.abs(leads.length - follows.length);
       baseCouplesCount = Math.min(leads.length, follows.length);
@@ -417,16 +636,16 @@ function GMDashboard({ room, onLeave }) {
   };
 
   const handlePlayerActionChange = (playerId, action) => {
-    setRandomizerFlow({ 
-      ...randomizerFlow, 
-      playerActions: { ...randomizerFlow.playerActions, [playerId]: action } 
+    setRandomizerFlow({
+      ...randomizerFlow,
+      playerActions: { ...randomizerFlow.playerActions, [playerId]: action }
     });
   };
 
   const executeMixedSelection = () => {
     let leads = [...randomizerFlow.leads];
     let follows = [...randomizerFlow.follows];
-    
+
     const actions = randomizerFlow.playerActions || {};
     const selectedSwitch = Object.keys(actions).filter(id => actions[id] === 'switch');
     const selectedSpectator = Object.keys(actions).filter(id => actions[id] === 'spectator');
@@ -440,7 +659,7 @@ function GMDashboard({ room, onLeave }) {
       alert(`Deine Auswahl reicht noch nicht aus! Es müssen noch mehr Spieler die Rolle wechseln oder zuschauen, um 4er-Paare zu verhindern.`);
       return;
     }
-    
+
     const targetRole = randomizerFlow.excessType === 'lead' ? 'follow' : 'lead';
 
     selectedSwitch.forEach(id => {
@@ -461,7 +680,7 @@ function GMDashboard({ room, onLeave }) {
       switched.forEach(p => p.danceRole = 'lead');
       leads.push(...switched);
     }
-    
+
     setRandomizerFlow(null);
     executePairing(leads, follows, true);
   };
@@ -480,6 +699,21 @@ function GMDashboard({ room, onLeave }) {
       alert("Es können maximal 3er-Gruppen gebildet werden!");
       return;
     }
+
+    const selectedPlayers = currentGroup.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+    const hasLead = selectedPlayers.some(p => p.danceRole === 'lead');
+    const hasFollow = selectedPlayers.some(p => p.danceRole === 'follow');
+
+    if (!hasLead || !hasFollow) {
+      alert("Eine Gruppe muss mindestens einen Lead und einen Follow enthalten!");
+      return;
+    }
+
+    if (!selectedPlayers.some(hasPhone)) {
+      alert("Eine Gruppe braucht mindestens eine Person mit Handy!");
+      return;
+    }
+
     const names = currentGroup.map(id => room.players.find(p => p.id === id)?.name).join(' & ');
     setPendingCouples([
       ...pendingCouples,
@@ -497,12 +731,12 @@ function GMDashboard({ room, onLeave }) {
 
   const handleReleasePairs = () => {
     if (pendingCouples.length === 0) return alert("No couples to release!");
-    
+
     if (pendingCouples.length <= 2) {
       alert("Du brauchst mindestens 3 Paare, um das Spiel zu spielen! Bitte erstelle mehr Paare.");
       return;
     }
-    
+
     if (pendingCouples.length === 3) {
       setConfirmState({
         message: 'Achtung: Das Spiel macht spieltechnisch eigentlich erst ab 4 Paaren richtig Sinn. Willst du diese 3 Paare wirklich freigeben?',
@@ -515,7 +749,7 @@ function GMDashboard({ room, onLeave }) {
   };
 
   // --- Helper views ---
-  
+
   const getVoteCount = (suspectCoupleId) => {
     if (!room.votes) return 0;
     return Object.values(room.votes).filter(id => id === suspectCoupleId).length;
@@ -528,14 +762,14 @@ function GMDashboard({ room, onLeave }) {
     const topCouples = voteCounts.filter(v => v.votes === maxVotes && maxVotes > 0);
 
     const message = suspectCoupleId === null
-      ? (topCouples.length === 1 
-          ? `WARNUNG: Es gibt einen klaren Mehrheits-Vote für "${aliveCouples.find(c => c.id === topCouples[0].id)?.name}" (${maxVotes} Votes). Willst du den Vote ignorieren und niemanden kicken?`
-          : 'Niemanden kicken und nächste Runde starten?')
+      ? (topCouples.length === 1
+        ? `WARNUNG: Es gibt einen klaren Mehrheits-Vote für "${maskName(aliveCouples.find(c => c.id === topCouples[0].id)?.name)}" (${maxVotes} Votes). Willst du den Vote ignorieren und niemanden kicken?`
+        : 'Niemanden kicken und nächste Runde starten?')
       : (getVoteCount(suspectCoupleId) < maxVotes || maxVotes === 0
-          ? `WARNUNG: Dieses Paar hat NICHT die meisten Votes (${getVoteCount(suspectCoupleId)} vs ${maxVotes}). Willst du dich über die Abstimmung hinwegsetzen und sie kicken?`
-          : (topCouples.length > 1
-              ? `HINWEIS: Es gibt einen Gleichstand mit ${maxVotes} Votes. Du als GM brichst jetzt den Gleichstand, indem du dieses Paar kickst. Fortfahren?`
-              : 'Dieses Paar (mit den meisten Votes) kicken?'));
+        ? `WARNUNG: Dieses Paar hat NICHT die meisten Votes (${getVoteCount(suspectCoupleId)} vs ${maxVotes}). Willst du dich über die Abstimmung hinwegsetzen und sie kicken?`
+        : (topCouples.length > 1
+          ? `HINWEIS: Es gibt einen Gleichstand mit ${maxVotes} Votes. Du als GM brichst jetzt den Gleichstand, indem du dieses Paar kickst. Fortfahren?`
+          : 'Dieses Paar (mit den meisten Votes) kicken?'));
 
     setConfirmState({
       message,
@@ -547,7 +781,7 @@ function GMDashboard({ room, onLeave }) {
 
   const renderTruncatedNames = (combinedName) => {
     if (!combinedName) return null;
-    const names = combinedName.split(' & ');
+    const names = maskCombinedName(combinedName).split(' & ');
     return (
       <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flex: 1, gap: '5px' }}>
         {names.map((n, idx) => (
@@ -560,33 +794,48 @@ function GMDashboard({ room, onLeave }) {
     );
   };
 
+  // Members stacked vertically, each with a phone/no-phone icon - used anywhere
+  // the GM needs to see phone status per person, not just the couple as a whole.
+  const renderMembersWithPhoneIcons = (couple, { dimmed = false, bold = false } = {}) => (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', minWidth: 0, flex: 1 }}>
+      {getCoupleMembers(couple).map(m => (
+        <span key={m.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: dimmed ? 'var(--text-muted)' : 'white', fontWeight: bold ? 'bold' : 'normal' }}>
+          {maskName(m.name)}
+          {m.hasNoPhone
+            ? <PhoneOff size={13} className="icon-inline" title="Kein Handy" style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+            : <Smartphone size={13} className="icon-inline" title="Hat ein Handy" style={{ color: 'var(--neon-blue)', flexShrink: 0 }} />}
+        </span>
+      ))}
+    </div>
+  );
+
   const renderSpotifyControls = (hideIfConnected = false, isModal = false) => {
     if (!useSpotify) return null;
     if (hideIfConnected && spotifyToken) return null;
     if (!isModal && selectedTrack) return null;
-    
+
     return (
-      <div style={{ marginBottom: '20px', padding: '15px', background: 'rgba(29, 185, 84, 0.1)', border: '1px solid #1db954', borderRadius: '8px' }}>
-        <h3 style={{ color: '#1db954', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+      <div className="panel panel--success">
+        <h3 style={{ color: 'var(--neon-green)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>
           <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-            <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.84.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.38 4.26-1.26 11.28-1.02 15.72 1.621.539.3.719 1.02.419 1.56-.299.54-1.02.72-1.559.42z"/>
+            <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.84.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.38 4.26-1.26 11.28-1.02 15.72 1.621.539.3.719 1.02.419 1.56-.299.54-1.02.72-1.559.42z" />
           </svg>
           Spotify Integration
         </h3>
-        
+
         {!spotifyToken ? (
-          <button className="cyber-button" style={{ background: '#1db954', color: 'black' }} onClick={loginWithSpotify}>
+          <button className="cyber-button" style={{ background: 'var(--neon-green)', color: 'black' }} onClick={loginWithSpotify}>
             CONNECT SPOTIFY PREMIUM
           </button>
         ) : (
           <div>
             <div style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
               <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '5px' }}>
-                <strong style={{ color: spotifyPlayerId ? '#1db954' : 'var(--neon-red)' }}>{playerStatus}</strong>
+                <strong style={{ color: spotifyPlayerId ? 'var(--neon-green)' : 'var(--neon-red)' }}>{playerStatus}</strong>
                 {playerStatus.includes('Error') && (
-                  <button 
-                    className="cyber-button" 
-                    style={{ padding: '4px 8px', fontSize: '0.7rem', background: '#1db954', color: 'black', minWidth: 'auto', margin: 0 }}
+                  <button
+                    className="cyber-button"
+                    style={{ padding: '4px 8px', fontSize: '0.7rem', background: 'var(--neon-green)', color: 'black', minWidth: 'auto', margin: 0 }}
                     onClick={loginWithSpotify}
                   >
                     RETRY AUTH
@@ -595,32 +844,35 @@ function GMDashboard({ room, onLeave }) {
               </div>
               Select a track to play automatically when the dance starts!
             </div>
-            
+
             <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-              <input 
-                type="text" 
-                className="cyber-input" 
-                style={{ marginBottom: 0, flex: 1 }} 
-                placeholder="Search for a song..." 
+              <input
+                type="text"
+                className="cyber-input"
+                style={{ marginBottom: 0, flex: 1 }}
+                placeholder="Search for a song..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
-              <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px' }}>Search</button>
+              <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Search size={16} className="icon-inline" /> Search
+              </button>
             </form>
 
             {searchResults.length > 0 && (
               <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
                 {searchResults.map(track => (
-                  <div key={track.id} 
-                    onClick={() => { 
-                      setSelectedTrack(track); 
-                      setSearchResults([]); 
-                      setSearchQuery(''); 
+                  <div key={track.id}
+                    onClick={() => {
+                      setSelectedTrack(track);
+                      setSearchResults([]);
+                      setSearchQuery('');
                       if (room.status === 'dancing' && spotifyPlayerId) {
                         playTrack(track.uri, spotifyPlayerId).catch(console.error);
                       }
                     }}
-                    style={{ padding: '10px', background: 'rgba(0,0,0,0.5)', border: '1px solid var(--neon-purple)', borderRadius: '5px', display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}
+                    className="list-item list-item--purple"
+                    style={{ cursor: 'pointer' }}
                   >
                     <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
@@ -633,17 +885,17 @@ function GMDashboard({ room, onLeave }) {
             )}
 
             {selectedTrack && (
-              <div style={{ padding: '10px', background: 'rgba(29, 185, 84, 0.2)', border: '1px solid #1db954', borderRadius: '5px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
                 <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: '0.8rem', color: '#1db954', textTransform: 'uppercase', fontWeight: 'bold' }}>SELECTED TRACK</div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>SELECTED TRACK</div>
                   <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
                 </div>
-                <button 
-                  style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '1.2rem' }}
+                <button
+                  className="icon-btn"
                   onClick={() => setSelectedTrack(null)}
                 >
-                  ✖
+                  <X size={18} />
                 </button>
               </div>
             )}
@@ -663,18 +915,18 @@ function GMDashboard({ room, onLeave }) {
           <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white', fontWeight: 'bold' }}>{selectedTrack.name}</div>
           <div style={{ fontSize: '0.8rem', color: '#1db954' }}>NOW PLAYING</div>
         </div>
-        <button 
+        <button
           disabled={!spotifyPlayer}
-          style={{ 
-            width: '50px', 
-            height: '50px', 
-            borderRadius: '50%', 
-            padding: 0, 
-            display: 'flex', 
-            justifyContent: 'center', 
-            alignItems: 'center', 
-            background: spotifyPlayer ? '#1db954' : 'gray', 
-            color: 'black', 
+          style={{
+            width: '50px',
+            height: '50px',
+            borderRadius: '50%',
+            padding: 0,
+            display: 'flex',
+            justifyContent: 'center',
+            alignItems: 'center',
+            background: spotifyPlayer ? '#1db954' : 'gray',
+            color: 'black',
             border: 'none',
             cursor: spotifyPlayer ? 'pointer' : 'not-allowed',
             boxShadow: isPlaying ? '0 0 15px #1db954' : 'none',
@@ -698,9 +950,9 @@ function GMDashboard({ room, onLeave }) {
           }}
         >
           {isPlaying ? (
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" /></svg>
           ) : (
-            <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg viewBox="0 0 24 24" width="28" height="28" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
           )}
         </button>
       </div>
@@ -709,32 +961,61 @@ function GMDashboard({ room, onLeave }) {
 
   return (
     <div className="cyber-card" style={{ position: 'relative' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', marginTop: '20px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '20px', marginTop: '20px' }}>
         <h2 style={{ color: 'var(--neon-purple)', margin: 0 }}>GM DASHBOARD</h2>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
           <div style={{ background: 'rgba(0,240,255,0.1)', padding: '5px 10px', borderRadius: '5px', border: '1px solid var(--neon-blue)' }}>
             <span style={{ color: 'var(--text-muted)' }}>BALLROOM CODE:</span>{' '}
             <strong style={{ color: 'var(--neon-blue)', fontSize: '1.2rem', letterSpacing: '2px' }}>{room.id}</strong>
           </div>
-          
+
+          {privacyMode && (
+            <div className="badge badge--red" title="Namen sind aktuell verborgen">
+              <EyeOff size={14} className="icon-inline" /> PRIVACY MODE
+            </div>
+          )}
+
           {/* 3-Dot Menu Container */}
           <div style={{ position: 'relative', zIndex: 100 }} ref={menuRef}>
             <div style={{ display: 'flex', gap: '10px' }}>
               {selectedTrack && room.status !== 'dancing' && (
-                <button 
-                  className="kebab-menu-btn pulse-animation" 
+                <button
+                  className="kebab-menu-btn pulse-animation"
                   onClick={() => setShowSpotifyModal(true)}
                   title="Change Spotify Track"
-                  style={{ color: '#1db954' }}
+                  style={{ color: 'var(--neon-green)' }}
                 >
                   <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
-                    <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.84.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.38 4.26-1.26 11.28-1.02 15.72 1.621.539.3.719 1.02.419 1.56-.299.54-1.02.72-1.559.42z"/>
+                    <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.84.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.38 4.26-1.26 11.28-1.02 15.72 1.621.539.3.719 1.02.419 1.56-.299.54-1.02.72-1.559.42z" />
                   </svg>
                 </button>
               )}
-              <button 
+              {room.status !== 'lobby' && (
+                <button
+                  className="kebab-menu-btn"
+                  onClick={() => setShowCouplesModal(true)}
+                  title="View Couples"
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                >
+                  <img src={coupleIcon} alt="Couples" style={{ width: '24px', height: '24px' }} />
+                </button>
+              )}
+              <button
                 className="kebab-menu-btn"
-                onClick={() => setShowMenu(!showMenu)} 
+                onClick={() => setShowChatModal(true)}
+                title="GM Chat"
+                style={{ position: 'relative' }}
+              >
+                <MessageCircle size={20} />
+                {unreadChatCount > 0 && (
+                  <span className="count-badge">
+                    {unreadChatCount}
+                  </span>
+                )}
+              </button>
+              <button
+                className="kebab-menu-btn"
+                onClick={() => setShowMenu(!showMenu)}
                 title="Menu"
               >
                 <div className="kebab-dot"></div>
@@ -744,19 +1025,32 @@ function GMDashboard({ room, onLeave }) {
             </div>
             {showMenu && (
               <div className="dropdown-menu">
+                <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowTeamModal(true); setShowMenu(false); }}>
+                  <Crown size={16} className="icon-inline" /> GM-Team verwalten
+                </button>
+                <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setPrivacyMode(!privacyMode); setShowMenu(false); }}>
+                  {privacyMode ? <Eye size={16} className="icon-inline" /> : <EyeOff size={16} className="icon-inline" />}
+                  {privacyMode ? 'Privacy-Modus deaktivieren' : 'Privacy-Modus aktivieren'}
+                </button>
                 {room.status !== 'lobby' && (
-                  <button className="dropdown-item danger" onClick={() => { setShowMenu(false); handleEndGame(); }}>
-                    End Game Immediately
+                  <button className="dropdown-item danger" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowMenu(false); handleEndGame(); }}>
+                    <Flag size={16} className="icon-inline" /> End Game Immediately
                   </button>
                 )}
-                <button className="dropdown-item danger" onClick={() => { 
-                  setShowMenu(false); 
-                  setConfirmState({ message: 'Close the ballroom? This will kick all players.', onConfirm: () => {
-                    localStorage.removeItem('deathstep_selected_track');
-                    onLeave();
-                  }});
+                <button className="dropdown-item danger" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => {
+                  setShowMenu(false);
+                  setConfirmState({
+                    message: 'Close the ballroom? This will kick all players.', onConfirm: () => {
+                      localStorage.removeItem('deathstep_selected_track');
+                      if (spotifyPlayer) {
+                        spotifyPlayer.pause().catch(e => console.error("Failed to pause on exit", e));
+                      }
+                      setPrivacyMode(false);
+                      onLeave();
+                    }
+                  });
                 }}>
-                  Close Ballroom
+                  <LogOut size={16} className="icon-inline" /> Close Ballroom
                 </button>
               </div>
             )}
@@ -764,38 +1058,96 @@ function GMDashboard({ room, onLeave }) {
         </div>
       </div>
 
-      <div style={{ marginBottom: '20px', padding: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '5px' }}>
+      <div className="panel" style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 20px' }}>
         <p>Status: <strong style={{ textTransform: 'uppercase', color: (room.status === 'dancing' || room.status === 'role_reveal') ? 'var(--neon-blue)' : 'var(--neon-purple)' }}>{room.status.replace('_', ' ')}</strong></p>
         {room.round > 0 && <p>Round: <strong>{room.round}</strong></p>}
       </div>
 
+      {/* PENDING REJOIN REQUESTS */}
+      {room.pendingRejoinRequests?.length > 0 && (
+        <div className="panel panel--danger">
+          <div className="panel-title" style={{ color: 'var(--neon-red)' }}>
+            <AlertTriangle size={16} className="icon-inline" /> Wiedereinstieg beantragt
+          </div>
+          {room.pendingRejoinRequests.map(req => (
+            <div key={req.id} className="list-item" style={{ marginBottom: '10px' }}>
+              <span style={{ color: 'white' }}><strong>{maskName(req.playerName)}</strong> möchte wieder einsteigen</span>
+              <div className="btn-row" style={{ flexShrink: 0 }}>
+                <button className="cyber-button" style={{ padding: '5px 15px' }} onClick={() => handleRejoinResponse(req.id, true)}>Annehmen</button>
+                <button className="cyber-button" style={{ padding: '5px 15px', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={() => handleRejoinResponse(req.id, false)}>Ablehnen</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* LOBBY PHASE */}
       {room.status === 'lobby' && (
-        <div style={{ marginBottom: '20px' }}>
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
-            <button className="cyber-button" style={{ flex: 1, background: !useSpotify ? 'var(--neon-purple)' : 'transparent', color: !useSpotify ? 'black' : 'var(--neon-purple)' }} onClick={() => setUseSpotify(false)}>
-              Use Own Audio System
-            </button>
-            <button className="cyber-button" style={{ flex: 1, background: useSpotify ? '#1db954' : 'transparent', color: useSpotify ? 'black' : '#1db954', borderColor: '#1db954' }} onClick={() => setUseSpotify(true)}>
-              Use Spotify Integration
-            </button>
+        <div className="phase-enter" style={{ marginBottom: '20px' }}>
+          <div className="segmented-control" style={{ marginBottom: '20px' }}>
+            {spotifyAllowed ? (
+              <>
+                <button className={`segmented-option accent-purple ${!useSpotify ? 'is-active' : ''}`} onClick={() => setUseSpotify(false)}>
+                  Use Own Audio System
+                </button>
+                <button className={`segmented-option accent-green ${useSpotify ? 'is-active' : ''}`} onClick={() => setUseSpotify(true)}>
+                  Use Spotify Integration
+                </button>
+              </>
+            ) : (
+              <button className="segmented-option accent-purple is-active" style={{ cursor: 'default' }}>
+                Use Own Audio System
+              </button>
+            )}
           </div>
-          
+
           {renderSpotifyControls(true)}
 
           <div style={{ textAlign: 'center', marginBottom: '20px' }}>
-            <div style={{ background: 'white', padding: '10px', display: 'inline-block', borderRadius: '10px', marginBottom: '15px' }}>
-              <img 
-                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(window.location.origin + '/?room=' + room.id)}`} 
-                alt="QR Code" 
-                style={{ display: 'block' }} 
+            <div className="qr-frame">
+              <img
+                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(window.location.origin + '/?room=' + room.id)}`}
+                alt="QR Code"
+                style={{ display: 'block' }}
               />
             </div>
           </div>
 
           <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px' }}>Players ({room.players.length})</h3>
-          
-          <div style={{ display: 'flex', gap: '10px', marginBottom: '20px' }}>
+
+          <div className="panel">
+            <p style={{ color: 'var(--text-muted)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <PhoneOff size={16} className="icon-inline" />
+              <span><strong style={{ color: 'var(--text-main)' }}>Spieler ohne Handy hinzufügen:</strong> Wird automatisch mit einem Partner mit Handy gepaart.</span>
+            </p>
+            <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+              <input
+                type="text"
+                className="cyber-input"
+                placeholder="NAME"
+                value={manualPlayerName}
+                onChange={(e) => setManualPlayerName(e.target.value)}
+                style={{ flex: '1 1 150px', margin: 0 }}
+              />
+              <select
+                className="cyber-select"
+                value={manualDanceRole}
+                onChange={(e) => setManualDanceRole(e.target.value)}
+              >
+                <option value="lead">Lead</option>
+                <option value="follow">Follow</option>
+              </select>
+              <label className="check-row" style={{ fontSize: '0.9rem', whiteSpace: 'nowrap' }}>
+                <input type="checkbox" checked={manualIsFlexible} onChange={(e) => setManualIsFlexible(e.target.checked)} />
+                <span style={{ color: 'white' }}>flexibel</span>
+              </label>
+              <button className="cyber-button" onClick={handleAddManualPlayer} disabled={!manualPlayerName.trim()} style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <UserPlus size={16} className="icon-inline" /> Hinzufügen
+              </button>
+            </div>
+          </div>
+
+          <div className="btn-row" style={{ marginBottom: '20px' }}>
             <button className="cyber-button pulse-animation" onClick={handleRandomPairsClick} style={{ flex: 1 }}>
               Random Pairs
             </button>
@@ -805,246 +1157,260 @@ function GMDashboard({ room, onLeave }) {
           </div>
 
           {/* RANDOMIZER FLOW MODAL */}
-          {randomizerFlow && (
-            <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.85)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-              <div className="cyber-card" style={{ maxWidth: '600px', width: '90%', margin: '0 20px', border: '1px solid var(--neon-blue)', position: 'relative', maxHeight: '90vh', overflowY: 'auto' }}>
-                <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>⚠️ Rollen-Verteilung ungleich!</h3>
-              
-              {randomizerFlow.step === 'mixed_selection' && (() => {
-                const actions = randomizerFlow.playerActions || {};
-                const selectedSwitchCount = Object.keys(actions).filter(id => actions[id] === 'switch').length;
-                const selectedSpectatorCount = Object.keys(actions).filter(id => actions[id] === 'spectator').length;
+          {randomizerFlow && createPortal(
+            <div className="modal-overlay">
+              <div className="modal-card cyber-card" style={{ maxWidth: '600px', border: '1px solid var(--neon-blue)' }}>
+                <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <AlertTriangle size={20} className="icon-inline" /> Rollen-Verteilung ungleich!
+                </h3>
 
-                const effectiveExcess = randomizerFlow.excessCount - (2 * selectedSwitchCount) - selectedSpectatorCount;
-                const effectiveBase = randomizerFlow.baseCouplesCount + selectedSwitchCount;
+                {randomizerFlow.step === 'mixed_selection' && (() => {
+                  const actions = randomizerFlow.playerActions || {};
+                  const selectedSwitchCount = Object.keys(actions).filter(id => actions[id] === 'switch').length;
+                  const selectedSpectatorCount = Object.keys(actions).filter(id => actions[id] === 'spectator').length;
 
-                const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
-                const originalMinSwitchNeeded = Math.max(0, Math.ceil((randomizerFlow.excessCount - randomizerFlow.baseCouplesCount) / 3));
-                
-                const isSelectionValid = currentMinSwitchNeeded === 0;
+                  const effectiveExcess = randomizerFlow.excessCount - (2 * selectedSwitchCount) - selectedSpectatorCount;
+                  const effectiveBase = randomizerFlow.baseCouplesCount + selectedSwitchCount;
 
-                const excessRoleName = randomizerFlow.excessType === 'lead' ? 'Leads' : 'Follows';
-                const missingRoleName = randomizerFlow.excessType === 'lead' ? 'Follows' : 'Leads';
+                  const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
+                  const originalMinSwitchNeeded = Math.max(0, Math.ceil((randomizerFlow.excessCount - randomizerFlow.baseCouplesCount) / 3));
 
-                const renderSkipAllowedText = () => {
-                  if (randomizerFlow.excessCount === 1) {
-                    return (
-                      <p style={{ margin: 0, color: 'white' }}>
-                        Wir haben 1 {excessRoleName} zu viel. Du kannst diesen {excessRoleName} entweder einem Paar als 3. Person zuteilen lassen, oder unten auswählen, ob wer stattdessen zuschauen soll.
-                      </p>
-                    );
-                  } else if (randomizerFlow.excessCount % 2 === 0) {
-                    return (
-                      <p style={{ margin: 0, color: 'white' }}>
-                        Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Wenn du unten genau {randomizerFlow.excessCount / 2} Spieler auswählst, die ihre Rolle wechseln, geht es perfekt auf und es entstehen nur normale 2er-Paare!<br/>
-                        <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Alternativ kannst du auch Leute zuschauen lassen oder sie als 3. Person verteilen.</span>
-                      </p>
-                    );
-                  } else {
-                    return (
-                      <div style={{ margin: 0, color: 'white' }}>
-                        Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Das geht leider nicht perfekt in 2er-Paaren auf.<br/>
-                        <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Deine Optionen:</span>
-                        <ul style={{ margin: '5px 0 0 20px', padding: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                          <li><strong>Zuteilen:</strong> Mache einfach {randomizerFlow.excessCount} Paare zu 3er-Paaren.</li>
-                          <li><strong>Mischen:</strong> Lass Leute die Rolle wechseln UND teile den Rest als 3. Person auf.</li>
-                          <li><strong>Zuschauen:</strong> Lass 1 Person zuschauen und wechsle bei den restlichen die Rolle, für perfekte 2er-Paare.</li>
-                        </ul>
-                      </div>
-                    );
-                  }
-                };
+                  const isSelectionValid = currentMinSwitchNeeded === 0;
 
-                return (
-                  <div>
-                    {originalMinSwitchNeeded > 0 ? (
-                      <div style={{ padding: '15px', background: 'rgba(255,0,85,0.2)', border: '1px solid var(--neon-red)', borderRadius: '5px', marginBottom: '15px' }}>
-                        <p style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>
-                          Achtung: Wir haben <strong>{randomizerFlow.excessCount} {excessRoleName} zu viel!</strong> Das sind zu viele, um sie einfach als 3. Person zu verteilen (es würden 4er-Paare entstehen).
+                  const excessRoleName = randomizerFlow.excessType === 'lead' ? 'Leads' : 'Follows';
+                  const missingRoleName = randomizerFlow.excessType === 'lead' ? 'Follows' : 'Leads';
+
+                  const renderSkipAllowedText = () => {
+                    if (randomizerFlow.excessCount === 1) {
+                      return (
+                        <p style={{ margin: 0, color: 'white' }}>
+                          Wir haben 1 {excessRoleName} zu viel. Du kannst diesen {excessRoleName} entweder einem Paar als 3. Person zuteilen lassen, oder unten auswählen, ob wer stattdessen zuschauen soll.
                         </p>
-                        <p style={{ margin: '15px 0 10px 0', color: 'white' }}>
-                          Du musst ausgleichen. Du hast zwei Möglichkeiten:
+                      );
+                    } else if (randomizerFlow.excessCount % 2 === 0) {
+                      return (
+                        <p style={{ margin: 0, color: 'white' }}>
+                          Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Wenn du unten genau {randomizerFlow.excessCount / 2} Spieler auswählst, die ihre Rolle wechseln, geht es perfekt auf und es entstehen nur normale 2er-Paare!<br />
+                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Alternativ kannst du auch Leute zuschauen lassen oder sie als 3. Person verteilen.</span>
                         </p>
-                        <ul style={{ margin: '0 0 15px 20px', padding: 0, color: 'var(--text-muted)' }}>
-                          <li style={{ marginBottom: '5px' }}><strong style={{ color: 'var(--neon-blue)' }}>Rolle wechseln (Sehr effektiv!):</strong> 1 Wechsel löst das Problem für bis zu 3 Leute, da wir ein komplett neues Paar gewinnen!</li>
-                          <li><strong style={{ color: 'var(--neon-purple)' }}>Zuschauen lassen:</strong> Die Person pausiert in dieser Runde (löst das Problem für 1 Person).</li>
-                        </ul>
-                        <p style={{ margin: 0, color: 'var(--neon-red)', fontWeight: 'bold' }}>
-                          👉 Wähle unten Aktionen aus. Der 'Auswahl bestätigen'-Button wird automatisch grün, sobald das Gleichgewicht wiederhergestellt ist!
-                        </p>
-                        <div style={{ marginTop: '15px', padding: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', fontSize: '0.9rem', color: 'var(--text-muted)' }}>
-                          💡 <strong>Pro-Tipp für perfekte 2er-Paare:</strong> Damit es absolut perfekt aufgeht, müssten genau <strong>{Math.floor(randomizerFlow.excessCount / 2)} Personen</strong> die Rolle wechseln{randomizerFlow.excessCount % 2 !== 0 ? ' und 1 Person zuschauen' : ''}.
+                      );
+                    } else {
+                      return (
+                        <div style={{ margin: 0, color: 'white' }}>
+                          Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Das geht leider nicht perfekt in 2er-Paaren auf.<br />
+                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Deine Optionen:</span>
+                          <ul style={{ margin: '5px 0 0 20px', padding: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
+                            <li><strong>Zuteilen:</strong> Mache einfach {randomizerFlow.excessCount} Paare zu 3er-Paaren.</li>
+                            <li><strong>Mischen:</strong> Lass Leute die Rolle wechseln UND teile den Rest als 3. Person auf.</li>
+                            <li><strong>Zuschauen:</strong> Lass 1 Person zuschauen und wechsle bei den restlichen die Rolle, für perfekte 2er-Paare.</li>
+                          </ul>
                         </div>
-                      </div>
-                    ) : (
-                      <div style={{ padding: '15px', background: 'rgba(0,240,255,0.1)', border: '1px solid var(--neon-blue)', borderRadius: '5px', marginBottom: '15px' }}>
-                        {renderSkipAllowedText()}
-                      </div>
-                    )}
-                    
-                    <div className="couple-list" style={{ marginBottom: '15px' }}>
-                      {(randomizerFlow.excessType === 'lead' ? randomizerFlow.leads : randomizerFlow.follows).map(p => {
-                        const currentAction = actions[p.id] || 'none';
-                        return (
-                          <div key={p.id} 
-                               style={{ 
-                                 padding: '10px', 
-                                 border: currentAction !== 'none' ? '1px solid var(--neon-blue)' : '1px solid var(--text-muted)',
-                                 background: currentAction !== 'none' ? 'rgba(0,240,255,0.2)' : 'rgba(0,0,0,0.5)',
-                                 borderRadius: '5px',
-                                 display: 'flex',
-                                 alignItems: 'center',
-                                 justifyContent: 'space-between',
-                                 gap: '10px'
-                               }}>
-                            <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, fontWeight: currentAction !== 'none' ? 'bold' : 'normal' }}>
-                              {p.name}
-                            </span>
-                            <select 
-                              value={currentAction}
-                              onChange={(e) => handlePlayerActionChange(p.id, e.target.value)}
-                              style={{ 
-                                background: 'rgba(0,0,0,0.8)', color: 'white', 
-                                border: '1px solid var(--neon-blue)', borderRadius: '5px', 
-                                padding: '5px', outline: 'none', cursor: 'pointer',
-                                fontSize: '0.9rem'
-                              }}
-                            >
-                              <option value="none">Als 3. Person</option>
-                              <option value="switch">Wechsel zu {missingRoleName}</option>
-                              <option value="spectator">Zuschauen</option>
-                            </select>
+                      );
+                    }
+                  };
+
+                  return (
+                    <div>
+                      {originalMinSwitchNeeded > 0 ? (
+                        <div className="panel panel--danger">
+                          <p style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>
+                            Achtung: Wir haben <strong>{randomizerFlow.excessCount} {excessRoleName} zu viel!</strong> Das sind zu viele, um sie einfach als 3. Person zu verteilen (es würden 4er-Paare entstehen).
+                          </p>
+                          <p style={{ margin: '15px 0 10px 0', color: 'white' }}>
+                            Du musst ausgleichen. Du hast zwei Möglichkeiten:
+                          </p>
+                          <ul style={{ margin: '0 0 15px 20px', padding: 0, color: 'var(--text-muted)' }}>
+                            <li style={{ marginBottom: '5px' }}><strong style={{ color: 'var(--neon-blue)' }}>Rolle wechseln (Sehr effektiv!):</strong> 1 Wechsel löst das Problem für bis zu 3 Leute, da wir ein komplett neues Paar gewinnen!</li>
+                            <li><strong style={{ color: 'var(--neon-purple)' }}>Zuschauen lassen:</strong> Die Person pausiert in dieser Runde (löst das Problem für 1 Person).</li>
+                          </ul>
+                          <p style={{ margin: 0, color: 'var(--neon-red)', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <ChevronRight size={16} className="icon-inline" /> Wähle unten Aktionen aus. Der 'Auswahl bestätigen'-Button wird automatisch grün, sobald das Gleichgewicht wiederhergestellt ist!
+                          </p>
+                          <div style={{ marginTop: '15px', padding: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', fontSize: '0.9rem', color: 'var(--text-muted)', display: 'flex', gap: '8px' }}>
+                            <Lightbulb size={16} className="icon-inline" style={{ flexShrink: 0, marginTop: '2px' }} />
+                            <span><strong>Pro-Tipp für perfekte 2er-Paare:</strong> Damit es absolut perfekt aufgeht, müssten genau <strong>{Math.floor(randomizerFlow.excessCount / 2)} Personen</strong> die Rolle wechseln{randomizerFlow.excessCount % 2 !== 0 ? ' und 1 Person zuschauen' : ''}.</span>
                           </div>
-                        )
-                      })}
+                        </div>
+                      ) : (
+                        <div className="panel panel--info">
+                          {renderSkipAllowedText()}
+                        </div>
+                      )}
+
+                      <div className="couple-list" style={{ marginBottom: '15px' }}>
+                        {(randomizerFlow.excessType === 'lead' ? randomizerFlow.leads : randomizerFlow.follows).map(p => {
+                          const currentAction = actions[p.id] || 'none';
+                          return (
+                            <div key={p.id} className={`list-item ${currentAction !== 'none' ? 'list-item--active' : ''}`}>
+                              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, fontWeight: currentAction !== 'none' ? 'bold' : 'normal' }}>
+                                {maskName(p.name)}
+                              </span>
+                              <select
+                                className="cyber-select"
+                                value={currentAction}
+                                onChange={(e) => handlePlayerActionChange(p.id, e.target.value)}
+                              >
+                                <option value="none">Als 3. Person</option>
+                                <option value="switch">Wechsel zu {missingRoleName}</option>
+                                <option value="spectator">Zuschauen</option>
+                              </select>
+                            </div>
+                          )
+                        })}
+                      </div>
+                      <div style={{ display: 'flex', gap: '10px', flexDirection: 'column' }}>
+                        <button
+                          className={isSelectionValid ? "cyber-button pulse-animation" : "cyber-button disabled"}
+                          onClick={() => executeMixedSelection()}
+                          style={{
+                            width: '100%',
+                            opacity: isSelectionValid ? 1 : 0.5,
+                            cursor: isSelectionValid ? 'pointer' : 'not-allowed',
+                            ...(isSelectionValid ? { background: 'rgba(29, 185, 84, 0.2)', border: '1px solid var(--neon-green)', color: 'var(--neon-green)' } : { border: '1px solid var(--text-muted)' })
+                          }}
+                          disabled={!isSelectionValid}
+                        >
+                          Auswahl bestätigen (Paare bilden)
+                        </button>
+                        <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ width: '100%' }}>Abbrechen</button>
+                      </div>
                     </div>
-                    <div style={{ display: 'flex', gap: '10px', flexDirection: 'column' }}>
-                      <button 
-                        className={isSelectionValid ? "cyber-button pulse-animation" : "cyber-button disabled"} 
-                        onClick={() => executeMixedSelection()} 
-                        style={{ 
-                          width: '100%', 
-                          opacity: isSelectionValid ? 1 : 0.5, 
-                          cursor: isSelectionValid ? 'pointer' : 'not-allowed',
-                          ...(isSelectionValid ? { background: 'rgba(29, 185, 84, 0.2)', border: '1px solid #1db954', color: '#1db954' } : { border: '1px solid var(--text-muted)' })
-                        }}
-                        disabled={!isSelectionValid}
-                      >
-                        Auswahl bestätigen (Paare bilden)
-                      </button>
-                      <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ width: '100%' }}>Abbrechen</button>
-                    </div>
-                  </div>
-                );
-              })()}
+                  );
+                })()}
               </div>
-            </div>
+            </div>,
+            document.body
           )}
 
-          <div style={{ display: 'flex', gap: '20px', marginBottom: '20px' }}>
-            <div style={{ flex: 1, minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', marginBottom: '20px' }}>
+            <div style={{ flex: '1 1 260px', minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
               <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Unpaired</h4>
               <div className="couple-list">
                 {getUnpairedPlayers().map(p => (
-                  <div key={p.id} style={{ 
-                    padding: '10px', background: 'rgba(0,0,0,0.5)', borderRadius: '5px', minWidth: 0,
-                    border: currentGroup.includes(p.id) ? '2px solid var(--neon-purple)' : '1px solid var(--text-muted)'
-                  }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
-                      <div 
-                        onClick={() => handleToggleCurrentGroup(p)} 
-                        style={{ 
-                          display: 'flex', alignItems: 'center', gap: '10px', flex: 1, 
-                          cursor: 'pointer', overflow: 'hidden' 
-                        }}
-                      >
-                        <div style={{ 
-                          width: '20px', height: '20px', borderRadius: '4px', 
-                          border: currentGroup.includes(p.id) ? '2px solid var(--neon-purple)' : '2px solid var(--text-muted)',
-                          background: currentGroup.includes(p.id) ? 'var(--neon-purple)' : 'transparent',
-                          display: 'flex', justifyContent: 'center', alignItems: 'center', flexShrink: 0
-                        }}>
-                          {currentGroup.includes(p.id) && <span style={{ color: 'black', fontSize: '14px', fontWeight: 'bold' }}>✓</span>}
-                        </div>
-                        <span style={{ 
-                          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', 
-                          color: currentGroup.includes(p.id) ? 'white' : 'var(--text-muted)' 
-                        }}>
-                          {p.name} {p.isFlexible && <span title="Flexible Role">🔄</span>}
-                        </span>
+                  <div key={p.id} className={`list-item ${currentGroup.includes(p.id) ? 'list-item--purple' : ''}`} style={{ flexWrap: 'wrap' }}>
+                    <div
+                      onClick={() => handleToggleCurrentGroup(p)}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: '10px', flex: '1 1 140px',
+                        cursor: 'pointer', overflow: 'hidden', minHeight: '32px'
+                      }}
+                    >
+                      <div style={{
+                        width: '22px', height: '22px', borderRadius: '4px',
+                        border: currentGroup.includes(p.id) ? '2px solid var(--neon-purple)' : '2px solid var(--text-muted)',
+                        background: currentGroup.includes(p.id) ? 'var(--neon-purple)' : 'transparent',
+                        display: 'flex', justifyContent: 'center', alignItems: 'center', flexShrink: 0
+                      }}>
+                        {currentGroup.includes(p.id) && <Check size={14} strokeWidth={3} style={{ color: 'black' }} />}
                       </div>
-                      <select 
-                        value={p.danceRole} 
+                      <span style={{
+                        display: 'flex', alignItems: 'center', gap: '6px',
+                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                        color: currentGroup.includes(p.id) ? 'white' : 'var(--text-muted)'
+                      }}>
+                        {maskName(p.name)}
+                        {p.isFlexible && <Repeat size={14} className="icon-inline" title="Flexible Role" />}
+                        {p.hasNoPhone && <PhoneOff size={14} className="icon-inline" title="Kein Handy" />}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0, marginLeft: 'auto' }}>
+                      <select
+                        className="cyber-select"
+                        value={p.danceRole}
                         onChange={(e) => handleChangeRole(p.id, e.target.value)}
-                        style={{ 
-                          background: 'rgba(0,0,0,0.8)', color: 'var(--neon-blue)', 
-                          border: '1px solid var(--neon-blue)', borderRadius: '5px', 
-                          padding: '5px 8px', outline: 'none', cursor: 'pointer', flexShrink: 0
-                        }}
+                        style={{ color: 'var(--neon-blue)', padding: '8px', minHeight: '40px', fontSize: '0.95rem' }}
                       >
                         <option value="lead">Lead</option>
                         <option value="follow">Follow</option>
                         <option value="spectator">Spectator</option>
                       </select>
-                      <button 
+                      <button
                         onClick={() => handleKickPlayer(p.id)}
-                        style={{ 
-                          background: 'transparent', border: 'none', color: 'var(--neon-red)', 
-                          cursor: 'pointer', fontSize: '1.2rem', padding: '0 5px' 
-                        }}
+                        className="icon-btn danger"
                         title="Kick Player"
                       >
-                        ✖
+                        <X size={18} />
                       </button>
                     </div>
                   </div>
                 ))}
               </div>
-              {currentGroup.length > 0 && (
-                <button 
-                  className={currentGroup.length > 3 ? "cyber-button disabled" : "cyber-button"} 
-                  style={{ 
-                    marginTop: '10px', 
-                    width: '100%', 
-                    borderColor: currentGroup.length > 3 ? 'var(--text-muted)' : 'var(--neon-purple)',
-                    opacity: currentGroup.length > 3 ? 0.5 : 1,
-                    cursor: currentGroup.length > 3 ? 'not-allowed' : 'pointer'
-                  }} 
-                  onClick={handleCreateManualCouple}
-                  disabled={currentGroup.length > 3}
-                >
-                  {currentGroup.length > 3 ? "Max. 3 Personen!" : `Create Group (${currentGroup.length})`}
-                </button>
-              )}
+              {currentGroup.length > 0 && (() => {
+                const selectedPlayers = currentGroup.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+                const hasLead = selectedPlayers.some(p => p.danceRole === 'lead');
+                const hasFollow = selectedPlayers.some(p => p.danceRole === 'follow');
+                const isTooLarge = currentGroup.length > 3;
+                const isInvalidRoleCombo = currentGroup.length > 1 && (!hasLead || !hasFollow);
+                const isDisabled = isTooLarge || isInvalidRoleCombo || currentGroup.length < 2;
+
+                let buttonText = `Create Group (${currentGroup.length})`;
+                if (isTooLarge) buttonText = "Max. 3 Personen!";
+                else if (isInvalidRoleCombo) buttonText = "Lead & Follow mischen!";
+
+                return (
+                  <button
+                    className={isDisabled ? "cyber-button disabled" : "cyber-button"}
+                    style={{
+                      marginTop: '10px',
+                      width: '100%',
+                      borderColor: isDisabled ? 'var(--text-muted)' : 'var(--neon-purple)',
+                      opacity: isDisabled ? 0.5 : 1,
+                      cursor: isDisabled ? 'not-allowed' : 'pointer'
+                    }}
+                    onClick={handleCreateManualCouple}
+                    disabled={isDisabled}
+                  >
+                    {buttonText}
+                  </button>
+                );
+              })()}
             </div>
 
-            <div style={{ flex: 1, minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
+            <div style={{ flex: '1 1 260px', minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
               <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Pending Couples</h4>
               <div className="couple-list">
-                {pendingCouples.map((c, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px', background: 'rgba(0,240,255,0.1)', border: '1px solid var(--neon-blue)', borderRadius: '5px', minWidth: 0 }}>
-                    {renderTruncatedNames(c.name)}
-                    <button 
-                      onClick={() => handleDissolvePendingCouple(i)}
-                      style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '1.2rem', marginLeft: '10px', flexShrink: 0 }}
-                      title="Paar auflösen"
-                    >
-                      ✂️
-                    </button>
-                  </div>
-                ))}
+                {pendingCouples.map((c, i) => {
+                  const members = c.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+                  const allNoPhone = members.length > 0 && members.every(p => p.hasNoPhone);
+                  return (
+                    <div key={i} className={`list-item ${allNoPhone ? 'list-item--danger' : 'list-item--active'}`}>
+                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', minWidth: 0, flex: 1, gap: '5px' }}>
+                        {members.map((p, idx) => (
+                          <React.Fragment key={p.id}>
+                            {idx > 0 && <span style={{ opacity: 0.5, flexShrink: 0 }}>&amp;</span>}
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
+                              {maskName(p.name)} {p.hasNoPhone && <PhoneOff size={13} className="icon-inline" title="Kein Handy" />}
+                            </span>
+                          </React.Fragment>
+                        ))}
+                        {allNoPhone && (
+                          <span style={{ color: 'var(--neon-red)', fontSize: '0.8rem', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                            <AlertTriangle size={13} className="icon-inline" /> Kein Handy im Paar!
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleDissolvePendingCouple(i)}
+                        className="icon-btn"
+                        title="Paar auflösen"
+                      >
+                        <Scissors size={18} />
+                      </button>
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
 
-          <div style={{ marginBottom: '20px', padding: '15px', border: '1px solid var(--text-muted)', borderRadius: '8px' }}>
-             <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-               <span style={{ color: 'var(--text-muted)' }}>Voting Right during game:</span>
-               <select value={room.votingRole} onChange={handleSetVotingRole} style={{ background: 'black', color: 'white', padding: '5px', border: '1px solid var(--neon-purple)' }}>
-                 <option value="lead">Leads only</option>
-                 <option value="follow">Follows only</option>
-               </select>
-             </label>
+          <div className="panel">
+            <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+              <span style={{ color: 'var(--text-muted)' }}>Voting Right during game:</span>
+              <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole}>
+                <option value="lead">Leads only</option>
+                <option value="follow">Follows only</option>
+              </select>
+            </label>
           </div>
 
           <button className="cyber-button pulse-animation" onClick={handleReleasePairs} disabled={pendingCouples.length === 0 || randomizerFlow} style={{ width: '100%' }}>
@@ -1060,22 +1426,62 @@ function GMDashboard({ room, onLeave }) {
         const canStart = allConfirmed || bypassPaired;
 
         return (
-          <div style={{ marginBottom: '20px' }}>
+          <div className="phase-enter" style={{ marginBottom: '20px' }}>
             {renderSpotifyControls()}
 
             <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>Waiting for Confirmations</h3>
             <div className="couple-list" style={{ marginBottom: '20px' }}>
-              {pairedPlayers.map(p => (
-                <div key={p.id} style={{ padding: '10px', border: p.isConfirmed ? '1px solid var(--neon-blue)' : '1px solid var(--neon-red)', borderRadius: '5px', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>{p.name} {p.isFlexible && <span title="Flexible Role">🔄</span>} ({p.danceRole})</span>
-                  <span style={{ color: p.isConfirmed ? 'var(--neon-blue)' : 'var(--neon-red)' }}>{p.isConfirmed ? 'Ready' : 'Waiting...'}</span>
-                </div>
-              ))}
+              {pairedPlayers.map(p => {
+                const couple = room.couples.find(c => c.playerIds.includes(p.id));
+                const needsGmConfirm = !p.isConfirmed && p.hasNoPhone && couple && isCoupleFullyPhoneless(couple);
+                return (
+                  <div key={p.id} className={`list-item ${p.isConfirmed ? 'list-item--active' : 'list-item--danger'}`}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      {maskName(p.name)}
+                      {p.isFlexible && <Repeat size={14} className="icon-inline" title="Flexible Role" />}
+                      {p.hasNoPhone
+                        ? <PhoneOff size={14} className="icon-inline" title="Kein Handy" style={{ color: 'var(--text-muted)' }} />
+                        : <Smartphone size={14} className="icon-inline" title="Hat ein Handy" style={{ color: 'var(--neon-blue)' }} />}
+                      ({p.danceRole})
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                      {needsGmConfirm && (
+                        <button
+                          className="cyber-button"
+                          style={{ width: 'auto', padding: '4px 10px', fontSize: '0.8rem', margin: 0 }}
+                          onClick={() => handleGmConfirmCouple(couple.id)}
+                        >
+                          Als bereit markieren (GM)
+                        </button>
+                      )}
+                      <span className={`badge ${p.isConfirmed ? 'badge--blue' : 'badge--red'}`}>{p.isConfirmed ? 'Ready' : 'Waiting...'}</span>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-            
-            <button 
-              className={canStart ? "cyber-button pulse-animation" : "cyber-button disabled"} 
-              onClick={handleStartGame} 
+
+            <div className="panel panel--purple">
+              <h4 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>GAME SETTINGS</h4>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                <label style={{ color: 'white', fontWeight: 'bold' }}>Number of Killers:</label>
+                <div className="stepper">
+                  <button className="stepper-btn" onClick={() => setKillerCount(Math.max(1, killerCount - 1))}><Minus size={18} /></button>
+                  <span className="stepper-value">{killerCount}</span>
+                  <button className="stepper-btn" onClick={() => setKillerCount(Math.min(Math.max(1, room.couples.length - 1), killerCount + 1))}><Plus size={18} /></button>
+                </div>
+              </div>
+              {room.couples.length >= 9 && killerCount < 2 && (
+                <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> Recommendation: With {room.couples.length} couples, at least 2 killers are recommended.</p>
+              )}
+              {room.couples.length < 9 && killerCount > 1 && (
+                <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> Recommendation: With {room.couples.length} couples, 1 killer is recommended.</p>
+              )}
+            </div>
+
+            <button
+              className={canStart ? "cyber-button pulse-animation" : "cyber-button disabled"}
+              onClick={handleStartGame}
               disabled={!canStart}
               style={{ width: '100%', opacity: canStart ? 1 : 0.5, cursor: canStart ? 'pointer' : 'not-allowed' }}
             >
@@ -1084,8 +1490,8 @@ function GMDashboard({ room, onLeave }) {
 
             {!allConfirmed && !bypassPaired && (
               <div style={{ textAlign: 'center' }}>
-                <button 
-                  onClick={() => setBypassPaired(true)} 
+                <button
+                  onClick={() => setBypassPaired(true)}
                   style={{ marginTop: '15px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
                 >
                   Bypass check and reveal anyway
@@ -1100,7 +1506,7 @@ function GMDashboard({ room, onLeave }) {
       {room.status === 'role_reveal' && (() => {
         const aliveCouples = room.couples.filter(c => c.status === 'alive');
         // Check if at least one player per couple has viewed their role
-        const allCouplesViewedRole = aliveCouples.length > 0 && aliveCouples.every(c => 
+        const allCouplesViewedRole = aliveCouples.length > 0 && aliveCouples.every(c =>
           c.playerIds.some(id => {
             const player = room.players.find(p => p.id === id);
             return player && player.hasViewedRole;
@@ -1110,15 +1516,15 @@ function GMDashboard({ room, onLeave }) {
         const canStart = (allCouplesViewedRole || bypassRoleView) && isSpotifyReady;
 
         return (
-          <div style={{ marginBottom: '20px' }}>
+          <div className="phase-enter" style={{ marginBottom: '20px' }}>
             {renderSpotifyControls()}
 
             <div style={{ textAlign: 'center' }}>
               <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>ROLES REVEALED</h3>
-              
+
               {!isSpotifyReady && (
-                <div style={{ padding: '10px', background: 'rgba(255,42,85,0.1)', border: '1px solid var(--neon-red)', borderRadius: '5px', marginBottom: '20px' }}>
-                  <strong style={{ color: 'var(--neon-red)' }}>⚠️ MUSIC NOT READY ⚠️</strong><br/>
+                <div className="panel panel--danger">
+                  <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> MUSIC NOT READY</strong><br />
                   <span style={{ color: 'white' }}>
                     {!selectedTrack ? 'Please select a song using the Spotify search above.' : 'Player is initializing... Please wait.'}
                   </span>
@@ -1130,47 +1536,62 @@ function GMDashboard({ room, onLeave }) {
                   Waiting for at least one player from each couple to view their role on their device...
                 </p>
               )}
-              
+
               {(allCouplesViewedRole || bypassRoleView) && isSpotifyReady && (
                 <p style={{ color: '#00ff66', marginBottom: '20px' }}>
                   All checks passed! You can start the Game now!
                 </p>
               )}
-              
+
               <div className="couple-list" style={{ marginBottom: '20px', textAlign: 'left' }}>
                 {aliveCouples.map(couple => {
                   const hasViewed = couple.playerIds.some(id => {
                     const player = room.players.find(p => p.id === id);
                     return player && player.hasViewedRole;
                   });
+                  const needsGmConfirm = !hasViewed && isCoupleFullyPhoneless(couple);
                   return (
-                    <div key={couple.id} style={{ padding: '10px', border: hasViewed ? '1px solid var(--neon-blue)' : '1px solid var(--neon-red)', borderRadius: '5px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <div style={{ flex: 1, minWidth: 0, marginRight: '10px' }}>
-                        {renderTruncatedNames(couple.name)}
+                    <div key={couple.id} className={`list-item ${hasViewed ? 'list-item--active' : 'list-item--danger'}`}>
+                      <div style={{ flex: 1, minWidth: 0, marginRight: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        {couple.role === 'killer' && (
+                          <Skull size={15} className="icon-inline" title="Killer" style={{ color: 'var(--neon-red)', flexShrink: 0 }} />
+                        )}
+                        {renderMembersWithPhoneIcons(couple)}
                       </div>
-                      <span style={{ color: hasViewed ? 'var(--neon-blue)' : 'var(--neon-red)', whiteSpace: 'nowrap' }}>
-                        {hasViewed ? 'Ready' : 'Waiting...'}
-                      </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                        {needsGmConfirm && (
+                          <button
+                            className="cyber-button"
+                            style={{ width: 'auto', padding: '4px 10px', fontSize: '0.8rem', margin: 0 }}
+                            onClick={() => handleGmMarkCoupleRoleViewed(couple.id)}
+                          >
+                            Als bereit markieren (GM)
+                          </button>
+                        )}
+                        <span className={`badge ${hasViewed ? 'badge--blue' : 'badge--red'}`}>
+                          {hasViewed ? 'Ready' : 'Waiting...'}
+                        </span>
+                      </div>
                     </div>
                   );
                 })}
               </div>
-              
-              <button 
-                className={canStart ? "cyber-button pulse-animation" : "cyber-button disabled"} 
-                onClick={handleStartDancing} 
+
+              <button
+                className={canStart ? "cyber-button pulse-animation" : "cyber-button disabled"}
+                onClick={handleStartDancing}
                 disabled={!canStart}
                 style={{ width: '100%', fontSize: '1.2rem', padding: '15px', opacity: canStart ? 1 : 0.5, cursor: canStart ? 'pointer' : 'not-allowed' }}
               >
-                {useSpotify 
+                {useSpotify
                   ? `START MUSIC & START DANCING`
                   : `START DANCING (ROUND ${room.round})`
                 }
               </button>
 
               {!allCouplesViewedRole && !bypassRoleView && (
-                <button 
-                  onClick={() => setBypassRoleView(true)} 
+                <button
+                  onClick={() => setBypassRoleView(true)}
                   style={{ marginTop: '15px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
                 >
                   Bypass check and start anyway
@@ -1184,26 +1605,31 @@ function GMDashboard({ room, onLeave }) {
       {/* DANCING PHASE */}
       {room.status === 'dancing' && (() => {
         const aliveCouplesToKill = aliveCouples.filter(c => c.role !== 'killer');
+        const aliveKillerCount = aliveCouples.filter(c => c.role === 'killer').length;
+        const markedCount = room.pendingVictimIds?.length || 0;
+        const limitReached = markedCount >= aliveKillerCount;
         return (
-          <div style={{ marginBottom: '20px' }}>
-            <div style={{ padding: '20px', background: 'rgba(0,240,255,0.1)', border: '2px solid var(--neon-blue)', borderRadius: '10px', marginBottom: '20px', animation: 'pulse 2s infinite' }}>
-              <h3 style={{ color: 'var(--neon-blue)', textAlign: 'center', margin: 0, letterSpacing: '2px', marginBottom: '15px' }}>🎵 DANCING IN PROGRESS 🎵</h3>
-              
+          <div className="phase-enter" style={{ marginBottom: '20px' }}>
+            <div className="panel panel--info" style={{ animation: 'pulse 2s infinite' }}>
+              <h3 style={{ color: 'var(--neon-blue)', textAlign: 'center', margin: 0, letterSpacing: '2px', marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                <Music2 size={20} className="icon-inline" /> DANCING IN PROGRESS <Music2 size={20} className="icon-inline" />
+              </h3>
+
               {useSpotify && selectedTrack && (
                 <div style={{ marginBottom: '15px' }}>
                   {!hasSongFinished ? (
-                    <div style={{ padding: '10px', background: 'rgba(29, 185, 84, 0.2)', border: '1px solid #1db954', borderRadius: '5px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
                       <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: '0.8rem', color: '#1db954', textTransform: 'uppercase', fontWeight: 'bold' }}>AKTUELLER SONG</div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>AKTUELLER SONG</div>
                         <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
                       </div>
-                      <button 
+                      <button
                         disabled={!spotifyPlayer}
-                        style={{ 
-                          width: '40px', height: '40px', borderRadius: '50%', padding: 0, 
-                          display: 'flex', justifyContent: 'center', alignItems: 'center', 
-                          background: spotifyPlayer ? '#1db954' : 'gray', color: 'black', border: 'none',
+                        style={{
+                          width: '40px', height: '40px', borderRadius: '50%', padding: 0,
+                          display: 'flex', justifyContent: 'center', alignItems: 'center',
+                          background: spotifyPlayer ? 'var(--neon-green)' : 'gray', color: 'black', border: 'none',
                           cursor: spotifyPlayer ? 'pointer' : 'not-allowed', flexShrink: 0
                         }}
                         onClick={async () => {
@@ -1221,58 +1647,65 @@ function GMDashboard({ room, onLeave }) {
                           }
                         }}
                       >
-                        {isPlaying ? (
-                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                        ) : (
-                          <svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-                        )}
+                        {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
                       </button>
                     </div>
                   ) : (
-                    <div style={{ padding: '10px', background: 'rgba(255, 0, 0, 0.2)', border: '1px solid var(--neon-red)', borderRadius: '5px', textAlign: 'center', color: 'var(--neon-red)', fontWeight: 'bold' }}>
+                    <div className="panel panel--danger" style={{ textAlign: 'center', color: 'var(--neon-red)', fontWeight: 'bold', marginBottom: 0 }}>
                       Das Lied ist vorbei!
                     </div>
                   )}
                 </div>
               )}
 
-              <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>Everyone is dancing! The killers can secretly eliminate one couple by touching them.</p>
+              <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>Everyone is dancing! Each killer couple can secretly eliminate one couple by touching them.</p>
             </div>
 
-            <div style={{ background: 'rgba(0,0,0,0.5)', padding: '20px', borderRadius: '10px', border: '1px solid var(--neon-purple)' }}>
+            <div className="panel panel--purple">
               <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>Observe the dance floor</h4>
               <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
                 Watch to see if any pair is touched/killed by the killers.
               </p>
               <p style={{ color: 'var(--text-muted)', marginBottom: '5px' }}>
-                <strong>Mark killed Pair:</strong>
+                <strong>Mark killed Pair:</strong> <span style={{ color: 'var(--neon-purple)' }}>({markedCount}/{aliveKillerCount} marked)</span>
               </p>
 
               <div className="couple-list" style={{ marginBottom: '20px' }}>
-                {aliveCouplesToKill.map(couple => (
-                  <button 
-                    key={couple.id} 
-                    className={`kill-option-btn ${room.pendingVictimId === couple.id ? 'selected' : ''}`}
-                    onClick={() => handleReportKill(couple.id)}
-                  >
-                    <span style={{ flexShrink: 0, minWidth: '100px', whiteSpace: 'nowrap' }}>
-                      {room.pendingVictimId === couple.id ? '✓ Marked:' : 'Kill:'}
-                    </span>
-                    {renderTruncatedNames(couple.name)}
-                  </button>
-                ))}
+                {aliveCouplesToKill.map(couple => {
+                  const isMarked = room.pendingVictimIds?.includes(couple.id);
+                  const disabled = !isMarked && limitReached;
+                  return (
+                    <button
+                      key={couple.id}
+                      className={`kill-option-btn ${isMarked ? 'selected' : ''}`}
+                      onClick={() => handleReportKill(couple.id)}
+                      disabled={disabled}
+                      style={disabled ? { opacity: 0.4, cursor: 'not-allowed' } : undefined}
+                    >
+                      <span style={{ flexShrink: 0, minWidth: '100px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        {isMarked ? <><Check size={14} className="icon-inline" /> Marked:</> : <><Skull size={14} className="icon-inline" /> Kill:</>}
+                      </span>
+                      {renderTruncatedNames(couple.name)}
+                    </button>
+                  );
+                })}
               </div>
-              <button 
-                className={`nobody-option-btn ${room.pendingVictimId === null ? 'selected' : ''}`}
+              {limitReached && aliveKillerCount > 0 && (
+                <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', margin: '-10px 0 15px 0', fontStyle: 'italic' }}>
+                  Limit reached: max. {aliveKillerCount} kill{aliveKillerCount > 1 ? 's' : ''} per round ({aliveKillerCount} surviving killer couple{aliveKillerCount > 1 ? 's' : ''}).
+                </p>
+              )}
+              <button
+                className={`nobody-option-btn ${!room.pendingVictimIds?.length ? 'selected' : ''}`}
                 onClick={() => handleReportKill(null)}
                 style={{ marginBottom: '20px' }}
               >
-                {room.pendingVictimId === null ? '✓ Marked: NOBODY KILLED' : 'NOBODY KILLED'}
+                {!room.pendingVictimIds?.length ? <><Check size={16} className="icon-inline" /> Marked: NOBODY KILLED</> : 'NOBODY KILLED (clear marks)'}
               </button>
 
-              <button 
-                className="cyber-button pulse-animation" 
-                style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }} 
+              <button
+                className="cyber-button pulse-animation"
+                style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
                 onClick={handleRevealKill}
               >
                 REVEAL KILL TO PLAYERS
@@ -1284,15 +1717,15 @@ function GMDashboard({ room, onLeave }) {
 
       {/* KILL REVEAL PHASE */}
       {room.status === 'kill_reveal' && (() => {
-        const victimCouple = room.victimId ? room.couples.find(c => c.id === room.victimId) : null;
+        const victimCouples = (room.victimIds || []).map(id => room.couples.find(c => c.id === id)).filter(Boolean);
         return (
-          <div style={{ marginBottom: '20px', textAlign: 'center' }}>
+          <div className="phase-enter" style={{ marginBottom: '20px', textAlign: 'center' }}>
             {renderSpotifyControls()}
             <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>KILL REVEALED</h3>
-            {victimCouple ? (
+            {victimCouples.length > 0 ? (
               <>
-                <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>
-                  💀 <strong>{victimCouple.name}</strong> were eliminated!
+                <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <Skull size={20} className="icon-inline" /> <strong>{victimCouples.map(c => maskName(c.name)).join(' & ')}</strong> were eliminated!
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
@@ -1305,12 +1738,17 @@ function GMDashboard({ room, onLeave }) {
               </>
             ) : (
               <>
-                <p style={{ color: 'var(--neon-blue)', fontSize: '1.2rem', marginBottom: '20px' }}>
-                  ✨ Nobody was eliminated!
+                <p style={{ color: 'var(--neon-blue)', fontSize: '1.2rem', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <Sparkles size={20} className="icon-inline" /> Nobody was eliminated!
                 </p>
-                <button className="cyber-button pulse-animation" onClick={handleStartDancing} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
-                  START NEXT DANCE ROUND
-                </button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
+                    PROCEED TO VOTING (SKIP DISCUSSION)
+                  </button>
+                  <button className="cyber-button" onClick={handleStartDiscussion} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
+                    START DISCUSSION PHASE
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -1319,9 +1757,9 @@ function GMDashboard({ room, onLeave }) {
 
       {/* DISCUSSION PHASE */}
       {room.status === 'discussion' && (
-        <div style={{ marginBottom: '20px' }}>
+        <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
-          <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>DISCUSSION PHASE</h3>
+          <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}><MessageCircle size={20} className="icon-inline" /> DISCUSSION PHASE</h3>
           <p style={{ color: 'var(--text-muted)', marginBottom: '30px' }}>The dancers can now discuss who the killers might be.</p>
           <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
             PROCEED TO VOTING
@@ -1331,29 +1769,92 @@ function GMDashboard({ room, onLeave }) {
 
       {/* VOTING PHASE */}
       {room.status === 'voting' && (
-        <div style={{ marginBottom: '20px' }}>
+        <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
           <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>VOTING PHASE</h3>
+          {room.votingEndTime && (
+            <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
+              <Timer size={14} className="icon-inline" />
+              {gmVotingTimeLeft > 0
+                ? `Hinweis: noch ca. ${gmVotingTimeLeft}s Abstimmzeit für die Spieler`
+                : 'Hinweis: Abstimmzeit für die Spieler ist abgelaufen'}
+            </p>
+          )}
+          {!isSpotifyReady && (
+            <div className="panel panel--danger" style={{ textAlign: 'center' }}>
+              <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> MUSIC NOT READY</strong><br />
+              <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>You must select a song before starting the next round.</span>
+            </div>
+          )}
           <div className="couple-list">
             {aliveCouples.map(couple => {
               const hasVoted = Object.keys(room.votes || {}).includes(couple.id);
+              const needsGmVote = !hasVoted && isCoupleFullyPhoneless(couple);
+              const suspectOptions = aliveCouples.filter(c => c.id !== couple.id);
+              const selectedSuspect = gmVoteSelections[couple.id] ?? '';
+              const votingPlayer = couple.votingPlayerId ? room.players.find(p => p.id === couple.votingPlayerId) : null;
               return (
-                <div key={couple.id} style={{ display: 'flex', flexDirection: 'column', gap: '5px', padding: '10px', border: '1px solid var(--neon-purple)', borderRadius: '8px', background: 'rgba(0,0,0,0.5)', minWidth: 0 }}>
+                <div key={couple.id} className="panel panel--purple" style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: 0, minWidth: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minWidth: 0 }}>
                     {renderTruncatedNames(couple.name)}
-                    <span style={{ color: hasVoted ? 'var(--neon-blue)' : 'var(--text-muted)', fontSize: '0.9rem', margin: '0 10px', flexShrink: 0 }}>
-                      {hasVoted ? '[✓ Voted]' : '[... Waiting]'}
+                    <span className={`badge ${hasVoted ? 'badge--blue' : 'badge--muted'}`} style={{ margin: '0 10px' }}>
+                      {hasVoted ? 'Voted' : 'Waiting'}
                     </span>
                     <strong style={{ color: 'var(--neon-purple)', flexShrink: 0 }}>{getVoteCount(couple.id)} Votes</strong>
                   </div>
-                  <button className="cyber-button danger" style={{ padding: '8px', fontSize: '0.9rem' }} onClick={() => handleExecuteVoteSafe(couple.id)}>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                    {votingPlayer
+                      ? <><Smartphone size={12} className="icon-inline" /> Stimmt ab: {maskName(votingPlayer.name)}</>
+                      : <><PhoneOff size={12} className="icon-inline" /> Niemand zugewiesen (kein Handy im Paar)</>}
+                  </div>
+                  {needsGmVote && (
+                    <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                      <select
+                        className="cyber-select"
+                        style={{ flex: '1 1 150px' }}
+                        value={selectedSuspect}
+                        onChange={(e) => setGmVoteSelections({ ...gmVoteSelections, [couple.id]: e.target.value })}
+                      >
+                        <option value="">Verdächtiges Paar wählen...</option>
+                        {suspectOptions.map(s => (
+                          <option key={s.id} value={s.id}>{maskName(s.name)}</option>
+                        ))}
+                      </select>
+                      <button
+                        className="cyber-button"
+                        style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, flex: '0 0 auto' }}
+                        disabled={!selectedSuspect}
+                        onClick={() => handleGmCastVote(couple.id, selectedSuspect)}
+                      >
+                        Für Paar abstimmen (GM)
+                      </button>
+                      <button
+                        className="cyber-button"
+                        style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', flex: '0 0 auto' }}
+                        onClick={() => handleGmCastVote(couple.id, null)}
+                      >
+                        Enthaltung (GM)
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    className={isSpotifyReady ? "cyber-button danger" : "cyber-button disabled"}
+                    style={{ padding: '8px', fontSize: '0.9rem', opacity: isSpotifyReady ? 1 : 0.5, cursor: isSpotifyReady ? 'pointer' : 'not-allowed' }}
+                    onClick={() => handleExecuteVoteSafe(couple.id)}
+                    disabled={!isSpotifyReady}
+                  >
                     KICK & NEXT ROUND
                   </button>
                 </div>
               );
             })}
           </div>
-          <button className="cyber-button" style={{ marginTop: '15px' }} onClick={() => handleExecuteVoteSafe(null)}>
+          <button
+            className={isSpotifyReady ? "cyber-button" : "cyber-button disabled"}
+            style={{ marginTop: '15px', opacity: isSpotifyReady ? 1 : 0.5, cursor: isSpotifyReady ? 'pointer' : 'not-allowed' }}
+            onClick={() => handleExecuteVoteSafe(null)}
+            disabled={!isSpotifyReady}
+          >
             TIE / KICK NOBODY (NEXT ROUND)
           </button>
         </div>
@@ -1362,7 +1863,7 @@ function GMDashboard({ room, onLeave }) {
       {room.status === 'ended' && (() => {
         if (room.endReason === 'aborted') {
           return (
-            <div style={{ marginTop: '30px', padding: '20px', background: 'rgba(255,255,255,0.1)', border: '2px solid var(--text-muted)', borderRadius: '10px', textAlign: 'center' }}>
+            <div className="panel phase-enter" style={{ marginTop: '30px', textAlign: 'center' }}>
               <h3 style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
                 SPIEL ABGEBROCHEN
               </h3>
@@ -1377,16 +1878,22 @@ function GMDashboard({ room, onLeave }) {
         }
         const winners = room.couples.filter(c => c.status === 'alive');
         const killersWon = winners.some(c => c.role === 'killer');
-        const killerCouple = room.couples.find(c => c.role === 'killer');
+        const killerCouples = room.couples.filter(c => c.role === 'killer');
         return (
-          <div style={{ marginTop: '30px', padding: '20px', background: killersWon ? 'rgba(255,0,85,0.1)' : 'rgba(0,240,255,0.1)', border: `2px solid ${killersWon ? 'var(--neon-red)' : 'var(--neon-blue)'}`, borderRadius: '10px', textAlign: 'center' }}>
-            <h3 style={{ color: killersWon ? 'var(--neon-red)' : 'var(--neon-blue)', marginBottom: '20px' }}>
+          <div className={`panel phase-enter ${killersWon ? 'panel--danger' : 'panel--info'}`} style={{ marginTop: '30px', textAlign: 'center' }}>
+            <h3 style={{ color: killersWon ? 'var(--neon-red)' : 'var(--neon-blue)', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+              {killersWon ? <Skull size={20} className="icon-inline" /> : <Sparkles size={20} className="icon-inline" />}
               {killersWon ? 'SIEG DER KILLER' : 'SIEG DER TÄNZER'}
             </h3>
-            {killerCouple && (
-              <p style={{ fontSize: '1.2rem', marginBottom: '15px', color: 'white' }}>
-                Killer: <strong style={{ color: 'var(--neon-red)' }}>{killerCouple.name}</strong>
-              </p>
+            {killerCouples.length > 0 && (
+              <div style={{ marginBottom: '15px' }}>
+                <p style={{ fontSize: '1.2rem', marginBottom: '5px', color: 'white' }}>
+                  {killerCouples.length > 1 ? 'Killers:' : 'Killer:'}
+                </p>
+                {killerCouples.map((k, i) => (
+                  <strong key={k.id} style={{ color: 'var(--neon-red)', display: 'block', fontSize: '1.1rem' }}>{maskName(k.name)}</strong>
+                ))}
+              </div>
             )}
             <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
               Das Spiel ist beendet.
@@ -1398,38 +1905,180 @@ function GMDashboard({ room, onLeave }) {
         );
       })()}
 
-      {/* ALWAYS SHOW ALL COUPLES/PLAYERS IF PAST LOBBY */}
-      {room.status !== 'lobby' && (
-        <div style={{ marginTop: '30px' }}>
-          <h3 style={{ marginBottom: '15px', color: 'var(--text-muted)' }}>ALL COUPLES ({room.couples.length})</h3>
-          <div className="couple-list">
-            {room.couples.map(couple => (
-              <div key={couple.id} style={{ 
-                padding: '15px', 
-                background: 'rgba(0,0,0,0.5)', 
-                border: `1px solid ${couple.status === 'eliminated' ? 'var(--neon-red)' : 'var(--neon-blue)'}`,
-                borderRadius: '8px',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                gap: '10px',
-                minWidth: 0
-              }}>
-                <strong style={{ fontSize: '1.1rem', color: couple.status === 'eliminated' ? 'var(--text-muted)' : 'white', display: 'flex', minWidth: 0, flex: 1 }} className={couple.status === 'eliminated' ? 'status-eliminated' : ''}>
-                  {renderTruncatedNames(couple.name)}
-                </strong>
-                {room.status !== 'lobby' && room.status !== 'paired' && (
-                  <span className={`role-${couple.role}`} style={{ fontSize: '0.8rem', textTransform: 'uppercase', flexShrink: 0 }}>
-                    {couple.role}
-                  </span>
-                )}
-              </div>
-            ))}
+      {showCouplesModal && createPortal(
+        <div className="modal-overlay" onClick={() => setShowCouplesModal(false)}>
+          <div className="modal-card cyber-card" style={{ maxWidth: '600px', border: '1px solid var(--neon-blue)', background: '#111' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setShowCouplesModal(false)}
+              className="icon-btn modal-close-btn"
+            >
+              <X size={20} />
+            </button>
+            <h3 style={{ marginBottom: '20px', color: 'var(--text-muted)' }}>ALL COUPLES ({room.couples.length})</h3>
+            <div className="couple-list">
+              {room.couples.map(couple => {
+                const members = getCoupleMembers(couple);
+                const phoneHavingMembers = members.filter(m => !m.hasNoPhone);
+                return (
+                  <div key={couple.id} className={`list-item ${couple.status === 'eliminated' ? 'list-item--danger' : 'list-item--active'}`} style={{ flexDirection: 'column', alignItems: 'stretch', gap: '10px', padding: '15px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0 }}>
+                      {renderMembersWithPhoneIcons(couple, { dimmed: couple.status === 'eliminated', bold: true })}
+                      {room.status !== 'lobby' && room.status !== 'paired' && (
+                        <span className={`role-${couple.role}`} style={{ fontSize: '0.8rem', textTransform: 'uppercase', flexShrink: 0 }}>
+                          {couple.role}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => handleKickCouple(couple.id, couple.name)}
+                        className="icon-btn danger"
+                        title="Paar aus dem Spiel werfen"
+                      >
+                        <X size={18} />
+                      </button>
+                    </div>
+                    {phoneHavingMembers.length > 1 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+                          <Smartphone size={13} className="icon-inline" /> Stimmt ab:
+                        </span>
+                        <select
+                          className="cyber-select"
+                          style={{ flex: '1 1 150px', margin: 0 }}
+                          value={couple.votingPlayerId || ''}
+                          onChange={(e) => handleGmDelegateVote(couple.id, e.target.value)}
+                        >
+                          {phoneHavingMembers.map(m => (
+                            <option key={m.id} value={m.id}>{maskName(m.name)}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
 
-      <ConfirmModal 
+      {showTeamModal && createPortal(
+        <div className="modal-overlay" onClick={() => setShowTeamModal(false)}>
+          <div className="modal-card cyber-card" style={{ maxWidth: '600px', border: '1px solid var(--neon-purple)', background: '#111' }} onClick={(e) => e.stopPropagation()}>
+            <button
+              onClick={() => setShowTeamModal(false)}
+              className="icon-btn modal-close-btn"
+            >
+              <X size={20} />
+            </button>
+            <h3 style={{ marginBottom: '20px', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <Crown size={20} className="icon-inline" /> GM-TEAM VERWALTEN
+            </h3>
+
+            <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Aktuelle Co-GMs ({room.coGms?.length || 0})</h4>
+            <div className="couple-list" style={{ marginBottom: '25px' }}>
+              {(room.coGms || []).length === 0 && (
+                <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Noch keine Co-GMs befördert.</p>
+              )}
+              {(room.coGms || []).map(gm => (
+                <div key={gm.id} className="list-item list-item--purple">
+                  <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Crown size={15} className="icon-inline" /> {maskName(gm.name)}</span>
+                  <button
+                    onClick={() => handleRemoveCoGM(gm.id, gm.name)}
+                    className="icon-btn danger"
+                    title="GM-Rechte entziehen"
+                  >
+                    <X size={18} />
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Spieler zum GM befördern</h4>
+            {room.status !== 'lobby' ? (
+              <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Beförderungen sind nur in der Lobby-Phase möglich.</p>
+            ) : (
+              <div className="couple-list">
+                {room.players.length === 0 && (
+                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Keine Spieler im Raum.</p>
+                )}
+                {room.players.map(p => (
+                  <div key={p.id} className="list-item">
+                    <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{maskName(p.name)}</span>
+                    {p.hasNoPhone ? (
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '4px' }} title="Kann nicht befördert werden, da kein Handy vorhanden ist">
+                        <PhoneOff size={13} className="icon-inline" /> kein Handy
+                      </span>
+                    ) : (
+                      <button
+                        className="cyber-button"
+                        style={{ padding: '10px 14px', minHeight: '40px', fontSize: '0.85rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '6px' }}
+                        onClick={() => handlePromoteToGM(p.id, p.name)}
+                      >
+                        <Crown size={14} className="icon-inline" /> {maskName(p.name)} befördern
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {showChatModal && createPortal(
+          <div className="modal-overlay" onClick={() => setShowChatModal(false)}>
+            <div className="modal-card cyber-card" style={{ maxWidth: '500px', height: '80dvh', border: '1px solid var(--neon-blue)', background: '#111', display: 'flex', flexDirection: 'column' }} onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => setShowChatModal(false)}
+                className="icon-btn modal-close-btn"
+              >
+                <X size={20} />
+              </button>
+              <h3 style={{ marginBottom: '15px', color: 'var(--neon-blue)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <MessageCircle size={20} className="icon-inline" /> GM CHAT
+              </h3>
+              <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', paddingRight: '5px' }}>
+                {gmChatMessages.length === 0 && (
+                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', textAlign: 'center', marginTop: '20px' }}>Noch keine Nachrichten. Schreib deinem Team!</p>
+                )}
+                {gmChatMessages.map(msg => {
+                  const isMine = msg.senderName === myGmName;
+                  return (
+                    <div key={msg.id} className={`chat-row ${isMine ? 'mine' : 'theirs'}`}>
+                      <div className="chat-sender">
+                        {isMine ? 'Du' : msg.senderName}
+                      </div>
+                      <div className="chat-bubble">
+                        {msg.text}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div ref={chatEndRef} />
+              </div>
+              <div style={{ display: 'flex', gap: '10px', marginTop: '15px' }}>
+                <input
+                  type="text"
+                  className="cyber-input"
+                  placeholder="Nachricht an dein GM-Team..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSendChat(); }}
+                  style={{ flex: 1, margin: 0 }}
+                  maxLength={500}
+                />
+                <button className="cyber-button" onClick={handleSendChat} disabled={!chatInput.trim()} style={{ width: 'auto', flexShrink: 0, padding: '0 20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Send size={16} className="icon-inline" /> Senden
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+      )}
+
+      <ConfirmModal
         isOpen={!!confirmState}
         message={confirmState?.message}
         onConfirm={() => {
@@ -1441,18 +2090,19 @@ function GMDashboard({ room, onLeave }) {
         onCancel={() => setConfirmState(null)}
       />
 
-      {showSpotifyModal && (
-        <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-          <div className="cyber-card" style={{ maxWidth: '600px', width: '90%', margin: '0 20px', border: '1px solid #1db954', position: 'relative' }}>
-            <button 
+      {showSpotifyModal && createPortal(
+        <div className="modal-overlay" onClick={() => setShowSpotifyModal(false)}>
+          <div className="modal-card cyber-card" style={{ maxWidth: '600px', border: '1px solid var(--neon-green)' }} onClick={(e) => e.stopPropagation()}>
+            <button
               onClick={() => setShowSpotifyModal(false)}
-              style={{ position: 'absolute', top: '15px', right: '15px', background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '1.5rem', cursor: 'pointer' }}
+              className="icon-btn modal-close-btn"
             >
-              ✖
+              <X size={20} />
             </button>
             {renderSpotifyControls(false, true)}
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
