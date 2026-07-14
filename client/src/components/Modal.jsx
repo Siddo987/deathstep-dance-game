@@ -1,13 +1,29 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { HelpCircle, CheckCircle2, AlertTriangle } from 'lucide-react';
+
+function useEscapeKey(isOpen, onEscape) {
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e) => { if (e.key === 'Escape') onEscape(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [isOpen, onEscape]);
+}
 
 export function ConfirmModal({ isOpen, message, onConfirm, onCancel }) {
+  useEscapeKey(isOpen, onCancel || (() => {}));
   if (!isOpen) return null;
   return createPortal(
-    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-      <div className="cyber-card pulse-animation" style={{ maxWidth: '400px', width: '90%', margin: '0 20px', border: '1px solid var(--neon-purple)', textAlign: 'center', animation: 'none' }}>
+    <div className="modal-overlay" onClick={onCancel}>
+      <div
+        className="modal-card cyber-card"
+        style={{ maxWidth: '400px', textAlign: 'center', border: '1px solid var(--neon-purple)' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <HelpCircle size={36} style={{ color: 'var(--neon-purple)', marginBottom: '15px' }} />
         <h3 style={{ color: 'var(--text-main)', marginBottom: '30px', fontSize: '1.2rem', lineHeight: '1.5' }}>{message}</h3>
-        <div style={{ display: 'flex', gap: '15px' }}>
+        <div className="btn-row">
           <button className="cyber-button" onClick={() => { onConfirm(); onCancel(); }} style={{ flex: 1, padding: '10px' }}>YES</button>
           <button className="cyber-button" onClick={onCancel} style={{ flex: 1, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', padding: '10px' }}>NO</button>
         </div>
@@ -18,16 +34,23 @@ export function ConfirmModal({ isOpen, message, onConfirm, onCancel }) {
 }
 
 export function AlertModal({ isOpen, message, onClose }) {
+  useEscapeKey(isOpen, onClose || (() => {}));
   if (!isOpen) return null;
   const isSuccess = message && (message.includes('successfully') || message.includes('Successfully'));
-  const borderColor = isSuccess ? '#1db954' : 'var(--neon-red)';
+  const accentColor = isSuccess ? 'var(--neon-green)' : 'var(--neon-red)';
   const boxShadowColor = isSuccess ? 'rgba(29, 185, 84, 0.3)' : 'rgba(255,42,85,0.3)';
   const btnClass = isSuccess ? 'cyber-button' : 'cyber-button danger';
-  const btnStyle = isSuccess ? { width: '100%', padding: '10px', background: '#1db954', color: 'black' } : { width: '100%', padding: '10px' };
+  const btnStyle = isSuccess ? { width: '100%', padding: '10px', background: 'var(--neon-green)', color: 'black' } : { width: '100%', padding: '10px' };
+  const Icon = isSuccess ? CheckCircle2 : AlertTriangle;
 
   return createPortal(
-    <div style={{ position: 'fixed', top: 0, left: 0, width: '100%', height: '100%', background: 'rgba(0,0,0,0.8)', zIndex: 9999, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
-      <div className="cyber-card" style={{ maxWidth: '400px', width: '90%', margin: '0 20px', border: `1px solid ${borderColor}`, textAlign: 'center', boxShadow: `0 0 20px ${boxShadowColor}` }}>
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-card cyber-card"
+        style={{ maxWidth: '400px', textAlign: 'center', border: `1px solid ${accentColor}`, boxShadow: `0 0 20px ${boxShadowColor}` }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Icon size={36} style={{ color: accentColor, marginBottom: '15px' }} />
         <h3 style={{ color: 'var(--text-main)', marginBottom: '30px', fontSize: '1.2rem', lineHeight: '1.5' }}>{message}</h3>
         <button className={btnClass} onClick={onClose} style={btnStyle}>OK</button>
       </div>
