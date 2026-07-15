@@ -5,7 +5,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
-import gameStore from './gameStore.js';
+import gameStore, { sanitizeRoomForGM, sanitizeRoomForPlayer } from './gameStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,6 +32,22 @@ function getGmSocketIds(room) {
   return [...new Set(ids)];
 }
 
+// Sends each socket in the room its own view of the state instead of one shared
+// broadcast - the GM gets everything, each player gets their own redacted copy
+// (see sanitizeRoomForPlayer) so secret data never reaches a socket that shouldn't have it.
+function broadcastRoom(room) {
+  const serverTime = Date.now();
+
+  getGmSocketIds(room).forEach(sid => {
+    io.to(sid).emit('roomUpdated', { ...sanitizeRoomForGM(room), serverTime });
+  });
+
+  room.players.forEach(p => {
+    if (!p.socketId) return;
+    io.to(p.socketId).emit('roomUpdated', { ...sanitizeRoomForPlayer(room, p.id), serverTime });
+  });
+}
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -39,7 +55,7 @@ io.on('connection', (socket) => {
     const room = gameStore.createRoom(socket.id);
     socket.join(room.id);
     console.log(`Room created: ${room.id} by GM: ${socket.id}`);
-    callback({ success: true, room, gmChatHistory: [] });
+    callback({ success: true, room: sanitizeRoomForGM(room), gmChatHistory: [] });
   });
 
   // User-facing messages are sent as messageKey (+ messageParams); the client
@@ -69,9 +85,9 @@ io.on('connection', (socket) => {
     }
 
     socket.join(roomId);
-    io.to(roomId).emit('roomUpdated', { ...updatedRoom, serverTime: Date.now() });
+    broadcastRoom(updatedRoom);
     console.log(`${playerName} joined/reconnected in room ${roomId}`);
-    callback({ success: true, room: updatedRoom });
+    callback({ success: true, room: sanitizeRoomForPlayer(updatedRoom, clientId) });
   });
 
   socket.on('addManualPlayer', ({ roomId, playerName, danceRole, isFlexible }, callback) => {
@@ -87,9 +103,9 @@ io.on('connection', (socket) => {
     }
 
     const updatedRoom = gameStore.addManualPlayer(roomId, playerName, danceRole, isFlexible);
-    io.to(roomId).emit('roomUpdated', { ...updatedRoom, serverTime: Date.now() });
+    broadcastRoom(updatedRoom);
     console.log(`GM manually added phoneless player "${playerName}" to room ${roomId}`);
-    callback({ success: true, room: updatedRoom });
+    callback({ success: true, room: sanitizeRoomForGM(updatedRoom) });
   });
 
   socket.on('reconnectToRoom', ({ roomId, clientId, isGM }, callback) => {
@@ -119,7 +135,8 @@ io.on('connection', (socket) => {
         room.gmId = socket.id; // Update main GM socket just in case
       }
     }
-    callback({ success: true, room, gmChatHistory: isGM ? gameStore.getGMChatHistory(roomId) : undefined });
+    const roomForCaller = isGM ? sanitizeRoomForGM(room) : sanitizeRoomForPlayer(room, clientId);
+    callback({ success: true, room: roomForCaller, gmChatHistory: isGM ? gameStore.getGMChatHistory(roomId) : undefined });
   });
 
   socket.on('leaveRoom', ({ roomId, clientId, isGM }) => {
@@ -129,7 +146,7 @@ io.on('connection', (socket) => {
       if (isCoGm) {
         const result = gameStore.removeCoGM(roomId, clientId);
         if (result?.room) {
-          io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+          broadcastRoom(result.room);
           console.log(`Co-GM ${clientId} left room ${roomId}`);
         }
         return;
@@ -155,13 +172,13 @@ io.on('connection', (socket) => {
             sock.emit('removedFromGame', { messageKey: 'partnerLeft', messageParams: { name: leavingPlayer?.name || '?' } });
           }
         });
-        io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+        broadcastRoom(result.room);
         console.log(`Player ${clientId} left room ${roomId} (couple removed)`);
       }
     } else {
       const updatedRoom = gameStore.removePlayer(roomId, clientId);
       if (updatedRoom) {
-        io.to(roomId).emit('roomUpdated', { ...updatedRoom, serverTime: Date.now() });
+        broadcastRoom(updatedRoom);
         console.log(`Player ${clientId} left room ${roomId}`);
       }
     }
@@ -175,11 +192,11 @@ io.on('connection', (socket) => {
 
     if (result.autoReconnected) {
       socket.join(roomId);
-      io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
-      return callback({ success: true, room: result.room });
+      broadcastRoom(result.room);
+      return callback({ success: true, room: sanitizeRoomForPlayer(result.room, clientId) });
     }
 
-    io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+    broadcastRoom(result.room);
     console.log(`Rejoin requested by "${playerName}" in room ${roomId}`);
     callback({ success: false, pending: true, messageKey: 'rejoinPending' });
   });
@@ -192,7 +209,7 @@ io.on('connection', (socket) => {
       const requestingSocket = io.sockets.sockets.get(result.request.requestingSocketId);
       if (requestingSocket) {
         requestingSocket.join(roomId);
-        requestingSocket.emit('rejoinApproved', { room: result.room, clientId: result.newPlayerId });
+        requestingSocket.emit('rejoinApproved', { room: sanitizeRoomForPlayer(result.room, result.newPlayerId), clientId: result.newPlayerId });
       }
       if (result.oldSocketId && result.oldSocketId !== result.request.requestingSocketId) {
         const oldSocket = io.sockets.sockets.get(result.oldSocketId);
@@ -210,7 +227,7 @@ io.on('connection', (socket) => {
       console.log(`Rejoin denied for "${result.request.playerName}" in room ${roomId}`);
     }
 
-    io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+    broadcastRoom(result.room);
   });
 
   socket.on('kickPlayer', ({ roomId, clientId }) => {
@@ -227,13 +244,13 @@ io.on('connection', (socket) => {
           const messageKey = p.id === clientId ? 'kickedByGm' : 'partnerKicked';
           sock.emit('removedFromGame', { messageKey });
         });
-        io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+        broadcastRoom(result.room);
         console.log(`Player ${clientId} kicked from room ${roomId} by GM (couple removed)`);
       }
     } else {
       const updatedRoom = gameStore.removePlayer(roomId, clientId);
       if (updatedRoom) {
-        io.to(roomId).emit('roomUpdated', { ...updatedRoom, serverTime: Date.now() });
+        broadcastRoom(updatedRoom);
         console.log(`Player ${clientId} kicked from room ${roomId} by GM`);
       }
     }
@@ -249,7 +266,7 @@ io.on('connection', (socket) => {
           sock.emit('removedFromGame', { messageKey: 'coupleKicked' });
         }
       });
-      io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+      broadcastRoom(result.room);
       console.log(`Couple ${coupleId} kicked from room ${roomId} by GM`);
     }
   });
@@ -261,7 +278,7 @@ io.on('connection', (socket) => {
     const gmSocket = io.sockets.sockets.get(result.newGM.socketId);
     if (gmSocket) {
       gmSocket.join(roomId);
-      gmSocket.emit('promotedToGM', { room: result.room, gmChatHistory: gameStore.getGMChatHistory(roomId) });
+      gmSocket.emit('promotedToGM', { room: sanitizeRoomForGM(result.room), gmChatHistory: gameStore.getGMChatHistory(roomId) });
     }
 
     result.removedPartners.forEach(p => {
@@ -272,7 +289,7 @@ io.on('connection', (socket) => {
       }
     });
 
-    io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+    broadcastRoom(result.room);
     console.log(`Player "${result.newGM.name}" promoted to co-GM in room ${roomId}`);
   });
 
@@ -287,7 +304,7 @@ io.on('connection', (socket) => {
       }
     }
 
-    io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
+    broadcastRoom(result.room);
     console.log(`Co-GM ${gmId} removed from room ${roomId}`);
   });
 
@@ -309,49 +326,49 @@ io.on('connection', (socket) => {
   socket.on('updatePlayerRole', ({ roomId, clientId, newRole }) => {
     const room = gameStore.updatePlayerRole(roomId, clientId, newRole);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('setVotingRole', ({ roomId, role }) => {
     const room = gameStore.setVotingRole(roomId, role);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('releasePairs', ({ roomId, generatedCouples }) => {
     const room = gameStore.releasePairs(roomId, generatedCouples);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('confirmPartner', ({ roomId, clientId }) => {
     const room = gameStore.confirmPartner(roomId, clientId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('gmConfirmCouple', ({ roomId, coupleId }) => {
     const room = gameStore.gmConfirmCouple(roomId, coupleId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('gmMarkCoupleRoleViewed', ({ roomId, coupleId }) => {
     const room = gameStore.gmMarkCoupleRoleViewed(roomId, coupleId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('startGame', ({ roomId, killerCount, killMode }) => {
     const room = gameStore.startGame(roomId, killerCount, killMode);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       
       // Emit roles to individuals
       room.players.forEach(player => {
@@ -370,14 +387,14 @@ io.on('connection', (socket) => {
   socket.on('roleViewed', ({ roomId, clientId }) => {
     const room = gameStore.markRoleViewed(roomId, clientId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('startDancing', ({ roomId }) => {
     const room = gameStore.startDancing(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Dancing started in room ${roomId}`);
     }
   });
@@ -385,7 +402,7 @@ io.on('connection', (socket) => {
   socket.on('proceedToSilentReport', ({ roomId }) => {
     const room = gameStore.proceedToSilentReport(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Silent report phase started in room ${roomId}`);
     }
   });
@@ -393,7 +410,7 @@ io.on('connection', (socket) => {
   socket.on('reportKill', ({ roomId, victimId }) => {
     const room = gameStore.reportKill(roomId, victimId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Kill reported in room ${roomId}`);
     }
   });
@@ -401,35 +418,35 @@ io.on('connection', (socket) => {
   socket.on('submitKillClaim', ({ roomId, clientId, victimId }) => {
     const room = gameStore.submitKillClaim(roomId, clientId, victimId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('submitVictimReport', ({ roomId, clientId, feltKilled, suspectId }) => {
     const room = gameStore.submitVictimReport(roomId, clientId, feltKilled, suspectId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('gmSubmitKillClaim', ({ roomId, killerCoupleId, victimId }) => {
     const room = gameStore.gmSubmitKillClaim(roomId, killerCoupleId, victimId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('gmSubmitVictimReport', ({ roomId, coupleId, feltKilled, suspectId }) => {
     const room = gameStore.gmSubmitVictimReport(roomId, coupleId, feltKilled, suspectId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('resolveSilentReports', ({ roomId }) => {
     const room = gameStore.resolveSilentReports(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Silent reports resolved in room ${roomId}`);
     }
   });
@@ -437,7 +454,7 @@ io.on('connection', (socket) => {
   socket.on('revealKill', ({ roomId }) => {
     const room = gameStore.revealKill(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Kill revealed in room ${roomId}`);
     }
   });
@@ -445,7 +462,7 @@ io.on('connection', (socket) => {
   socket.on('startDiscussion', ({ roomId }) => {
     const room = gameStore.startDiscussion(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Discussion started in room ${roomId}`);
     }
   });
@@ -453,7 +470,7 @@ io.on('connection', (socket) => {
   socket.on('proceedToVoting', ({ roomId }) => {
     const room = gameStore.proceedToVoting(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Proceeding to voting in room ${roomId}`);
     }
   });
@@ -461,28 +478,28 @@ io.on('connection', (socket) => {
   socket.on('delegateVote', ({ roomId, coupleId, votingPlayerId }) => {
     const room = gameStore.delegateVote(roomId, coupleId, votingPlayerId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('castVote', ({ roomId, voterId, suspectId }) => {
     const room = gameStore.castVote(roomId, voterId, suspectId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('gmCastVote', ({ roomId, coupleId, suspectId }) => {
     const room = gameStore.gmCastVote(roomId, coupleId, suspectId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
     }
   });
 
   socket.on('executeVote', ({ roomId, suspectId }) => {
     const room = gameStore.executeVote(roomId, suspectId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Vote executed in room ${roomId}. Resulting status: ${room.status}`);
     }
   });
@@ -490,7 +507,7 @@ io.on('connection', (socket) => {
   socket.on('endGame', ({ roomId }) => {
     const room = gameStore.endGame(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Game ended by GM in room ${roomId}`);
     }
   });
@@ -498,7 +515,7 @@ io.on('connection', (socket) => {
   socket.on('resetGame', ({ roomId }) => {
     const room = gameStore.resetRoom(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Game reset to lobby in room ${roomId}`);
     }
   });
@@ -506,7 +523,7 @@ io.on('connection', (socket) => {
   socket.on('resetRoles', ({ roomId }) => {
     const room = gameStore.resetRoles(roomId);
     if (room) {
-      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      broadcastRoom(room);
       console.log(`Roles reset in room ${roomId}`);
     }
   });

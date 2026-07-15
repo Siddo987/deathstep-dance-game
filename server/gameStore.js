@@ -1,3 +1,48 @@
+// The GM needs the full, unredacted room (all roles, all silent-mode claims/reports,
+// all votes) to run the game. Nothing in there is secret from the GM, so this only
+// strips server-internal routing fields (socketId) that the client never uses.
+export function sanitizeRoomForGM(room) {
+  return {
+    ...room,
+    players: room.players.map(({ socketId, ...rest }) => rest),
+    coGms: room.coGms.map(({ socketId, ...rest }) => rest),
+  };
+}
+
+// Players must never receive another couple's role, or silent-mode claims/reports/votes
+// that aren't their own - those are the actual secrets the game is built around, and
+// hiding them only in the UI would let anyone read them straight out of devtools.
+// This is the one place that decides what a given player is allowed to know, so every
+// socket emit that reaches a player must go through it instead of sending the raw room.
+export function sanitizeRoomForPlayer(room, viewerClientId) {
+  const myCouple = room.couples.find(c => c.playerIds.includes(viewerClientId));
+  const viewerIsKiller = myCouple?.role === 'killer';
+  const revealAllRoles = room.status === 'ended'; // no secret left to protect once the round is over
+
+  const couples = room.couples.map(c => {
+    const showRole = revealAllRoles
+      || (myCouple && c.id === myCouple.id) // you already know your own role
+      || (viewerIsKiller && c.role === 'killer'); // killers are told their teammates
+    return { ...c, role: showRole ? c.role : null };
+  });
+
+  const pickOwn = (record) => {
+    if (!myCouple || !Object.prototype.hasOwnProperty.call(record, myCouple.id)) return {};
+    return { [myCouple.id]: record[myCouple.id] };
+  };
+
+  return {
+    ...room,
+    players: room.players.map(({ socketId, ...rest }) => rest),
+    coGms: room.coGms.map(({ socketId, ...rest }) => rest),
+    couples,
+    killClaims: pickOwn(room.killClaims),
+    victimReports: pickOwn(room.victimReports),
+    votes: pickOwn(room.votes),
+    pendingVictimIds: [], // GM's in-progress kill marking is not public until revealKill
+  };
+}
+
 class GameStore {
   constructor() {
     this.rooms = new Map();
