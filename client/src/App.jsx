@@ -8,15 +8,26 @@ import Datenschutz from './components/Datenschutz.jsx';
 import Impressum from './components/Impressum.jsx';
 import CookieBanner from './components/CookieBanner.jsx';
 import { AlertModal, ConfirmModal } from './components/Modal.jsx';
+import { useLanguage } from './i18n.jsx';
+
+// Server responses/events carry a messageKey (+ optional messageParams) that is
+// looked up in the locale files under 'server.<key>'. Alerts are stored as
+// { key, params, success } and translated at render time, so switching the
+// language mid-session updates any visible message too.
+const serverAlert = (payload, fallbackKey) => ({
+  key: payload?.messageKey ? `server.${payload.messageKey}` : fallbackKey,
+  params: payload?.messageParams,
+});
 
 function App() {
-  const [alertMessage, setAlertMessage] = useState(null);
+  const { t } = useLanguage();
+  const [alertMessage, setAlertMessage] = useState(null); // { key, params, success }
   const [view, setView] = useState(() => localStorage.getItem('deathstep_view') || 'home'); // home, gm, player
   const [room, setRoom] = useState(null);
   const [playerRole, setPlayerRole] = useState(null);
   const [isEliminated, setIsEliminated] = useState(false);
   const [rejoinPending, setRejoinPending] = useState(false);
-  const [rejoinPrompt, setRejoinPrompt] = useState(null); // { roomId, playerName, message }
+  const [rejoinPrompt, setRejoinPrompt] = useState(null); // { roomId, playerName }
   const [gmChatMessages, setGmChatMessages] = useState([]);
   const [clientId, setClientId] = useState(() => {
     let id = localStorage.getItem('deathstep_client_id');
@@ -40,7 +51,7 @@ function App() {
 
     const handleRoomUpdated = (updatedRoom) => {
       setRoom(updatedRoom);
-      
+
       if (updatedRoom.couples) {
         const myCouple = updatedRoom.couples.find(c => c.playerIds && c.playerIds.includes(clientId));
         if (myCouple) {
@@ -67,8 +78,8 @@ function App() {
             }
           } else {
             handleLeaveRoom(false); // Room gone, or this session was replaced by an approved rejoin
-            if (response.message) {
-              setAlertMessage(response.message);
+            if (response.messageKey) {
+              setAlertMessage(serverAlert(response));
             }
           }
         });
@@ -86,7 +97,7 @@ function App() {
       if (isLeavingRef.current) return;
       handleLeaveRoom(false);
       if (view !== 'gm') {
-        setAlertMessage("The GM has closed the ballroom.");
+        setAlertMessage({ key: 'alert.roomClosed' });
       }
     });
 
@@ -102,20 +113,20 @@ function App() {
       setView('player');
     });
 
-    socket.on('rejoinDenied', ({ message }) => {
+    socket.on('rejoinDenied', (payload) => {
       setRejoinPending(false);
-      setAlertMessage(message || 'Der Spielleiter hat die Anfrage abgelehnt.');
+      setAlertMessage(serverAlert(payload, 'server.rejoinDenied'));
     });
 
     socket.on('sessionReplaced', () => {
       handleLeaveRoom(false);
-      setAlertMessage('Deine Sitzung wurde von einem anderen Gerät übernommen, da du einen Wiedereinstieg beantragt hast.');
+      setAlertMessage({ key: 'alert.sessionReplaced' });
     });
 
-    socket.on('removedFromGame', ({ message }) => {
+    socket.on('removedFromGame', (payload) => {
       if (isLeavingRef.current) return;
       handleLeaveRoom(false);
-      setAlertMessage(message || 'Du wurdest aus dem Spiel entfernt.');
+      setAlertMessage(serverAlert(payload, 'server.removedGeneric'));
     });
 
     socket.on('promotedToGM', ({ room: newRoom, gmChatHistory }) => {
@@ -125,7 +136,7 @@ function App() {
       localStorage.setItem('deathstep_room_id', newRoom.id);
       localStorage.setItem('deathstep_view', 'gm');
       setView('gm');
-      setAlertMessage('Du wurdest zum Spielleiter (GM) befördert!');
+      setAlertMessage({ key: 'alert.promoted' });
     });
 
     socket.on('gmChatMessage', (message) => {
@@ -153,9 +164,9 @@ function App() {
         getToken(code).then((token) => {
           if (token) {
             window.history.replaceState({}, document.title, window.location.pathname);
-            setAlertMessage("Spotify successfully connected!");
+            setAlertMessage({ key: 'alert.spotifyConnected', success: true });
           } else {
-            setAlertMessage("Failed to connect Spotify.");
+            setAlertMessage({ key: 'alert.spotifyFailed' });
           }
         });
       });
@@ -208,13 +219,9 @@ function App() {
         localStorage.setItem('deathstep_view', 'player');
         setView('player');
       } else if (response.nameTaken) {
-        setRejoinPrompt({
-          roomId,
-          playerName,
-          message: `${response.message} Wiedereinstieg beim Spielleiter beantragen?`
-        });
+        setRejoinPrompt({ roomId, playerName });
       } else {
-        setAlertMessage(response.message || 'Failed to join room');
+        setAlertMessage(serverAlert(response, 'alert.joinFailed'));
       }
     });
   };
@@ -230,12 +237,12 @@ function App() {
       } else if (response.pending) {
         setRejoinPending(true);
       } else {
-        setAlertMessage(response.message || 'Wiedereinstieg fehlgeschlagen');
+        setAlertMessage(serverAlert(response, 'alert.rejoinFailed'));
       }
     });
   };
 
-  const myGmName = room?.coGms?.find(g => g.id === clientId)?.name || 'Haupt-GM';
+  const myGmName = room?.coGms?.find(g => g.id === clientId)?.name || t('gm.mainGmName');
 
   if (window.location.pathname === '/feedback') {
     return (
@@ -278,11 +285,11 @@ function App() {
       <div className="header">
         <h1 className="glitch-text">Deathstep</h1>
       </div>
-      
+
       {view === 'home' && rejoinPending && (
         <div className="cyber-card" style={{ textAlign: 'center' }}>
-          <h2 style={{ marginBottom: '20px', color: 'var(--neon-purple)' }}>WIEDEREINSTIEG BEANTRAGT</h2>
-          <p style={{ color: 'var(--text-muted)' }}>Warte auf Bestätigung durch den Spielleiter...</p>
+          <h2 style={{ marginBottom: '20px', color: 'var(--neon-purple)' }}>{t('app.rejoinRequestedTitle')}</h2>
+          <p style={{ color: 'var(--text-muted)' }}>{t('app.rejoinRequestedWait')}</p>
         </div>
       )}
 
@@ -299,12 +306,12 @@ function App() {
           onSendGMChatMessage={handleSendGMChatMessage}
         />
       )}
-      
+
       {view === 'player' && room && (
-        <PlayerScreen 
-          room={room} 
-          role={playerRole} 
-          isEliminated={isEliminated} 
+        <PlayerScreen
+          room={room}
+          role={playerRole}
+          isEliminated={isEliminated}
           clientId={clientId}
           onLeave={() => handleLeaveRoom(true)}
         />
@@ -312,13 +319,14 @@ function App() {
 
       <AlertModal
         isOpen={!!alertMessage}
-        message={alertMessage}
+        message={alertMessage ? t(alertMessage.key, alertMessage.params) : null}
+        isSuccess={!!alertMessage?.success}
         onClose={() => setAlertMessage(null)}
       />
 
       <ConfirmModal
         isOpen={!!rejoinPrompt}
-        message={rejoinPrompt?.message}
+        message={t('alert.nameTakenPrompt')}
         onConfirm={() => {
           if (rejoinPrompt) handleRequestRejoin(rejoinPrompt.roomId, rejoinPrompt.playerName);
         }}

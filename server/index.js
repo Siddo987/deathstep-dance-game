@@ -42,10 +42,12 @@ io.on('connection', (socket) => {
     callback({ success: true, room, gmChatHistory: [] });
   });
 
+  // User-facing messages are sent as messageKey (+ messageParams); the client
+  // translates them via its locale files ('server.<messageKey>').
   socket.on('joinRoom', ({ roomId, playerName, danceRole, isFlexible, clientId }, callback) => {
     const room = gameStore.getRoom(roomId);
     if (!room) {
-      return callback({ success: false, message: 'Room not found.' });
+      return callback({ success: false, messageKey: 'roomNotFound' });
     }
 
     let updatedRoom;
@@ -58,10 +60,10 @@ io.on('connection', (socket) => {
       // Optionally update name/role if they changed it on the join screen? 
       // For now, just reconnect them.
     } else if (existingByName) {
-      return callback({ success: false, nameTaken: true, message: 'Dieser Name ist bereits vergeben. Bitte wähle einen anderen Namen oder beantrage einen Wiedereinstieg beim Spielleiter.' });
+      return callback({ success: false, nameTaken: true, messageKey: 'nameTaken' });
     } else {
       if (room.status !== 'lobby') {
-        return callback({ success: false, message: 'Game already in progress.' });
+        return callback({ success: false, messageKey: 'gameInProgress' });
       }
       updatedRoom = gameStore.addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socket.id);
     }
@@ -75,13 +77,13 @@ io.on('connection', (socket) => {
   socket.on('addManualPlayer', ({ roomId, playerName, danceRole, isFlexible }, callback) => {
     const room = gameStore.getRoom(roomId);
     if (!room) {
-      return callback({ success: false, message: 'Room not found.' });
+      return callback({ success: false, messageKey: 'roomNotFound' });
     }
     if (room.status !== 'lobby') {
-      return callback({ success: false, message: 'Spieler können nur in der Lobby-Phase hinzugefügt werden.' });
+      return callback({ success: false, messageKey: 'lobbyOnly' });
     }
     if (room.players.some(p => p.name.toLowerCase() === playerName.toLowerCase())) {
-      return callback({ success: false, message: 'Dieser Name ist bereits vergeben.' });
+      return callback({ success: false, messageKey: 'nameTaken' });
     }
 
     const updatedRoom = gameStore.addManualPlayer(roomId, playerName, danceRole, isFlexible);
@@ -102,7 +104,7 @@ io.on('connection', (socket) => {
       // silently letting the old, replaced session back in.
       const player = room.players.find(p => p.id === clientId);
       if (!player) {
-        return callback({ success: false, message: 'Deine Sitzung ist nicht mehr gültig. Bitte tritt der Runde erneut bei.' });
+        return callback({ success: false, messageKey: 'sessionInvalid' });
       }
     }
 
@@ -150,7 +152,7 @@ io.on('connection', (socket) => {
           if (p.id === clientId || !p.socketId) return; // they left on purpose, they already know
           const sock = io.sockets.sockets.get(p.socketId);
           if (sock) {
-            sock.emit('removedFromGame', { message: `Dein Partner (${leavingPlayer?.name || 'unbekannt'}) hat das Spiel verlassen. Ihr seid daher beide raus.` });
+            sock.emit('removedFromGame', { messageKey: 'partnerLeft', messageParams: { name: leavingPlayer?.name || '?' } });
           }
         });
         io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
@@ -168,7 +170,7 @@ io.on('connection', (socket) => {
   socket.on('requestRejoin', ({ roomId, playerName, clientId }, callback) => {
     const result = gameStore.requestRejoin(roomId, playerName, clientId, socket.id);
     if (result.error) {
-      return callback({ success: false, message: result.error });
+      return callback({ success: false, messageKey: result.error });
     }
 
     if (result.autoReconnected) {
@@ -179,7 +181,7 @@ io.on('connection', (socket) => {
 
     io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
     console.log(`Rejoin requested by "${playerName}" in room ${roomId}`);
-    callback({ success: false, pending: true, message: 'Anfrage wurde an den Spielleiter gesendet. Bitte warten...' });
+    callback({ success: false, pending: true, messageKey: 'rejoinPending' });
   });
 
   socket.on('respondToRejoinRequest', ({ roomId, requestId, accept }) => {
@@ -203,7 +205,7 @@ io.on('connection', (socket) => {
     } else {
       const requestingSocket = io.sockets.sockets.get(result.request.requestingSocketId);
       if (requestingSocket) {
-        requestingSocket.emit('rejoinDenied', { message: 'Der Spielleiter hat die Anfrage abgelehnt.' });
+        requestingSocket.emit('rejoinDenied', { messageKey: 'rejoinDenied' });
       }
       console.log(`Rejoin denied for "${result.request.playerName}" in room ${roomId}`);
     }
@@ -222,10 +224,8 @@ io.on('connection', (socket) => {
           if (!p.socketId) return;
           const sock = io.sockets.sockets.get(p.socketId);
           if (!sock) return;
-          const message = p.id === clientId
-            ? 'Du wurdest vom Spielleiter aus dem Spiel entfernt.'
-            : 'Dein Partner wurde vom Spielleiter entfernt. Ihr seid daher beide raus.';
-          sock.emit('removedFromGame', { message });
+          const messageKey = p.id === clientId ? 'kickedByGm' : 'partnerKicked';
+          sock.emit('removedFromGame', { messageKey });
         });
         io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
         console.log(`Player ${clientId} kicked from room ${roomId} by GM (couple removed)`);
@@ -246,7 +246,7 @@ io.on('connection', (socket) => {
         if (!p.socketId) return;
         const sock = io.sockets.sockets.get(p.socketId);
         if (sock) {
-          sock.emit('removedFromGame', { message: 'Der Spielleiter hat euer Paar aus dem Spiel entfernt.' });
+          sock.emit('removedFromGame', { messageKey: 'coupleKicked' });
         }
       });
       io.to(roomId).emit('roomUpdated', { ...result.room, serverTime: Date.now() });
@@ -268,7 +268,7 @@ io.on('connection', (socket) => {
       if (!p.socketId) return;
       const sock = io.sockets.sockets.get(p.socketId);
       if (sock) {
-        sock.emit('removedFromGame', { message: `Dein Partner (${result.newGM.name}) wurde zum Spielleiter befördert. Ihr seid daher beide raus.` });
+        sock.emit('removedFromGame', { messageKey: 'partnerPromoted', messageParams: { name: result.newGM.name } });
       }
     });
 
@@ -283,7 +283,7 @@ io.on('connection', (socket) => {
     if (result.removedGM?.socketId) {
       const sock = io.sockets.sockets.get(result.removedGM.socketId);
       if (sock) {
-        sock.emit('removedFromGame', { message: 'Deine GM-Rechte wurden entzogen.' });
+        sock.emit('removedFromGame', { messageKey: 'gmRightsRevoked' });
       }
     }
 

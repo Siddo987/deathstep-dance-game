@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useLanguage } from '../i18n.jsx';
 
 const CONSENT_KEY = 'deathstep_cookie_consent';
 const REOPEN_EVENT = 'deathstep-open-cookie-settings';
@@ -21,6 +22,7 @@ function saveConsent(consent) {
 }
 
 function CookieBanner() {
+  const { t } = useLanguage();
   const [consent, setConsent] = useState(() => getCookieConsent());
   const [forceOpen, setForceOpen] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
@@ -67,7 +69,7 @@ function CookieBanner() {
         {consent && forceOpen && (
           <button
             onClick={cancelReopen}
-            title="Schließen"
+            title={t('common.close')}
             style={{ position: 'absolute', top: 0, right: 0, background: 'transparent', border: 'none', color: 'var(--text-muted)', fontSize: '1.3rem', cursor: 'pointer', lineHeight: 1 }}
           >
             ✖
@@ -75,17 +77,16 @@ function CookieBanner() {
         )}
 
         <p className="cookie-banner-text" style={{ paddingRight: consent && forceOpen ? '26px' : 0 }}>
-          🍪 Wir speichern nur technisch notwendige Daten in deinem Browser (z.B. um dich mit deinem Ballroom/deiner
-          Rolle zu verbinden). Die optionale Spotify-Integration lädt zusätzliche Inhalte von Spotify nach, wenn ein
-          Spielleiter sie aktiviert. Mehr dazu in unserer{' '}
-          <a href="/datenschutz" style={{ color: 'var(--neon-blue)' }}>Datenschutzerklärung</a>.
+          {t('cookie.textBefore')}
+          <a href="/datenschutz" style={{ color: 'var(--neon-blue)' }}>{t('cookie.privacyPolicy')}</a>
+          {t('cookie.textAfter')}
         </p>
 
         {showDetails && (
           <div style={{ marginBottom: '12px', padding: '10px 12px', background: 'rgba(0,0,0,0.3)', borderRadius: '8px' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-muted)', marginBottom: '8px', opacity: 0.7, fontSize: '0.85rem' }}>
               <input type="checkbox" checked disabled style={{ transform: 'scale(1.1)', flexShrink: 0 }} />
-              Technisch notwendig (Sitzung/Ballroom-Zuordnung) - immer aktiv
+              {t('cookie.necessary')}
             </label>
             <label style={{ display: 'flex', alignItems: 'center', gap: '10px', color: 'var(--text-main)', cursor: 'pointer', fontSize: '0.85rem' }}>
               <input
@@ -94,17 +95,17 @@ function CookieBanner() {
                 onChange={(e) => setSpotifyChecked(e.target.checked)}
                 style={{ transform: 'scale(1.1)', flexShrink: 0 }}
               />
-              Spotify-Integration (nur relevant, falls der GM sie einschaltet)
+              {t('cookie.spotify')}
             </label>
           </div>
         )}
 
         <div className="cookie-banner-actions">
           <button className="cyber-button pulse-animation" onClick={acceptAll}>
-            Alle akzeptieren
+            {t('cookie.acceptAll')}
           </button>
           <button className="cyber-button" style={{ background: 'transparent' }} onClick={acceptNecessaryOnly}>
-            Nur notwendige akzeptieren
+            {t('cookie.acceptNecessary')}
           </button>
           {!showDetails ? (
             <button
@@ -112,7 +113,7 @@ function CookieBanner() {
               style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
               onClick={() => setShowDetails(true)}
             >
-              Einstellungen
+              {t('cookie.settings')}
             </button>
           ) : (
             <button
@@ -120,7 +121,7 @@ function CookieBanner() {
               style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
               onClick={saveSelection}
             >
-              Auswahl speichern
+              {t('cookie.saveSelection')}
             </button>
           )}
         </div>

@@ -1,8 +1,41 @@
 import React, { useState } from 'react';
-import { Users, Crown, LogIn, Repeat, ArrowLeft } from 'lucide-react';
+import { Users, Crown, LogIn, Repeat, ArrowLeft, Globe } from 'lucide-react';
 import { openCookieSettings } from './CookieBanner.jsx';
+import { useLanguage } from '../i18n.jsx';
+
+function LanguageSwitcher() {
+  const { lang, setLang } = useLanguage();
+
+  const langButton = (code, label) => (
+    <button
+      onClick={() => setLang(code)}
+      style={{
+        background: lang === code ? 'rgba(0,240,255,0.12)' : 'transparent',
+        border: lang === code ? '1px solid var(--neon-blue)' : '1px solid rgba(136,146,176,0.4)',
+        color: lang === code ? 'var(--neon-blue)' : 'var(--text-muted)',
+        padding: '5px 12px',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '0.8rem',
+        letterSpacing: '1px',
+        fontWeight: lang === code ? 'bold' : 'normal',
+      }}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginBottom: '20px' }}>
+      <Globe size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
+      {langButton('en', 'EN')}
+      {langButton('de', 'DE')}
+    </div>
+  );
+}
 
 function Home({ onCreateRoom, onJoinRoom }) {
+  const { t } = useLanguage();
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [danceRole, setDanceRole] = useState('lead'); // 'lead' or 'follow'
@@ -21,9 +54,10 @@ function Home({ onCreateRoom, onJoinRoom }) {
   if (view === 'main') {
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center' }}>
-        <h2 style={{ marginBottom: '8px', color: 'var(--neon-blue)' }}>ENTER THE DANCEFLOOR</h2>
+        <LanguageSwitcher />
+        <h2 style={{ marginBottom: '8px', color: 'var(--neon-blue)' }}>{t('home.title')}</h2>
         <p style={{ color: 'var(--text-muted)', marginBottom: '30px', fontSize: '0.95rem' }}>
-          A murder mystery, hidden inside a dance. Join as a player, or run the show as GM.
+          {t('home.subtitle')}
         </p>
 
         <button
@@ -32,12 +66,12 @@ function Home({ onCreateRoom, onJoinRoom }) {
           onClick={() => setView('join')}
         >
           <LogIn size={20} className="icon-inline" />
-          Join Game
+          {t('home.join')}
         </button>
 
         <div style={{ margin: '30px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
-          OR
+          {t('home.or')}
           <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
         </div>
 
@@ -47,7 +81,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
           onClick={onCreateRoom}
         >
           <Crown size={20} className="icon-inline" />
-          Create Ballroom (GM)
+          {t('home.create')}
         </button>
 
         <div style={{ marginTop: '30px', display: 'flex', flexWrap: 'wrap', gap: '8px 15px', justifyContent: 'center' }}>
@@ -55,25 +89,25 @@ function Home({ onCreateRoom, onJoinRoom }) {
             href="/feedback"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
-            Feedback geben
+            {t('home.feedbackLink')}
           </a>
           <a
             href="/datenschutz"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
-            Datenschutz
+            {t('home.privacyLink')}
           </a>
           <a
             href="/impressum"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
-            Impressum
+            {t('home.imprintLink')}
           </a>
           <button
             onClick={openCookieSettings}
             style={{ background: 'transparent', border: 'none', padding: 0, color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', cursor: 'pointer', whiteSpace: 'nowrap' }}
           >
-            Cookie-Einstellungen
+            {t('home.cookieSettings')}
           </button>
         </div>
       </div>
@@ -84,13 +118,13 @@ function Home({ onCreateRoom, onJoinRoom }) {
     <div className="cyber-card phase-enter">
       <h2 style={{ marginBottom: '20px', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', gap: '10px' }}>
         <Users size={26} className="icon-inline" />
-        JOIN GAME
+        {t('home.joinTitle')}
       </h2>
 
       <input
         type="text"
         className="cyber-input"
-        placeholder="4-DIGIT BALLROOM CODE"
+        placeholder={t('home.codePlaceholder')}
         value={roomId}
         onChange={(e) => setRoomId(e.target.value)}
         maxLength={4}
@@ -99,7 +133,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
       <input
         type="text"
         className="cyber-input"
-        placeholder="YOUR NAME"
+        placeholder={t('home.namePlaceholder')}
         value={playerName}
         onChange={(e) => setPlayerName(e.target.value)}
       />
@@ -109,13 +143,13 @@ function Home({ onCreateRoom, onJoinRoom }) {
           className={`segmented-option accent-blue ${danceRole === 'lead' ? 'is-active' : ''}`}
           onClick={() => setDanceRole('lead')}
         >
-          I am LEAD
+          {t('home.iAmLead')}
         </button>
         <button
           className={`segmented-option accent-purple ${danceRole === 'follow' ? 'is-active' : ''}`}
           onClick={() => setDanceRole('follow')}
         >
-          I am FOLLOW
+          {t('home.iAmFollow')}
         </button>
       </div>
 
@@ -127,7 +161,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
         />
         <Repeat size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
         <span style={{ color: 'white', fontSize: '0.9rem' }}>
-          Ich bin flexibel (kann zur Not auch die andere Rolle tanzen)
+          {t('home.flexible')}
         </span>
       </label>
 
@@ -137,7 +171,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
         onClick={() => onJoinRoom(roomId, playerName, danceRole, isFlexible)}
         disabled={!roomId || !playerName}
       >
-        CONNECT
+        {t('home.connect')}
       </button>
 
       <button
@@ -146,7 +180,7 @@ function Home({ onCreateRoom, onJoinRoom }) {
         onClick={() => setView('main')}
       >
         <ArrowLeft size={18} className="icon-inline" />
-        BACK
+        {t('common.back')}
       </button>
     </div>
   );

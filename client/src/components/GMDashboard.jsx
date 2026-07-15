@@ -4,6 +4,7 @@ import { socket } from '../socket.js';
 import { ConfirmModal } from './Modal.jsx';
 import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify } from '../spotify.js';
 import { getCookieConsent } from './CookieBanner.jsx';
+import { useLanguage } from '../i18n.jsx';
 import coupleIcon from './couple_icon.png';
 import {
   MessageCircle, Crown, X, PhoneOff, Repeat, Scissors, AlertTriangle, Lightbulb,
@@ -12,6 +13,7 @@ import {
 } from 'lucide-react';
 
 function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMessage }) {
+  const { t } = useLanguage();
   const spotifyAllowed = getCookieConsent()?.spotify === true;
 
   const [pendingCouples, setPendingCouples] = useState([]);
@@ -47,7 +49,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const [showSpotifyModal, setShowSpotifyModal] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [hasSongFinished, setHasSongFinished] = useState(false);
-  const [playerStatus, setPlayerStatus] = useState('Initializing player...');
+  // Spotify player status as a locale key plus optional raw detail from the SDK
+  const [playerStatus, setPlayerStatus] = useState({ key: 'spotify.statusInit', detail: '', isError: false });
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [selectedTrack, setSelectedTrack] = useState(() => {
@@ -216,7 +219,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         console.log('Ready with Device ID', device_id);
         setSpotifyPlayerId(device_id);
         setSpotifyPlayer(player);
-        setPlayerStatus('Ready to play directly in browser! 🔊');
+        setPlayerStatus({ key: 'spotify.statusReady', detail: '', isError: false });
 
         // Check if we should auto-resume
         const savedPlayback = localStorage.getItem('deathstep_playback_state');
@@ -241,12 +244,12 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       });
 
       player.addListener('not_ready', ({ device_id }) => {
-        setPlayerStatus('Player offline');
+        setPlayerStatus({ key: 'spotify.statusOffline', detail: '', isError: false });
       });
 
-      player.addListener('initialization_error', ({ message }) => setPlayerStatus('Error: ' + message));
-      player.addListener('authentication_error', ({ message }) => setPlayerStatus('Auth Error: ' + message));
-      player.addListener('account_error', ({ message }) => setPlayerStatus('Premium Required: ' + message));
+      player.addListener('initialization_error', ({ message }) => setPlayerStatus({ key: 'spotify.statusError', detail: message, isError: true }));
+      player.addListener('authentication_error', ({ message }) => setPlayerStatus({ key: 'spotify.statusAuthError', detail: message, isError: true }));
+      player.addListener('account_error', ({ message }) => setPlayerStatus({ key: 'spotify.statusPremium', detail: message, isError: true }));
 
       player.connect();
     };
@@ -283,7 +286,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       socket.emit('reportKill', { roomId: room.id, victimId: null });
     } else {
       setConfirmState({
-        message: 'Report this couple as killed by the killer?',
+        message: t('gm.reportKillConfirm'),
         onConfirm: () => socket.emit('reportKill', { roomId: room.id, victimId: victimCoupleId })
       });
     }
@@ -301,7 +304,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         await playTrack(selectedTrack.uri, spotifyPlayerId);
       } catch (e) {
         if (e.message === 'NO_ACTIVE_DEVICE') {
-          alert("Fehler: Kein aktives Spotify-Gerät gefunden!\n\nBitte warte, bis der Web Player den Status 'Ready' hat.");
+          alert(t('spotify.noDevice'));
         } else {
           console.error("Failed to play track", e);
         }
@@ -316,7 +319,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         await playTrack(selectedTrack.uri, spotifyPlayerId);
       } catch (e) {
         if (e.message === 'NO_ACTIVE_DEVICE') {
-          alert("Fehler: Kein aktives Spotify-Gerät gefunden!\n\nBitte warte, bis der Web Player den Status 'Ready' hat.");
+          alert(t('spotify.noDevice'));
         } else {
           console.error("Failed to play track", e);
         }
@@ -326,7 +329,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   const handleRevealKill = () => {
     setConfirmState({
-      message: 'Den markierten Kill jetzt für alle Spieler aufdecken?' + (isPlaying ? '\n(Achtung: Die Musik wird gestoppt!)' : ''),
+      message: t('gm.revealKillConfirm') + (isPlaying ? '\n' + t('gm.revealKillMusicWarning') : ''),
       onConfirm: async () => {
         socket.emit('revealKill', { roomId: room.id });
         if (spotifyToken) {
@@ -361,7 +364,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   const handleResetGame = () => {
     setConfirmState({
-      message: 'Reset to lobby for a new pairing?',
+      message: t('gm.resetConfirm'),
       onConfirm: () => {
         if (spotifyPlayer) {
           spotifyPlayer.pause().catch(e => console.error("Failed to pause", e));
@@ -377,7 +380,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   const handleEndGame = () => {
     setConfirmState({
-      message: 'End the game immediately and reveal the winners?',
+      message: t('gm.endGameConfirm'),
       onConfirm: () => {
         if (spotifyPlayer) {
           spotifyPlayer.pause().catch(e => console.error("Failed to pause", e));
@@ -399,35 +402,35 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         setManualPlayerName('');
         setManualIsFlexible(false);
       } else {
-        alert(response.message || 'Konnte Spieler nicht hinzufügen.');
+        alert(response.messageKey ? t(`server.${response.messageKey}`) : t('gm.addPlayerFailed'));
       }
     });
   };
 
   const handleKickPlayer = (clientId) => {
     setConfirmState({
-      message: 'Diesen Spieler endgültig aus dem Raum entfernen?',
+      message: t('gm.kickPlayerConfirm'),
       onConfirm: () => socket.emit('kickPlayer', { roomId: room.id, clientId })
     });
   };
 
   const handleKickCouple = (coupleId, coupleName) => {
     setConfirmState({
-      message: `Paar "${maskName(coupleName)}" endgültig aus dem Spiel werfen? Beide Partner werden entfernt.`,
+      message: t('gm.kickCoupleConfirm', { name: maskName(coupleName) }),
       onConfirm: () => socket.emit('kickCouple', { roomId: room.id, coupleId })
     });
   };
 
   const handlePromoteToGM = (playerId, playerName) => {
     setConfirmState({
-      message: `"${maskName(playerName)}" zum Spielleiter (GM) befördern? Diese Person erhält vollen Zugriff auf das GM-Dashboard und wird, falls bereits verpaart, aus ihrem Paar entfernt (der Partner fliegt dann ebenfalls raus).`,
+      message: t('gm.promoteConfirm', { name: maskName(playerName) }),
       onConfirm: () => socket.emit('promoteToGM', { roomId: room.id, playerId })
     });
   };
 
   const handleRemoveCoGM = (gmId, gmName) => {
     setConfirmState({
-      message: `"${maskName(gmName)}" die GM-Rechte entziehen?`,
+      message: t('gm.removeCoGmConfirm', { name: maskName(gmName) }),
       onConfirm: () => socket.emit('removeCoGM', { roomId: room.id, gmId })
     });
   };
@@ -558,7 +561,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       return player && hasPhone(player);
     }));
     if (phonelessCouples.length > 0) {
-      alert(`Achtung: ${phonelessCouples.length} Paar(e) haben kein Handy dabei (${phonelessCouples.map(c => maskName(c.name)).join(', ')})! Bitte manuell nachbessern, z.B. über "Clear Pairs" und eine andere Rollenverteilung.`);
+      alert(t('gm.phonelessWarning', { count: phonelessCouples.length, names: phonelessCouples.map(c => maskName(c.name)).join(', ') }));
     }
 
     setPendingCouples(newCouples);
@@ -572,7 +575,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const handleRandomPairsClick = () => {
     const unpaired = getUnpairedPlayers();
     if (unpaired.length < 2) {
-      alert("Es gibt nicht genug unverpaarte Spieler! Bitte klicke erst auf 'Clear Pairs', um alle aufzuheben und neu zu mischen.");
+      alert(t('gm.notEnoughUnpaired'));
       return;
     }
 
@@ -656,7 +659,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
 
     if (currentMinSwitchNeeded > 0) {
-      alert(`Deine Auswahl reicht noch nicht aus! Es müssen noch mehr Spieler die Rolle wechseln oder zuschauen, um 4er-Paare zu verhindern.`);
+      alert(t('gm.randNotEnough'));
       return;
     }
 
@@ -696,7 +699,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const handleCreateManualCouple = () => {
     if (currentGroup.length < 2) return;
     if (currentGroup.length > 3) {
-      alert("Es können maximal 3er-Gruppen gebildet werden!");
+      alert(t('gm.groupMax3'));
       return;
     }
 
@@ -705,12 +708,12 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     const hasFollow = selectedPlayers.some(p => p.danceRole === 'follow');
 
     if (!hasLead || !hasFollow) {
-      alert("Eine Gruppe muss mindestens einen Lead und einen Follow enthalten!");
+      alert(t('gm.groupNeedsLeadFollow'));
       return;
     }
 
     if (!selectedPlayers.some(hasPhone)) {
-      alert("Eine Gruppe braucht mindestens eine Person mit Handy!");
+      alert(t('gm.groupNeedsPhone'));
       return;
     }
 
@@ -730,16 +733,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   };
 
   const handleReleasePairs = () => {
-    if (pendingCouples.length === 0) return alert("No couples to release!");
+    if (pendingCouples.length === 0) return alert(t('gm.noCouplesToRelease'));
 
     if (pendingCouples.length <= 2) {
-      alert("Du brauchst mindestens 3 Paare, um das Spiel zu spielen! Bitte erstelle mehr Paare.");
+      alert(t('gm.need3Couples'));
       return;
     }
 
     if (pendingCouples.length === 3) {
       setConfirmState({
-        message: 'Achtung: Das Spiel macht spieltechnisch eigentlich erst ab 4 Paaren richtig Sinn. Willst du diese 3 Paare wirklich freigeben?',
+        message: t('gm.only3Couples'),
         onConfirm: () => socket.emit('releasePairs', { roomId: room.id, generatedCouples: pendingCouples })
       });
       return;
@@ -763,13 +766,13 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
     const message = suspectCoupleId === null
       ? (topCouples.length === 1
-        ? `WARNUNG: Es gibt einen klaren Mehrheits-Vote für "${maskName(aliveCouples.find(c => c.id === topCouples[0].id)?.name)}" (${maxVotes} Votes). Willst du den Vote ignorieren und niemanden kicken?`
-        : 'Niemanden kicken und nächste Runde starten?')
+        ? t('gm.voteWarnMajority', { name: maskName(aliveCouples.find(c => c.id === topCouples[0].id)?.name), count: maxVotes })
+        : t('gm.voteKickNobody'))
       : (getVoteCount(suspectCoupleId) < maxVotes || maxVotes === 0
-        ? `WARNUNG: Dieses Paar hat NICHT die meisten Votes (${getVoteCount(suspectCoupleId)} vs ${maxVotes}). Willst du dich über die Abstimmung hinwegsetzen und sie kicken?`
+        ? t('gm.voteWarnNotMost', { count: getVoteCount(suspectCoupleId), max: maxVotes })
         : (topCouples.length > 1
-          ? `HINWEIS: Es gibt einen Gleichstand mit ${maxVotes} Votes. Du als GM brichst jetzt den Gleichstand, indem du dieses Paar kickst. Fortfahren?`
-          : 'Dieses Paar (mit den meisten Votes) kicken?'));
+          ? t('gm.voteTieBreak', { count: maxVotes })
+          : t('gm.voteKickMost')));
 
     setConfirmState({
       message,
@@ -802,8 +805,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         <span key={m.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: dimmed ? 'var(--text-muted)' : 'white', fontWeight: bold ? 'bold' : 'normal' }}>
           {maskName(m.name)}
           {m.hasNoPhone
-            ? <PhoneOff size={13} className="icon-inline" title="Kein Handy" style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-            : <Smartphone size={13} className="icon-inline" title="Hat ein Handy" style={{ color: 'var(--neon-blue)', flexShrink: 0 }} />}
+            ? <PhoneOff size={13} className="icon-inline" title={t('gm.noPhoneTitle')} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+            : <Smartphone size={13} className="icon-inline" title={t('gm.hasPhoneTitle')} style={{ color: 'var(--neon-blue)', flexShrink: 0 }} />}
         </span>
       ))}
     </div>
@@ -820,29 +823,29 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
             <path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.84.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.6.18-1.2.72-1.38 4.26-1.26 11.28-1.02 15.72 1.621.539.3.719 1.02.419 1.56-.299.54-1.02.72-1.559.42z" />
           </svg>
-          Spotify Integration
+          {t('spotify.integration')}
         </h3>
 
         {!spotifyToken ? (
           <button className="cyber-button" style={{ background: 'var(--neon-green)', color: 'black' }} onClick={loginWithSpotify}>
-            CONNECT SPOTIFY PREMIUM
+            {t('spotify.connect')}
           </button>
         ) : (
           <div>
             <div style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
               <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '5px' }}>
-                <strong style={{ color: spotifyPlayerId ? 'var(--neon-green)' : 'var(--neon-red)' }}>{playerStatus}</strong>
-                {playerStatus.includes('Error') && (
+                <strong style={{ color: spotifyPlayerId ? 'var(--neon-green)' : 'var(--neon-red)' }}>{t(playerStatus.key)}{playerStatus.detail ? ` ${playerStatus.detail}` : ''}</strong>
+                {playerStatus.isError && (
                   <button
                     className="cyber-button"
                     style={{ padding: '4px 8px', fontSize: '0.7rem', background: 'var(--neon-green)', color: 'black', minWidth: 'auto', margin: 0 }}
                     onClick={loginWithSpotify}
                   >
-                    RETRY AUTH
+                    {t('spotify.retryAuth')}
                   </button>
                 )}
               </div>
-              Select a track to play automatically when the dance starts!
+              {t('spotify.selectHint')}
             </div>
 
             <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
@@ -850,12 +853,12 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 type="text"
                 className="cyber-input"
                 style={{ marginBottom: 0, flex: 1 }}
-                placeholder="Search for a song..."
+                placeholder={t('spotify.searchPlaceholder')}
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
               <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Search size={16} className="icon-inline" /> Search
+                <Search size={16} className="icon-inline" /> {t('spotify.search')}
               </button>
             </form>
 
@@ -888,7 +891,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
                 <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>SELECTED TRACK</div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.selectedTrack')}</div>
                   <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
                 </div>
                 <button
@@ -913,7 +916,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '50px', height: '50px', borderRadius: '50%', position: 'relative', zIndex: 2 }} />
         <div style={{ flex: 1, minWidth: 0, position: 'relative', zIndex: 2 }}>
           <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white', fontWeight: 'bold' }}>{selectedTrack.name}</div>
-          <div style={{ fontSize: '0.8rem', color: '#1db954' }}>NOW PLAYING</div>
+          <div style={{ fontSize: '0.8rem', color: '#1db954' }}>{t('spotify.nowPlaying')}</div>
         </div>
         <button
           disabled={!spotifyPlayer}
@@ -962,16 +965,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   return (
     <div className="cyber-card" style={{ position: 'relative' }}>
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '20px', marginTop: '20px' }}>
-        <h2 style={{ color: 'var(--neon-purple)', margin: 0 }}>GM DASHBOARD</h2>
+        <h2 style={{ color: 'var(--neon-purple)', margin: 0 }}>{t('gm.title')}</h2>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
           <div style={{ background: 'rgba(0,240,255,0.1)', padding: '5px 10px', borderRadius: '5px', border: '1px solid var(--neon-blue)' }}>
-            <span style={{ color: 'var(--text-muted)' }}>BALLROOM CODE:</span>{' '}
+            <span style={{ color: 'var(--text-muted)' }}>{t('gm.ballroomCode')}</span>{' '}
             <strong style={{ color: 'var(--neon-blue)', fontSize: '1.2rem', letterSpacing: '2px' }}>{room.id}</strong>
           </div>
 
           {privacyMode && (
-            <div className="badge badge--red" title="Namen sind aktuell verborgen">
-              <EyeOff size={14} className="icon-inline" /> PRIVACY MODE
+            <div className="badge badge--red" title={t('gm.privacyModeTitle')}>
+              <EyeOff size={14} className="icon-inline" /> {t('gm.privacyMode')}
             </div>
           )}
 
@@ -982,7 +985,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <button
                   className="kebab-menu-btn pulse-animation"
                   onClick={() => setShowSpotifyModal(true)}
-                  title="Change Spotify Track"
+                  title={t('gm.changeTrackTitle')}
                   style={{ color: 'var(--neon-green)' }}
                 >
                   <svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor">
@@ -994,16 +997,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <button
                   className="kebab-menu-btn"
                   onClick={() => setShowCouplesModal(true)}
-                  title="View Couples"
+                  title={t('gm.viewCouplesTitle')}
                   style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}
                 >
-                  <img src={coupleIcon} alt="Couples" style={{ width: '24px', height: '24px' }} />
+                  <img src={coupleIcon} alt={t('gm.couplesAlt')} style={{ width: '24px', height: '24px' }} />
                 </button>
               )}
               <button
                 className="kebab-menu-btn"
                 onClick={() => setShowChatModal(true)}
-                title="GM Chat"
+                title={t('gm.chatTitle')}
                 style={{ position: 'relative' }}
               >
                 <MessageCircle size={20} />
@@ -1016,7 +1019,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <button
                 className="kebab-menu-btn"
                 onClick={() => setShowMenu(!showMenu)}
-                title="Menu"
+                title={t('gm.menuTitle')}
               >
                 <div className="kebab-dot"></div>
                 <div className="kebab-dot"></div>
@@ -1026,21 +1029,21 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             {showMenu && (
               <div className="dropdown-menu">
                 <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowTeamModal(true); setShowMenu(false); }}>
-                  <Crown size={16} className="icon-inline" /> GM-Team verwalten
+                  <Crown size={16} className="icon-inline" /> {t('gm.manageTeam')}
                 </button>
                 <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setPrivacyMode(!privacyMode); setShowMenu(false); }}>
                   {privacyMode ? <Eye size={16} className="icon-inline" /> : <EyeOff size={16} className="icon-inline" />}
-                  {privacyMode ? 'Privacy-Modus deaktivieren' : 'Privacy-Modus aktivieren'}
+                  {privacyMode ? t('gm.privacyOff') : t('gm.privacyOn')}
                 </button>
                 {room.status !== 'lobby' && (
                   <button className="dropdown-item danger" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowMenu(false); handleEndGame(); }}>
-                    <Flag size={16} className="icon-inline" /> End Game Immediately
+                    <Flag size={16} className="icon-inline" /> {t('gm.endGameNow')}
                   </button>
                 )}
                 <button className="dropdown-item danger" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => {
                   setShowMenu(false);
                   setConfirmState({
-                    message: 'Close the ballroom? This will kick all players.', onConfirm: () => {
+                    message: t('gm.closeBallroomConfirm'), onConfirm: () => {
                       localStorage.removeItem('deathstep_selected_track');
                       if (spotifyPlayer) {
                         spotifyPlayer.pause().catch(e => console.error("Failed to pause on exit", e));
@@ -1050,7 +1053,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                     }
                   });
                 }}>
-                  <LogOut size={16} className="icon-inline" /> Close Ballroom
+                  <LogOut size={16} className="icon-inline" /> {t('gm.closeBallroom')}
                 </button>
               </div>
             )}
@@ -1059,22 +1062,22 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       </div>
 
       <div className="panel" style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 20px' }}>
-        <p>Status: <strong style={{ textTransform: 'uppercase', color: (room.status === 'dancing' || room.status === 'role_reveal') ? 'var(--neon-blue)' : 'var(--neon-purple)' }}>{room.status.replace('_', ' ')}</strong></p>
-        {room.round > 0 && <p>Round: <strong>{room.round}</strong></p>}
+        <p>{t('gm.status')} <strong style={{ textTransform: 'uppercase', color: (room.status === 'dancing' || room.status === 'role_reveal') ? 'var(--neon-blue)' : 'var(--neon-purple)' }}>{t(`phase.${room.status}`)}</strong></p>
+        {room.round > 0 && <p>{t('gm.round')} <strong>{room.round}</strong></p>}
       </div>
 
       {/* PENDING REJOIN REQUESTS */}
       {room.pendingRejoinRequests?.length > 0 && (
         <div className="panel panel--danger">
           <div className="panel-title" style={{ color: 'var(--neon-red)' }}>
-            <AlertTriangle size={16} className="icon-inline" /> Wiedereinstieg beantragt
+            <AlertTriangle size={16} className="icon-inline" /> {t('gm.rejoinRequested')}
           </div>
           {room.pendingRejoinRequests.map(req => (
             <div key={req.id} className="list-item" style={{ marginBottom: '10px' }}>
-              <span style={{ color: 'white' }}><strong>{maskName(req.playerName)}</strong> möchte wieder einsteigen</span>
+              <span style={{ color: 'white' }}><strong>{maskName(req.playerName)}</strong> {t('gm.wantsToRejoin')}</span>
               <div className="btn-row" style={{ flexShrink: 0 }}>
-                <button className="cyber-button" style={{ padding: '5px 15px' }} onClick={() => handleRejoinResponse(req.id, true)}>Annehmen</button>
-                <button className="cyber-button" style={{ padding: '5px 15px', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={() => handleRejoinResponse(req.id, false)}>Ablehnen</button>
+                <button className="cyber-button" style={{ padding: '5px 15px' }} onClick={() => handleRejoinResponse(req.id, true)}>{t('gm.accept')}</button>
+                <button className="cyber-button" style={{ padding: '5px 15px', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={() => handleRejoinResponse(req.id, false)}>{t('gm.deny')}</button>
               </div>
             </div>
           ))}
@@ -1088,15 +1091,15 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             {spotifyAllowed ? (
               <>
                 <button className={`segmented-option accent-purple ${!useSpotify ? 'is-active' : ''}`} onClick={() => setUseSpotify(false)}>
-                  Use Own Audio System
+                  {t('gm.useOwnAudio')}
                 </button>
                 <button className={`segmented-option accent-green ${useSpotify ? 'is-active' : ''}`} onClick={() => setUseSpotify(true)}>
-                  Use Spotify Integration
+                  {t('gm.useSpotify')}
                 </button>
               </>
             ) : (
               <button className="segmented-option accent-purple is-active" style={{ cursor: 'default' }}>
-                Use Own Audio System
+                {t('gm.useOwnAudio')}
               </button>
             )}
           </div>
@@ -1113,18 +1116,18 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             </div>
           </div>
 
-          <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px' }}>Players ({room.players.length})</h3>
+          <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px' }}>{t('gm.players')} ({room.players.length})</h3>
 
           <div className="panel">
             <p style={{ color: 'var(--text-muted)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <PhoneOff size={16} className="icon-inline" />
-              <span><strong style={{ color: 'var(--text-main)' }}>Spieler ohne Handy hinzufügen:</strong> Wird automatisch mit einem Partner mit Handy gepaart.</span>
+              <span><strong style={{ color: 'var(--text-main)' }}>{t('gm.addPhonelessTitle')}</strong> {t('gm.addPhonelessHint')}</span>
             </p>
             <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
               <input
                 type="text"
                 className="cyber-input"
-                placeholder="NAME"
+                placeholder={t('gm.namePlaceholder')}
                 value={manualPlayerName}
                 onChange={(e) => setManualPlayerName(e.target.value)}
                 style={{ flex: '1 1 150px', margin: 0 }}
@@ -1134,25 +1137,25 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 value={manualDanceRole}
                 onChange={(e) => setManualDanceRole(e.target.value)}
               >
-                <option value="lead">Lead</option>
-                <option value="follow">Follow</option>
+                <option value="lead">{t('common.lead')}</option>
+                <option value="follow">{t('common.follow')}</option>
               </select>
               <label className="check-row" style={{ fontSize: '0.9rem', whiteSpace: 'nowrap' }}>
                 <input type="checkbox" checked={manualIsFlexible} onChange={(e) => setManualIsFlexible(e.target.checked)} />
-                <span style={{ color: 'white' }}>flexibel</span>
+                <span style={{ color: 'white' }}>{t('gm.flexible')}</span>
               </label>
               <button className="cyber-button" onClick={handleAddManualPlayer} disabled={!manualPlayerName.trim()} style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <UserPlus size={16} className="icon-inline" /> Hinzufügen
+                <UserPlus size={16} className="icon-inline" /> {t('gm.add')}
               </button>
             </div>
           </div>
 
           <div className="btn-row" style={{ marginBottom: '20px' }}>
             <button className="cyber-button pulse-animation" onClick={handleRandomPairsClick} style={{ flex: 1 }}>
-              Random Pairs
+              {t('gm.randomPairs')}
             </button>
             <button className="cyber-button" onClick={handleClearPairs} style={{ flex: 1 }}>
-              Clear Pairs
+              {t('gm.clearPairs')}
             </button>
           </div>
 
@@ -1161,7 +1164,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             <div className="modal-overlay">
               <div className="modal-card cyber-card" style={{ maxWidth: '600px', border: '1px solid var(--neon-blue)' }}>
                 <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                  <AlertTriangle size={20} className="icon-inline" /> Rollen-Verteilung ungleich!
+                  <AlertTriangle size={20} className="icon-inline" /> {t('gm.rolesUnbalanced')}
                 </h3>
 
                 {randomizerFlow.step === 'mixed_selection' && (() => {
@@ -1177,32 +1180,32 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
                   const isSelectionValid = currentMinSwitchNeeded === 0;
 
-                  const excessRoleName = randomizerFlow.excessType === 'lead' ? 'Leads' : 'Follows';
-                  const missingRoleName = randomizerFlow.excessType === 'lead' ? 'Follows' : 'Leads';
+                  const excessRoleName = randomizerFlow.excessType === 'lead' ? t('gm.leads') : t('gm.follows');
+                  const missingRoleName = randomizerFlow.excessType === 'lead' ? t('gm.follows') : t('gm.leads');
 
                   const renderSkipAllowedText = () => {
                     if (randomizerFlow.excessCount === 1) {
                       return (
                         <p style={{ margin: 0, color: 'white' }}>
-                          Wir haben 1 {excessRoleName} zu viel. Du kannst diesen {excessRoleName} entweder einem Paar als 3. Person zuteilen lassen, oder unten auswählen, ob wer stattdessen zuschauen soll.
+                          {t('gm.rand1Excess', { role: excessRoleName })}
                         </p>
                       );
                     } else if (randomizerFlow.excessCount % 2 === 0) {
                       return (
                         <p style={{ margin: 0, color: 'white' }}>
-                          Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Wenn du unten genau {randomizerFlow.excessCount / 2} Spieler auswählst, die ihre Rolle wechseln, geht es perfekt auf und es entstehen nur normale 2er-Paare!<br />
-                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Alternativ kannst du auch Leute zuschauen lassen oder sie als 3. Person verteilen.</span>
+                          {t('gm.randEvenExcess', { count: randomizerFlow.excessCount, role: excessRoleName, half: randomizerFlow.excessCount / 2 })}<br />
+                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>{t('gm.randEvenExcessAlt')}</span>
                         </p>
                       );
                     } else {
                       return (
                         <div style={{ margin: 0, color: 'white' }}>
-                          Wir haben {randomizerFlow.excessCount} {excessRoleName} zu viel. Das geht leider nicht perfekt in 2er-Paaren auf.<br />
-                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>Deine Optionen:</span>
+                          {t('gm.randOddExcess', { count: randomizerFlow.excessCount, role: excessRoleName })}<br />
+                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>{t('gm.randOptions')}</span>
                           <ul style={{ margin: '5px 0 0 20px', padding: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                            <li><strong>Zuteilen:</strong> Mache einfach {randomizerFlow.excessCount} Paare zu 3er-Paaren.</li>
-                            <li><strong>Mischen:</strong> Lass Leute die Rolle wechseln UND teile den Rest als 3. Person auf.</li>
-                            <li><strong>Zuschauen:</strong> Lass 1 Person zuschauen und wechsle bei den restlichen die Rolle, für perfekte 2er-Paare.</li>
+                            <li><strong>{t('gm.randOptAssignLabel')}</strong> {t('gm.randOptAssignText', { count: randomizerFlow.excessCount })}</li>
+                            <li><strong>{t('gm.randOptMixLabel')}</strong> {t('gm.randOptMixText')}</li>
+                            <li><strong>{t('gm.randOptSpectateLabel')}</strong> {t('gm.randOptSpectateText')}</li>
                           </ul>
                         </div>
                       );
@@ -1214,21 +1217,21 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                       {originalMinSwitchNeeded > 0 ? (
                         <div className="panel panel--danger">
                           <p style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>
-                            Achtung: Wir haben <strong>{randomizerFlow.excessCount} {excessRoleName} zu viel!</strong> Das sind zu viele, um sie einfach als 3. Person zu verteilen (es würden 4er-Paare entstehen).
+                            <strong>{t('gm.randTooManyStrong', { count: randomizerFlow.excessCount, role: excessRoleName })}</strong> {t('gm.randTooManyRest')}
                           </p>
                           <p style={{ margin: '15px 0 10px 0', color: 'white' }}>
-                            Du musst ausgleichen. Du hast zwei Möglichkeiten:
+                            {t('gm.randMustBalance')}
                           </p>
                           <ul style={{ margin: '0 0 15px 20px', padding: 0, color: 'var(--text-muted)' }}>
-                            <li style={{ marginBottom: '5px' }}><strong style={{ color: 'var(--neon-blue)' }}>Rolle wechseln (Sehr effektiv!):</strong> 1 Wechsel löst das Problem für bis zu 3 Leute, da wir ein komplett neues Paar gewinnen!</li>
-                            <li><strong style={{ color: 'var(--neon-purple)' }}>Zuschauen lassen:</strong> Die Person pausiert in dieser Runde (löst das Problem für 1 Person).</li>
+                            <li style={{ marginBottom: '5px' }}><strong style={{ color: 'var(--neon-blue)' }}>{t('gm.randSwitchOptionLabel')}</strong> {t('gm.randSwitchOptionText')}</li>
+                            <li><strong style={{ color: 'var(--neon-purple)' }}>{t('gm.randSpectateOptionLabel')}</strong> {t('gm.randSpectateOptionText')}</li>
                           </ul>
                           <p style={{ margin: 0, color: 'var(--neon-red)', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <ChevronRight size={16} className="icon-inline" /> Wähle unten Aktionen aus. Der 'Auswahl bestätigen'-Button wird automatisch grün, sobald das Gleichgewicht wiederhergestellt ist!
+                            <ChevronRight size={16} className="icon-inline" /> {t('gm.randChooseBelow')}
                           </p>
                           <div style={{ marginTop: '15px', padding: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', fontSize: '0.9rem', color: 'var(--text-muted)', display: 'flex', gap: '8px' }}>
                             <Lightbulb size={16} className="icon-inline" style={{ flexShrink: 0, marginTop: '2px' }} />
-                            <span><strong>Pro-Tipp für perfekte 2er-Paare:</strong> Damit es absolut perfekt aufgeht, müssten genau <strong>{Math.floor(randomizerFlow.excessCount / 2)} Personen</strong> die Rolle wechseln{randomizerFlow.excessCount % 2 !== 0 ? ' und 1 Person zuschauen' : ''}.</span>
+                            <span><strong>{t('gm.randProTipLabel')}</strong> {t(randomizerFlow.excessCount % 2 !== 0 ? 'gm.randProTipOdd' : 'gm.randProTipEven', { count: Math.floor(randomizerFlow.excessCount / 2) })}</span>
                           </div>
                         </div>
                       ) : (
@@ -1250,9 +1253,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                                 value={currentAction}
                                 onChange={(e) => handlePlayerActionChange(p.id, e.target.value)}
                               >
-                                <option value="none">Als 3. Person</option>
-                                <option value="switch">Wechsel zu {missingRoleName}</option>
-                                <option value="spectator">Zuschauen</option>
+                                <option value="none">{t('gm.randAction3rd')}</option>
+                                <option value="switch">{t('gm.randActionSwitch', { role: missingRoleName })}</option>
+                                <option value="spectator">{t('gm.randActionSpectate')}</option>
                               </select>
                             </div>
                           )
@@ -1270,9 +1273,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                           }}
                           disabled={!isSelectionValid}
                         >
-                          Auswahl bestätigen (Paare bilden)
+                          {t('gm.randConfirm')}
                         </button>
-                        <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ width: '100%' }}>Abbrechen</button>
+                        <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ width: '100%' }}>{t('common.cancel')}</button>
                       </div>
                     </div>
                   );
@@ -1284,7 +1287,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', marginBottom: '20px' }}>
             <div style={{ flex: '1 1 260px', minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
-              <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Unpaired</h4>
+              <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>{t('gm.unpaired')}</h4>
               <div className="couple-list">
                 {getUnpairedPlayers().map(p => (
                   <div key={p.id} className={`list-item ${currentGroup.includes(p.id) ? 'list-item--purple' : ''}`} style={{ flexWrap: 'wrap' }}>
@@ -1309,8 +1312,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         color: currentGroup.includes(p.id) ? 'white' : 'var(--text-muted)'
                       }}>
                         {maskName(p.name)}
-                        {p.isFlexible && <Repeat size={14} className="icon-inline" title="Flexible Role" />}
-                        {p.hasNoPhone && <PhoneOff size={14} className="icon-inline" title="Kein Handy" />}
+                        {p.isFlexible && <Repeat size={14} className="icon-inline" title={t('gm.flexibleRoleTitle')} />}
+                        {p.hasNoPhone && <PhoneOff size={14} className="icon-inline" title={t('gm.noPhoneTitle')} />}
                       </span>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0, marginLeft: 'auto' }}>
@@ -1320,14 +1323,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         onChange={(e) => handleChangeRole(p.id, e.target.value)}
                         style={{ color: 'var(--neon-blue)', padding: '8px', minHeight: '40px', fontSize: '0.95rem' }}
                       >
-                        <option value="lead">Lead</option>
-                        <option value="follow">Follow</option>
-                        <option value="spectator">Spectator</option>
+                        <option value="lead">{t('common.lead')}</option>
+                        <option value="follow">{t('common.follow')}</option>
+                        <option value="spectator">{t('common.spectator')}</option>
                       </select>
                       <button
                         onClick={() => handleKickPlayer(p.id)}
                         className="icon-btn danger"
-                        title="Kick Player"
+                        title={t('gm.kickPlayerTitle')}
                       >
                         <X size={18} />
                       </button>
@@ -1343,9 +1346,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 const isInvalidRoleCombo = currentGroup.length > 1 && (!hasLead || !hasFollow);
                 const isDisabled = isTooLarge || isInvalidRoleCombo || currentGroup.length < 2;
 
-                let buttonText = `Create Group (${currentGroup.length})`;
-                if (isTooLarge) buttonText = "Max. 3 Personen!";
-                else if (isInvalidRoleCombo) buttonText = "Lead & Follow mischen!";
+                let buttonText = t('gm.createGroup', { count: currentGroup.length });
+                if (isTooLarge) buttonText = t('gm.max3');
+                else if (isInvalidRoleCombo) buttonText = t('gm.mixLeadFollow');
 
                 return (
                   <button
@@ -1367,7 +1370,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             </div>
 
             <div style={{ flex: '1 1 260px', minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
-              <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Pending Couples</h4>
+              <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>{t('gm.pendingCouples')}</h4>
               <div className="couple-list">
                 {pendingCouples.map((c, i) => {
                   const members = c.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
@@ -1379,20 +1382,20 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                           <React.Fragment key={p.id}>
                             {idx > 0 && <span style={{ opacity: 0.5, flexShrink: 0 }}>&amp;</span>}
                             <span style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
-                              {maskName(p.name)} {p.hasNoPhone && <PhoneOff size={13} className="icon-inline" title="Kein Handy" />}
+                              {maskName(p.name)} {p.hasNoPhone && <PhoneOff size={13} className="icon-inline" title={t('gm.noPhoneTitle')} />}
                             </span>
                           </React.Fragment>
                         ))}
                         {allNoPhone && (
                           <span style={{ color: 'var(--neon-red)', fontSize: '0.8rem', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            <AlertTriangle size={13} className="icon-inline" /> Kein Handy im Paar!
+                            <AlertTriangle size={13} className="icon-inline" /> {t('gm.noPhoneInCouple')}
                           </span>
                         )}
                       </div>
                       <button
                         onClick={() => handleDissolvePendingCouple(i)}
                         className="icon-btn"
-                        title="Paar auflösen"
+                        title={t('gm.dissolveCoupleTitle')}
                       >
                         <Scissors size={18} />
                       </button>
@@ -1405,16 +1408,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
           <div className="panel">
             <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-              <span style={{ color: 'var(--text-muted)' }}>Voting Right during game:</span>
+              <span style={{ color: 'var(--text-muted)' }}>{t('gm.votingRight')}</span>
               <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole}>
-                <option value="lead">Leads only</option>
-                <option value="follow">Follows only</option>
+                <option value="lead">{t('gm.leadsOnly')}</option>
+                <option value="follow">{t('gm.followsOnly')}</option>
               </select>
             </label>
           </div>
 
           <button className="cyber-button pulse-animation" onClick={handleReleasePairs} disabled={pendingCouples.length === 0 || randomizerFlow} style={{ width: '100%' }}>
-            RELEASE PAIRS
+            {t('gm.releasePairs')}
           </button>
         </div>
       )}
@@ -1429,7 +1432,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           <div className="phase-enter" style={{ marginBottom: '20px' }}>
             {renderSpotifyControls()}
 
-            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>Waiting for Confirmations</h3>
+            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.waitingConfirmations')}</h3>
             <div className="couple-list" style={{ marginBottom: '20px' }}>
               {pairedPlayers.map(p => {
                 const couple = room.couples.find(c => c.playerIds.includes(p.id));
@@ -1438,10 +1441,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <div key={p.id} className={`list-item ${p.isConfirmed ? 'list-item--active' : 'list-item--danger'}`}>
                     <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       {maskName(p.name)}
-                      {p.isFlexible && <Repeat size={14} className="icon-inline" title="Flexible Role" />}
+                      {p.isFlexible && <Repeat size={14} className="icon-inline" title={t('gm.flexibleRoleTitle')} />}
                       {p.hasNoPhone
-                        ? <PhoneOff size={14} className="icon-inline" title="Kein Handy" style={{ color: 'var(--text-muted)' }} />
-                        : <Smartphone size={14} className="icon-inline" title="Hat ein Handy" style={{ color: 'var(--neon-blue)' }} />}
+                        ? <PhoneOff size={14} className="icon-inline" title={t('gm.noPhoneTitle')} style={{ color: 'var(--text-muted)' }} />
+                        : <Smartphone size={14} className="icon-inline" title={t('gm.hasPhoneTitle')} style={{ color: 'var(--neon-blue)' }} />}
                       ({p.danceRole})
                     </span>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
@@ -1451,10 +1454,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                           style={{ width: 'auto', padding: '4px 10px', fontSize: '0.8rem', margin: 0 }}
                           onClick={() => handleGmConfirmCouple(couple.id)}
                         >
-                          Als bereit markieren (GM)
+                          {t('gm.markReadyGm')}
                         </button>
                       )}
-                      <span className={`badge ${p.isConfirmed ? 'badge--blue' : 'badge--red'}`}>{p.isConfirmed ? 'Ready' : 'Waiting...'}</span>
+                      <span className={`badge ${p.isConfirmed ? 'badge--blue' : 'badge--red'}`}>{p.isConfirmed ? t('common.ready') : t('common.waiting')}</span>
                     </div>
                   </div>
                 );
@@ -1462,9 +1465,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             </div>
 
             <div className="panel panel--purple">
-              <h4 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>GAME SETTINGS</h4>
+              <h4 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.gameSettings')}</h4>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                <label style={{ color: 'white', fontWeight: 'bold' }}>Number of Killers:</label>
+                <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.killerCount')}</label>
                 <div className="stepper">
                   <button className="stepper-btn" onClick={() => setKillerCount(Math.max(1, killerCount - 1))}><Minus size={18} /></button>
                   <span className="stepper-value">{killerCount}</span>
@@ -1472,10 +1475,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 </div>
               </div>
               {room.couples.length >= 9 && killerCount < 2 && (
-                <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> Recommendation: With {room.couples.length} couples, at least 2 killers are recommended.</p>
+                <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> {t('gm.killerRecMore', { count: room.couples.length })}</p>
               )}
               {room.couples.length < 9 && killerCount > 1 && (
-                <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> Recommendation: With {room.couples.length} couples, 1 killer is recommended.</p>
+                <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> {t('gm.killerRecOne', { count: room.couples.length })}</p>
               )}
             </div>
 
@@ -1485,7 +1488,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               disabled={!canStart}
               style={{ width: '100%', opacity: canStart ? 1 : 0.5, cursor: canStart ? 'pointer' : 'not-allowed' }}
             >
-              REVEAL ROLES
+              {t('gm.revealRoles')}
             </button>
 
             {!allConfirmed && !bypassPaired && (
@@ -1494,7 +1497,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   onClick={() => setBypassPaired(true)}
                   style={{ marginTop: '15px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
                 >
-                  Bypass check and reveal anyway
+                  {t('gm.bypassReveal')}
                 </button>
               </div>
             )}
@@ -1520,26 +1523,26 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             {renderSpotifyControls()}
 
             <div style={{ textAlign: 'center' }}>
-              <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>ROLES REVEALED</h3>
+              <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>{t('gm.rolesRevealed')}</h3>
 
               {!isSpotifyReady && (
                 <div className="panel panel--danger">
-                  <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> MUSIC NOT READY</strong><br />
+                  <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> {t('gm.musicNotReady')}</strong><br />
                   <span style={{ color: 'white' }}>
-                    {!selectedTrack ? 'Please select a song using the Spotify search above.' : 'Player is initializing... Please wait.'}
+                    {!selectedTrack ? t('gm.selectSongFirst') : t('gm.playerInitializing')}
                   </span>
                 </div>
               )}
 
               {(!allCouplesViewedRole && !bypassRoleView) && (
                 <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
-                  Waiting for at least one player from each couple to view their role on their device...
+                  {t('gm.waitingRoleViews')}
                 </p>
               )}
 
               {(allCouplesViewedRole || bypassRoleView) && isSpotifyReady && (
                 <p style={{ color: '#00ff66', marginBottom: '20px' }}>
-                  All checks passed! You can start the Game now!
+                  {t('gm.allChecksPassed')}
                 </p>
               )}
 
@@ -1569,7 +1572,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                           </button>
                         )}
                         <span className={`badge ${hasViewed ? 'badge--blue' : 'badge--red'}`}>
-                          {hasViewed ? 'Ready' : 'Waiting...'}
+                          {hasViewed ? t('common.ready') : t('common.waiting')}
                         </span>
                       </div>
                     </div>
@@ -1584,8 +1587,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 style={{ width: '100%', fontSize: '1.2rem', padding: '15px', opacity: canStart ? 1 : 0.5, cursor: canStart ? 'pointer' : 'not-allowed' }}
               >
                 {useSpotify
-                  ? `START MUSIC & START DANCING`
-                  : `START DANCING (ROUND ${room.round})`
+                  ? t('gm.startMusicDancing')
+                  : t('gm.startDancing', { round: room.round })
                 }
               </button>
 
@@ -1594,7 +1597,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   onClick={() => setBypassRoleView(true)}
                   style={{ marginTop: '15px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
                 >
-                  Bypass check and start anyway
+                  {t('gm.bypassStart')}
                 </button>
               )}
             </div>
@@ -1612,7 +1615,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           <div className="phase-enter" style={{ marginBottom: '20px' }}>
             <div className="panel panel--info" style={{ animation: 'pulse 2s infinite' }}>
               <h3 style={{ color: 'var(--neon-blue)', textAlign: 'center', margin: 0, letterSpacing: '2px', marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-                <Music2 size={20} className="icon-inline" /> DANCING IN PROGRESS <Music2 size={20} className="icon-inline" />
+                <Music2 size={20} className="icon-inline" /> {t('gm.dancingInProgress')} <Music2 size={20} className="icon-inline" />
               </h3>
 
               {useSpotify && selectedTrack && (
@@ -1621,7 +1624,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                     <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
                       <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>AKTUELLER SONG</div>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('gm.currentSong')}</div>
                         <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
                       </div>
                       <button
@@ -1652,22 +1655,22 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                     </div>
                   ) : (
                     <div className="panel panel--danger" style={{ textAlign: 'center', color: 'var(--neon-red)', fontWeight: 'bold', marginBottom: 0 }}>
-                      Das Lied ist vorbei!
+                      {t('gm.songOver')}
                     </div>
                   )}
                 </div>
               )}
 
-              <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>Everyone is dancing! Each killer couple can secretly eliminate one couple by touching them.</p>
+              <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>{t('gm.everyoneDancing')}</p>
             </div>
 
             <div className="panel panel--purple">
-              <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>Observe the dance floor</h4>
+              <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.observeTitle')}</h4>
               <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
-                Watch to see if any pair is touched/killed by the killers.
+                {t('gm.observeBody')}
               </p>
               <p style={{ color: 'var(--text-muted)', marginBottom: '5px' }}>
-                <strong>Mark killed Pair:</strong> <span style={{ color: 'var(--neon-purple)' }}>({markedCount}/{aliveKillerCount} marked)</span>
+                <strong>{t('gm.markKilled')}</strong> <span style={{ color: 'var(--neon-purple)' }}>{t('gm.markedCount', { marked: markedCount, total: aliveKillerCount })}</span>
               </p>
 
               <div className="couple-list" style={{ marginBottom: '20px' }}>
@@ -1683,7 +1686,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                       style={disabled ? { opacity: 0.4, cursor: 'not-allowed' } : undefined}
                     >
                       <span style={{ flexShrink: 0, minWidth: '100px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        {isMarked ? <><Check size={14} className="icon-inline" /> Marked:</> : <><Skull size={14} className="icon-inline" /> Kill:</>}
+                        {isMarked ? <><Check size={14} className="icon-inline" /> {t('gm.marked')}</> : <><Skull size={14} className="icon-inline" /> {t('gm.kill')}</>}
                       </span>
                       {renderTruncatedNames(couple.name)}
                     </button>
@@ -1692,7 +1695,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               </div>
               {limitReached && aliveKillerCount > 0 && (
                 <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', margin: '-10px 0 15px 0', fontStyle: 'italic' }}>
-                  Limit reached: max. {aliveKillerCount} kill{aliveKillerCount > 1 ? 's' : ''} per round ({aliveKillerCount} surviving killer couple{aliveKillerCount > 1 ? 's' : ''}).
+                  {t('gm.killLimitReached', { count: aliveKillerCount })}
                 </p>
               )}
               <button
@@ -1700,7 +1703,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 onClick={() => handleReportKill(null)}
                 style={{ marginBottom: '20px' }}
               >
-                {!room.pendingVictimIds?.length ? <><Check size={16} className="icon-inline" /> Marked: NOBODY KILLED</> : 'NOBODY KILLED (clear marks)'}
+                {!room.pendingVictimIds?.length ? <><Check size={16} className="icon-inline" /> {t('gm.markedNobody')}</> : t('gm.nobodyKilled')}
               </button>
 
               <button
@@ -1708,7 +1711,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
                 onClick={handleRevealKill}
               >
-                REVEAL KILL TO PLAYERS
+                {t('gm.revealKillBtn')}
               </button>
             </div>
           </div>
@@ -1721,32 +1724,32 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         return (
           <div className="phase-enter" style={{ marginBottom: '20px', textAlign: 'center' }}>
             {renderSpotifyControls()}
-            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>KILL REVEALED</h3>
+            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.killRevealed')}</h3>
             {victimCouples.length > 0 ? (
               <>
                 <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                  <Skull size={20} className="icon-inline" /> <strong>{victimCouples.map(c => maskName(c.name)).join(' & ')}</strong> were eliminated!
+                  <Skull size={20} className="icon-inline" /> <strong>{t('player.wereEliminated', { names: victimCouples.map(c => maskName(c.name)).join(' & ') })}</strong>
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
-                    PROCEED TO VOTING (SKIP DISCUSSION)
+                    {t('gm.proceedVotingSkip')}
                   </button>
                   <button className="cyber-button" onClick={handleStartDiscussion} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
-                    START DISCUSSION PHASE
+                    {t('gm.startDiscussion')}
                   </button>
                 </div>
               </>
             ) : (
               <>
                 <p style={{ color: 'var(--neon-blue)', fontSize: '1.2rem', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                  <Sparkles size={20} className="icon-inline" /> Nobody was eliminated!
+                  <Sparkles size={20} className="icon-inline" /> {t('gm.nobodyEliminated')}
                 </p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                   <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
-                    PROCEED TO VOTING (SKIP DISCUSSION)
+                    {t('gm.proceedVotingSkip')}
                   </button>
                   <button className="cyber-button" onClick={handleStartDiscussion} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
-                    START DISCUSSION PHASE
+                    {t('gm.startDiscussion')}
                   </button>
                 </div>
               </>
@@ -1759,10 +1762,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       {room.status === 'discussion' && (
         <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
-          <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}><MessageCircle size={20} className="icon-inline" /> DISCUSSION PHASE</h3>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '30px' }}>The dancers can now discuss who the killers might be.</p>
+          <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}><MessageCircle size={20} className="icon-inline" /> {t('gm.discussionPhase')}</h3>
+          <p style={{ color: 'var(--text-muted)', marginBottom: '30px' }}>{t('gm.discussionBody')}</p>
           <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
-            PROCEED TO VOTING
+            {t('gm.proceedVoting')}
           </button>
         </div>
       )}
@@ -1771,19 +1774,19 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       {room.status === 'voting' && (
         <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
-          <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>VOTING PHASE</h3>
+          <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.votingPhase')}</h3>
           {room.votingEndTime && (
             <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
               <Timer size={14} className="icon-inline" />
               {gmVotingTimeLeft > 0
-                ? `Hinweis: noch ca. ${gmVotingTimeLeft}s Abstimmzeit für die Spieler`
-                : 'Hinweis: Abstimmzeit für die Spieler ist abgelaufen'}
+                ? t('gm.votingTimeLeft', { seconds: gmVotingTimeLeft })
+                : t('gm.votingTimeUp')}
             </p>
           )}
           {!isSpotifyReady && (
             <div className="panel panel--danger" style={{ textAlign: 'center' }}>
-              <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> MUSIC NOT READY</strong><br />
-              <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>You must select a song before starting the next round.</span>
+              <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> {t('gm.musicNotReady')}</strong><br />
+              <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>{t('gm.selectSongNextRound')}</span>
             </div>
           )}
           <div className="couple-list">
@@ -1798,14 +1801,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minWidth: 0 }}>
                     {renderTruncatedNames(couple.name)}
                     <span className={`badge ${hasVoted ? 'badge--blue' : 'badge--muted'}`} style={{ margin: '0 10px' }}>
-                      {hasVoted ? 'Voted' : 'Waiting'}
+                      {hasVoted ? t('gm.voted') : t('gm.waitingBadge')}
                     </span>
-                    <strong style={{ color: 'var(--neon-purple)', flexShrink: 0 }}>{getVoteCount(couple.id)} Votes</strong>
+                    <strong style={{ color: 'var(--neon-purple)', flexShrink: 0 }}>{getVoteCount(couple.id)} {t('gm.votes')}</strong>
                   </div>
                   <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '5px' }}>
                     {votingPlayer
-                      ? <><Smartphone size={12} className="icon-inline" /> Stimmt ab: {maskName(votingPlayer.name)}</>
-                      : <><PhoneOff size={12} className="icon-inline" /> Niemand zugewiesen (kein Handy im Paar)</>}
+                      ? <><Smartphone size={12} className="icon-inline" /> {t('gm.votingByLabel')} {maskName(votingPlayer.name)}</>
+                      : <><PhoneOff size={12} className="icon-inline" /> {t('gm.nobodyAssigned')}</>}
                   </div>
                   {needsGmVote && (
                     <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
@@ -1815,7 +1818,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         value={selectedSuspect}
                         onChange={(e) => setGmVoteSelections({ ...gmVoteSelections, [couple.id]: e.target.value })}
                       >
-                        <option value="">Verdächtiges Paar wählen...</option>
+                        <option value="">{t('gm.chooseSuspect')}</option>
                         {suspectOptions.map(s => (
                           <option key={s.id} value={s.id}>{maskName(s.name)}</option>
                         ))}
@@ -1826,14 +1829,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         disabled={!selectedSuspect}
                         onClick={() => handleGmCastVote(couple.id, selectedSuspect)}
                       >
-                        Für Paar abstimmen (GM)
+                        {t('gm.voteForCouple')}
                       </button>
                       <button
                         className="cyber-button"
                         style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', flex: '0 0 auto' }}
                         onClick={() => handleGmCastVote(couple.id, null)}
                       >
-                        Enthaltung (GM)
+                        {t('gm.abstain')}
                       </button>
                     </div>
                   )}
@@ -1843,7 +1846,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                     onClick={() => handleExecuteVoteSafe(couple.id)}
                     disabled={!isSpotifyReady}
                   >
-                    KICK & NEXT ROUND
+                    {t('gm.kickNextRound')}
                   </button>
                 </div>
               );
@@ -1855,7 +1858,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             onClick={() => handleExecuteVoteSafe(null)}
             disabled={!isSpotifyReady}
           >
-            TIE / KICK NOBODY (NEXT ROUND)
+            {t('gm.tieKickNobody')}
           </button>
         </div>
       )}
@@ -1865,13 +1868,13 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           return (
             <div className="panel phase-enter" style={{ marginTop: '30px', textAlign: 'center' }}>
               <h3 style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
-                SPIEL ABGEBROCHEN
+                {t('gm.abortedTitle')}
               </h3>
               <p style={{ color: 'white', marginBottom: '20px' }}>
-                Das Spiel wurde vorzeitig beendet.
+                {t('gm.abortedBody')}
               </p>
               <button className="cyber-button pulse-animation" style={{ width: '100%' }} onClick={handleResetGame}>
-                ZURÜCK ZUR LOBBY / NEUE RUNDE
+                {t('gm.backToLobby')}
               </button>
             </div>
           );
@@ -1883,12 +1886,12 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           <div className={`panel phase-enter ${killersWon ? 'panel--danger' : 'panel--info'}`} style={{ marginTop: '30px', textAlign: 'center' }}>
             <h3 style={{ color: killersWon ? 'var(--neon-red)' : 'var(--neon-blue)', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
               {killersWon ? <Skull size={20} className="icon-inline" /> : <Sparkles size={20} className="icon-inline" />}
-              {killersWon ? 'SIEG DER KILLER' : 'SIEG DER TÄNZER'}
+              {killersWon ? t('gm.killersVictory') : t('gm.dancersVictory')}
             </h3>
             {killerCouples.length > 0 && (
               <div style={{ marginBottom: '15px' }}>
                 <p style={{ fontSize: '1.2rem', marginBottom: '5px', color: 'white' }}>
-                  {killerCouples.length > 1 ? 'Killers:' : 'Killer:'}
+                  {killerCouples.length > 1 ? t('gm.killersLabel') : t('gm.killerLabel')}
                 </p>
                 {killerCouples.map((k, i) => (
                   <strong key={k.id} style={{ color: 'var(--neon-red)', display: 'block', fontSize: '1.1rem' }}>{maskName(k.name)}</strong>
@@ -1896,7 +1899,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               </div>
             )}
             <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
-              Das Spiel ist beendet.
+              {t('gm.gameEnded')}
             </p>
             <button className="cyber-button pulse-animation" style={{ width: '100%' }} onClick={handleResetGame}>
               ZURÜCK ZUR LOBBY / NEUE RUNDE
@@ -1914,7 +1917,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             >
               <X size={20} />
             </button>
-            <h3 style={{ marginBottom: '20px', color: 'var(--text-muted)' }}>ALL COUPLES ({room.couples.length})</h3>
+            <h3 style={{ marginBottom: '20px', color: 'var(--text-muted)' }}>{t('gm.allCouples')} ({room.couples.length})</h3>
             <div className="couple-list">
               {room.couples.map(couple => {
                 const members = getCoupleMembers(couple);
@@ -1925,13 +1928,13 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                       {renderMembersWithPhoneIcons(couple, { dimmed: couple.status === 'eliminated', bold: true })}
                       {room.status !== 'lobby' && room.status !== 'paired' && (
                         <span className={`role-${couple.role}`} style={{ fontSize: '0.8rem', textTransform: 'uppercase', flexShrink: 0 }}>
-                          {couple.role}
+                          {t(`role.${couple.role}`)}
                         </span>
                       )}
                       <button
                         onClick={() => handleKickCouple(couple.id, couple.name)}
                         className="icon-btn danger"
-                        title="Paar aus dem Spiel werfen"
+                        title={t('gm.kickCoupleTitle')}
                       >
                         <X size={18} />
                       </button>
@@ -1939,7 +1942,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                     {phoneHavingMembers.length > 1 && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
-                          <Smartphone size={13} className="icon-inline" /> Stimmt ab:
+                          <Smartphone size={13} className="icon-inline" /> {t('gm.votingByLabel')}
                         </span>
                         <select
                           className="cyber-select"
@@ -1972,13 +1975,13 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <X size={20} />
             </button>
             <h3 style={{ marginBottom: '20px', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <Crown size={20} className="icon-inline" /> GM-TEAM VERWALTEN
+              <Crown size={20} className="icon-inline" /> {t('gm.manageTeamTitle')}
             </h3>
 
-            <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Aktuelle Co-GMs ({room.coGms?.length || 0})</h4>
+            <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>{t('gm.currentCoGms')} ({room.coGms?.length || 0})</h4>
             <div className="couple-list" style={{ marginBottom: '25px' }}>
               {(room.coGms || []).length === 0 && (
-                <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Noch keine Co-GMs befördert.</p>
+                <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>{t('gm.noCoGms')}</p>
               )}
               {(room.coGms || []).map(gm => (
                 <div key={gm.id} className="list-item list-item--purple">
@@ -1986,7 +1989,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <button
                     onClick={() => handleRemoveCoGM(gm.id, gm.name)}
                     className="icon-btn danger"
-                    title="GM-Rechte entziehen"
+                    title={t('gm.revokeGmTitle')}
                   >
                     <X size={18} />
                   </button>
@@ -1994,20 +1997,20 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               ))}
             </div>
 
-            <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>Spieler zum GM befördern</h4>
+            <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>{t('gm.promoteHeader')}</h4>
             {room.status !== 'lobby' ? (
-              <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Beförderungen sind nur in der Lobby-Phase möglich.</p>
+              <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>{t('gm.promoteLobbyOnly')}</p>
             ) : (
               <div className="couple-list">
                 {room.players.length === 0 && (
-                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Keine Spieler im Raum.</p>
+                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>{t('gm.noPlayers')}</p>
                 )}
                 {room.players.map(p => (
                   <div key={p.id} className="list-item">
                     <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{maskName(p.name)}</span>
                     {p.hasNoPhone ? (
-                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '4px' }} title="Kann nicht befördert werden, da kein Handy vorhanden ist">
-                        <PhoneOff size={13} className="icon-inline" /> kein Handy
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '4px' }} title={t('gm.cannotPromoteTitle')}>
+                        <PhoneOff size={13} className="icon-inline" /> {t('gm.noPhoneShort')}
                       </span>
                     ) : (
                       <button
@@ -2015,7 +2018,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         style={{ padding: '10px 14px', minHeight: '40px', fontSize: '0.85rem', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '6px' }}
                         onClick={() => handlePromoteToGM(p.id, p.name)}
                       >
-                        <Crown size={14} className="icon-inline" /> {maskName(p.name)} befördern
+                        <Crown size={14} className="icon-inline" /> {t('gm.promoteBtn', { name: maskName(p.name) })}
                       </button>
                     )}
                   </div>
@@ -2037,18 +2040,18 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <X size={20} />
               </button>
               <h3 style={{ marginBottom: '15px', color: 'var(--neon-blue)', display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <MessageCircle size={20} className="icon-inline" /> GM CHAT
+                <MessageCircle size={20} className="icon-inline" /> {t('gm.gmChat')}
               </h3>
               <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', paddingRight: '5px' }}>
                 {gmChatMessages.length === 0 && (
-                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', textAlign: 'center', marginTop: '20px' }}>Noch keine Nachrichten. Schreib deinem Team!</p>
+                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', textAlign: 'center', marginTop: '20px' }}>{t('gm.noMessages')}</p>
                 )}
                 {gmChatMessages.map(msg => {
                   const isMine = msg.senderName === myGmName;
                   return (
                     <div key={msg.id} className={`chat-row ${isMine ? 'mine' : 'theirs'}`}>
                       <div className="chat-sender">
-                        {isMine ? 'Du' : msg.senderName}
+                        {isMine ? t('gm.you') : msg.senderName}
                       </div>
                       <div className="chat-bubble">
                         {msg.text}
@@ -2062,7 +2065,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <input
                   type="text"
                   className="cyber-input"
-                  placeholder="Nachricht an dein GM-Team..."
+                  placeholder={t('gm.chatPlaceholder')}
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter') handleSendChat(); }}
@@ -2070,7 +2073,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   maxLength={500}
                 />
                 <button className="cyber-button" onClick={handleSendChat} disabled={!chatInput.trim()} style={{ width: 'auto', flexShrink: 0, padding: '0 20px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Send size={16} className="icon-inline" /> Senden
+                  <Send size={16} className="icon-inline" /> {t('gm.sendBtn')}
                 </button>
               </div>
             </div>

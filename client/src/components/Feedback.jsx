@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
+import { useLanguage } from '../i18n.jsx';
 
 function Feedback() {
+  const { t } = useLanguage();
   const [name, setName] = useState('');
   const [message, setMessage] = useState('');
-  const [status, setStatus] = useState('');
+  // Status is stored as a locale key so it re-renders in the right language
+  const [statusKey, setStatusKey] = useState('');
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setStatus('Sende...');
+    setStatusKey('feedback.sending');
     try {
       const response = await fetch('/api/feedback', {
         method: 'POST',
@@ -15,54 +18,54 @@ function Feedback() {
         body: JSON.stringify({ name, message, timestamp: new Date().toISOString() })
       });
       if (response.ok) {
-        setStatus('Vielen Dank für dein Feedback!');
+        setStatusKey('feedback.thanks');
         setName('');
         setMessage('');
       } else {
-        setStatus('Fehler beim Senden.');
+        setStatusKey('feedback.error');
       }
     } catch (err) {
-      setStatus('Fehler beim Senden.');
+      setStatusKey('feedback.error');
     }
   };
 
   return (
     <div className="app-container" style={{ padding: '20px' }}>
       <div className="cyber-card" style={{ maxWidth: '600px', margin: '0 auto' }}>
-        <h2 style={{ color: 'var(--neon-blue)', marginBottom: '20px', textAlign: 'center' }}>Feedback</h2>
+        <h2 style={{ color: 'var(--neon-blue)', marginBottom: '20px', textAlign: 'center' }}>{t('feedback.title')}</h2>
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
           <div>
-            <label style={{ color: 'var(--text-muted)' }}>Name (optional)</label>
-            <input 
-              type="text" 
-              className="cyber-input" 
+            <label style={{ color: 'var(--text-muted)' }}>{t('feedback.nameLabel')}</label>
+            <input
+              type="text"
+              className="cyber-input"
               value={name}
               onChange={e => setName(e.target.value)}
-              placeholder="Dein Name"
+              placeholder={t('feedback.namePlaceholder')}
             />
           </div>
           <div>
-            <label style={{ color: 'var(--text-muted)' }}>Nachricht</label>
-            <textarea 
-              className="cyber-input" 
+            <label style={{ color: 'var(--text-muted)' }}>{t('feedback.messageLabel')}</label>
+            <textarea
+              className="cyber-input"
               style={{ minHeight: '150px', resize: 'vertical' }}
               value={message}
               onChange={e => setMessage(e.target.value)}
-              placeholder="Was können wir verbessern?"
+              placeholder={t('feedback.messagePlaceholder')}
               required
             />
           </div>
           <button type="submit" className="cyber-button pulse-animation" style={{ marginTop: '10px' }}>
-            Absenden
+            {t('feedback.submit')}
           </button>
         </form>
-        {status && (
-          <p style={{ marginTop: '20px', textAlign: 'center', color: status.includes('Vielen Dank') ? 'var(--neon-blue)' : 'var(--neon-red)' }}>
-            {status}
+        {statusKey && (
+          <p style={{ marginTop: '20px', textAlign: 'center', color: statusKey === 'feedback.thanks' ? 'var(--neon-blue)' : 'var(--neon-red)' }}>
+            {t(statusKey)}
           </p>
         )}
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>Zurück zum Spiel</a>
+          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
         </div>
       </div>
     </div>

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { HelpCircle, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { useLanguage } from '../i18n.jsx';
 
 function useEscapeKey(isOpen, onEscape) {
   useEffect(() => {
@@ -12,6 +13,7 @@ function useEscapeKey(isOpen, onEscape) {
 }
 
 export function ConfirmModal({ isOpen, message, onConfirm, onCancel }) {
+  const { t } = useLanguage();
   useEscapeKey(isOpen, onCancel || (() => {}));
   if (!isOpen) return null;
   return createPortal(
@@ -24,8 +26,8 @@ export function ConfirmModal({ isOpen, message, onConfirm, onCancel }) {
         <HelpCircle size={36} style={{ color: 'var(--neon-purple)', marginBottom: '15px' }} />
         <h3 style={{ color: 'var(--text-main)', marginBottom: '30px', fontSize: '1.2rem', lineHeight: '1.5' }}>{message}</h3>
         <div className="btn-row">
-          <button className="cyber-button" onClick={() => { onConfirm(); onCancel(); }} style={{ flex: 1, padding: '10px' }}>YES</button>
-          <button className="cyber-button" onClick={onCancel} style={{ flex: 1, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', padding: '10px' }}>NO</button>
+          <button className="cyber-button" onClick={() => { onConfirm(); onCancel(); }} style={{ flex: 1, padding: '10px' }}>{t('common.yes')}</button>
+          <button className="cyber-button" onClick={onCancel} style={{ flex: 1, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', padding: '10px' }}>{t('common.no')}</button>
         </div>
       </div>
     </div>,
@@ -33,10 +35,10 @@ export function ConfirmModal({ isOpen, message, onConfirm, onCancel }) {
   );
 }
 
-export function AlertModal({ isOpen, message, onClose }) {
+export function AlertModal({ isOpen, message, onClose, isSuccess = false }) {
+  const { t } = useLanguage();
   useEscapeKey(isOpen, onClose || (() => {}));
   if (!isOpen) return null;
-  const isSuccess = message && (message.includes('successfully') || message.includes('Successfully'));
   const accentColor = isSuccess ? 'var(--neon-green)' : 'var(--neon-red)';
   const boxShadowColor = isSuccess ? 'rgba(29, 185, 84, 0.3)' : 'rgba(255,42,85,0.3)';
   const btnClass = isSuccess ? 'cyber-button' : 'cyber-button danger';
@@ -52,7 +54,7 @@ export function AlertModal({ isOpen, message, onClose }) {
       >
         <Icon size={36} style={{ color: accentColor, marginBottom: '15px' }} />
         <h3 style={{ color: 'var(--text-main)', marginBottom: '30px', fontSize: '1.2rem', lineHeight: '1.5' }}>{message}</h3>
-        <button className={btnClass} onClick={onClose} style={btnStyle}>OK</button>
+        <button className={btnClass} onClick={onClose} style={btnStyle}>{t('common.ok')}</button>
       </div>
     </div>,
     document.body

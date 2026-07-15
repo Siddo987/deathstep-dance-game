@@ -177,10 +177,11 @@ class GameStore {
 
   requestRejoin(roomId, playerName, requestingClientId, requestingSocketId) {
     const room = this.rooms.get(roomId);
-    if (!room) return { error: 'Room not found.' };
+    // Error values are locale keys resolved by the client ('server.<key>').
+    if (!room) return { error: 'roomNotFound' };
 
     const targetPlayer = room.players.find(p => p.name.toLowerCase() === playerName.toLowerCase());
-    if (!targetPlayer) return { error: 'Kein Spieler mit diesem Namen in dieser Runde gefunden.' };
+    if (!targetPlayer) return { error: 'rejoinPlayerNotFound' };
 
     if (targetPlayer.id === requestingClientId) {
       // Same device/session reconnecting - no GM approval needed.
