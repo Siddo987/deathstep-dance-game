@@ -11,6 +11,19 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
   const [confirmState, setConfirmState] = useState(null);
   const [votingTimeLeft, setVotingTimeLeft] = useState(0);
 
+  // Silent-report dancing phase: whether this couple's non-killer felt killed this round, and
+  // the decoy puzzle shown to those who say "no" (regenerated once per round, unchecked).
+  const [feltKilledChoice, setFeltKilledChoice] = useState(null);
+  const [decoyAnswer, setDecoyAnswer] = useState('');
+  const decoyPuzzle = React.useMemo(() => ({
+    a: 1 + Math.floor(Math.random() * 20),
+    b: 1 + Math.floor(Math.random() * 20)
+  }), [room.round]);
+  React.useEffect(() => {
+    setFeltKilledChoice(null);
+    setDecoyAnswer('');
+  }, [room.round]);
+
   // Calculate server time offset to prevent countdown starting at wrong times
   const serverOffsetRef = React.useRef(0);
   React.useEffect(() => {
@@ -68,6 +81,17 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
 
   const handleVote = (suspectCoupleId) => {
     socket.emit('castVote', { roomId: room.id, voterId: clientId, suspectId: suspectCoupleId });
+  };
+
+  const handleSubmitKillClaim = (victimCoupleId, victimName) => {
+    setConfirmState({
+      message: victimCoupleId ? t('player.confirmKillClaim', { name: victimName }) : t('player.confirmKillClaimNobody'),
+      onConfirm: () => socket.emit('submitKillClaim', { roomId: room.id, clientId, victimId: victimCoupleId })
+    });
+  };
+
+  const handleSubmitVictimReport = (feltKilled, suspectCoupleId) => {
+    socket.emit('submitVictimReport', { roomId: room.id, clientId, feltKilled, suspectId: suspectCoupleId });
   };
 
   const handleLeaveClick = () => {
@@ -315,7 +339,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
     <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
       {playerNameTag}
       {leaveButton}
-      {(room.status === 'dancing' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'discussion') && (
+      {(room.status === 'dancing' || room.status === 'silent_report' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'discussion') && (
         <p style={{ color: 'var(--text-muted)', marginBottom: '10px', marginTop: '20px' }}>{t('player.round', { n: room.round })}</p>
       )}
 
@@ -327,6 +351,113 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
           <p style={{ marginTop: '10px', color: 'white' }}>{t('player.danceBody')}</p>
         </div>
       )}
+
+      {room.status === 'silent_report' && (
+        <div className="panel panel--purple">
+          <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.5rem', letterSpacing: '2px', marginBottom: '10px' }}>
+            {t('player.silentReportPhaseTitle')}
+          </h2>
+          <p style={{ color: 'white' }}>{t('player.silentReportPhaseBody')}</p>
+        </div>
+      )}
+
+      {room.status === 'silent_report' && myCouple.status === 'alive' && (() => {
+        const hasSubmittedKillClaim = !!(room.killClaims && Object.prototype.hasOwnProperty.call(room.killClaims, myCouple.id));
+        const hasSubmittedVictimReport = !!(room.victimReports && Object.prototype.hasOwnProperty.call(room.victimReports, myCouple.id));
+        const isKiller = role === 'killer';
+        const hasSubmitted = isKiller ? hasSubmittedKillClaim : hasSubmittedVictimReport;
+
+        if (!canVote) {
+          return (
+            <div className="panel" style={{ textAlign: 'center', marginTop: '20px' }}>
+              <h3 style={{ color: 'var(--text-muted)' }}>{t('player.partnerActing')}</h3>
+              <p style={{ marginTop: '10px' }}>{t('player.partnerActingBody')}</p>
+            </div>
+          );
+        }
+
+        if (hasSubmitted) {
+          return (
+            <div className="panel panel--purple" style={{ textAlign: 'center', marginTop: '20px' }}>
+              <div className="pulse-animation" style={{ width: '30px', height: '30px', borderRadius: '50%', background: 'var(--neon-purple)', margin: '0 auto 15px' }}></div>
+              <h3 style={{ color: 'var(--neon-purple)' }}>{t('player.silentReportSubmitted')}</h3>
+              <p style={{ color: 'var(--text-muted)', marginTop: '10px' }}>{t('player.silentReportSubmittedBody')}</p>
+            </div>
+          );
+        }
+
+        if (isKiller) {
+          return (
+            <div className="panel panel--danger" style={{ marginTop: '20px' }}>
+              <h3 style={{ color: 'var(--neon-red)', marginBottom: '15px' }}>{t('player.whoDidYouKill')}</h3>
+              <div className="couple-list">
+                {aliveSuspectCouples.filter(c => c.role !== 'killer').map(c => (
+                  <button key={c.id} className="cyber-button" onClick={() => handleSubmitKillClaim(c.id, c.name)}>
+                    {t('player.killClaimFor', { name: c.name })}
+                  </button>
+                ))}
+                <button
+                  className="cyber-button"
+                  style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
+                  onClick={() => handleSubmitKillClaim(null, null)}
+                >
+                  {t('player.killClaimNobody')}
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        if (feltKilledChoice === null) {
+          return (
+            <div className="panel panel--purple" style={{ marginTop: '20px' }}>
+              <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('player.feltKilledQuestion')}</h3>
+              <div className="couple-list">
+                <button className="cyber-button" onClick={() => setFeltKilledChoice('yes')}>{t('player.feltKilledYes')}</button>
+                <button
+                  className="cyber-button"
+                  style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
+                  onClick={() => setFeltKilledChoice('no')}
+                >
+                  {t('player.feltKilledNo')}
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        if (feltKilledChoice === 'yes') {
+          return (
+            <div className="panel panel--danger" style={{ marginTop: '20px' }}>
+              <h3 style={{ color: 'var(--neon-red)', marginBottom: '15px' }}>{t('player.whoKilledYou')}</h3>
+              <div className="couple-list">
+                {aliveSuspectCouples.map(c => (
+                  <button key={c.id} className="cyber-button" onClick={() => handleSubmitVictimReport(true, c.id)}>
+                    {t('player.suspectButton', { name: c.name })}
+                  </button>
+                ))}
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div className="panel panel--info" style={{ marginTop: '20px' }}>
+            <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>{t('player.decoyPuzzleTitle')}</h3>
+            <p style={{ color: 'white', fontSize: '1.3rem', marginBottom: '15px' }}>{decoyPuzzle.a} + {decoyPuzzle.b} = ?</p>
+            <input
+              type="number"
+              className="cyber-input"
+              value={decoyAnswer}
+              onChange={(e) => setDecoyAnswer(e.target.value)}
+              style={{ width: '100%', marginBottom: '15px', padding: '10px', textAlign: 'center', fontSize: '1.1rem' }}
+            />
+            <button className="cyber-button" disabled={decoyAnswer === ''} onClick={() => handleSubmitVictimReport(false, null)}>
+              {t('player.decoySubmit')}
+            </button>
+          </div>
+        );
+      })()}
 
       {room.status === 'kill_reveal' && (() => {
         const victimCouples = (room.victimIds || []).map(id => room.couples.find(c => c.id === id)).filter(Boolean);

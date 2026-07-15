@@ -17,7 +17,7 @@ class GameStore {
     const newRoom = {
       id: code,
       gmId: socketId,
-      status: 'lobby', // lobby, paired, dancing, voting, ended
+      status: 'lobby', // lobby, paired, role_reveal, dancing, silent_report (silent kill mode only), kill_reveal, discussion, voting, ended
       round: 0,
       players: [], // { id, socketId, name, danceRole: 'lead'|'follow'|'spectator', isConfirmed: false }
       couples: [], // { id, name, playerIds: [], role: 'dancer'|'killer', status: 'alive' }
@@ -27,6 +27,10 @@ class GameStore {
       pendingVictimIds: [], // secretly marked before reveal
       pendingRejoinRequests: [], // { id, playerName, targetPlayerId, requestingClientId, requestingSocketId }
       coGms: [], // { id, socketId, name } - additional GMs promoted from the player pool
+      killMode: 'classic', // 'classic' (GM marks kills manually) or 'silent' (phone-based report/match) - a room-level preference, like votingRole
+      killClaims: {}, // silent mode: { killerCoupleId: victimCoupleId | null }
+      victimReports: {}, // silent mode: { coupleId: { feltKilled: boolean, suspectCoupleId: string | null } }
+      silentReportsResolved: false, // silent mode: whether this round's reports have been matched into pendingVictimIds yet
     };
     
     this.rooms.set(code, newRoom);
@@ -344,10 +348,10 @@ class GameStore {
     this.gmChats.delete(roomId);
   }
 
-  startGame(roomId, killerCount = 1) {
+  startGame(roomId, killerCount = 1, killMode = 'classic') {
     const room = this.rooms.get(roomId);
     if (!room) return null;
-    
+
     room.couples.forEach(c => {
       c.status = 'alive';
       c.role = 'dancer';
@@ -355,6 +359,10 @@ class GameStore {
     room.votes = {};
     room.victimIds = [];
     room.pendingVictimIds = [];
+    room.killMode = killMode;
+    room.killClaims = {};
+    room.victimReports = {};
+    room.silentReportsResolved = false;
 
     // Filter out spectator-only couples if any exist, but normally couples don't contain spectators.
     const activeCouples = room.couples;
@@ -397,6 +405,9 @@ class GameStore {
     room.pendingVictimIds = [];
     room.victimIds = [];
     room.votes = {};
+    room.killClaims = {};
+    room.victimReports = {};
+    room.silentReportsResolved = false;
     return room;
   }
 
@@ -437,6 +448,91 @@ class GameStore {
         room.pendingVictimIds.splice(idx, 1);
       }
     }
+    return room;
+  }
+
+  // Silent-report mode: moves from the (song-only) dancing phase into the report-collection phase.
+  proceedToSilentReport(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing' || room.killMode !== 'silent') return null;
+
+    room.status = 'silent_report';
+    return room;
+  }
+
+  // Silent-report mode: a killer couple privately declares who they killed (or null for nobody).
+  submitKillClaim(roomId, clientId, victimCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'silent_report') return null;
+
+    const couple = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!couple || couple.role !== 'killer' || couple.status !== 'alive') return null;
+    if (victimCoupleId !== null) {
+      const victim = room.couples.find(c => c.id === victimCoupleId);
+      if (!victim || victim.status !== 'alive' || victim.role === 'killer') return null;
+    }
+
+    room.killClaims[couple.id] = victimCoupleId;
+    return room;
+  }
+
+  // Silent-report mode: any other alive couple reports whether they felt killed, and by whom.
+  submitVictimReport(roomId, clientId, feltKilled, suspectCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'silent_report') return null;
+
+    const couple = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!couple || couple.role === 'killer' || couple.status !== 'alive') return null;
+    if (feltKilled && suspectCoupleId !== null) {
+      const suspect = room.couples.find(c => c.id === suspectCoupleId);
+      if (!suspect || suspect.status !== 'alive') return null;
+    }
+
+    room.victimReports[couple.id] = { feltKilled: !!feltKilled, suspectCoupleId: feltKilled ? suspectCoupleId : null };
+    return room;
+  }
+
+  // GM submits a kill claim directly on behalf of a killer couple with no phone in the game.
+  gmSubmitKillClaim(roomId, killerCoupleId, victimCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'silent_report') return null;
+
+    room.killClaims[killerCoupleId] = victimCoupleId;
+    return room;
+  }
+
+  // GM submits a victim report directly on behalf of a couple with no phone in the game.
+  gmSubmitVictimReport(roomId, coupleId, feltKilled, suspectCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'silent_report') return null;
+
+    room.victimReports[coupleId] = { feltKilled: !!feltKilled, suspectCoupleId: feltKilled ? suspectCoupleId : null };
+    return room;
+  }
+
+  // Silent-report mode: match killer claims against victim reports and pre-populate pendingVictimIds
+  // for the GM to review/adjust using the same manual kill-marking UI as classic mode.
+  resolveSilentReports(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'silent_report') return null;
+
+    const matches = [];
+    for (const [killerCoupleId, victimCoupleId] of Object.entries(room.killClaims)) {
+      if (!victimCoupleId) continue;
+      const report = room.victimReports[victimCoupleId];
+      if (report && report.feltKilled && report.suspectCoupleId === killerCoupleId) {
+        matches.push(victimCoupleId);
+      }
+    }
+
+    room.pendingVictimIds = [...new Set(matches)];
+    room.silentReportsResolved = true;
     return room;
   }
 
@@ -528,6 +624,9 @@ class GameStore {
       room.victimIds = [];
       room.pendingVictimIds = [];
       room.votes = {};
+      room.killClaims = {};
+      room.victimReports = {};
+      room.silentReportsResolved = false;
     }
 
     return room;
@@ -566,6 +665,9 @@ class GameStore {
     room.votes = {};
     room.victimIds = [];
     room.pendingVictimIds = [];
+    room.killClaims = {};
+    room.victimReports = {};
+    room.silentReportsResolved = false;
     room.endReason = null;
     room.couples = []; // Reset couples completely for a new pairing
     room.players.forEach(p => {

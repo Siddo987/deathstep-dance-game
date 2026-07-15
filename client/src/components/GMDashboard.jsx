@@ -73,9 +73,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   // Killer setting
   const [killerCount, setKillerCount] = useState(() => room.couples?.length >= 9 ? 2 : 1);
+  const [killMode, setKillMode] = useState('classic');
 
   // GM vote-on-behalf selections during voting phase, keyed by voting couple's id
   const [gmVoteSelections, setGmVoteSelections] = useState({});
+
+  // GM submit-on-behalf selections during the silent-report dancing phase, keyed by couple's id
+  const [gmKillClaimSelections, setGmKillClaimSelections] = useState({});
+  const [gmVictimReportSelections, setGmVictimReportSelections] = useState({});
 
   // Voting countdown, shown to the GM purely as an informational hint (it never
   // gates any GM action - the GM can always execute a vote regardless of timer).
@@ -277,7 +282,21 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id, killerCount });
+    socket.emit('startGame', { roomId: room.id, killerCount, killMode });
+  };
+
+  const handleSubmitKillClaimForCouple = (killerCoupleId) => {
+    const victimId = gmKillClaimSelections[killerCoupleId];
+    socket.emit('gmSubmitKillClaim', { roomId: room.id, killerCoupleId, victimId: victimId || null });
+  };
+
+  const handleSubmitVictimReportForCouple = (coupleId, feltKilled) => {
+    const suspectId = feltKilled ? gmVictimReportSelections[coupleId] : null;
+    socket.emit('gmSubmitVictimReport', { roomId: room.id, coupleId, feltKilled, suspectId: suspectId || null });
+  };
+
+  const handleResolveSilentReports = () => {
+    socket.emit('resolveSilentReports', { roomId: room.id });
   };
 
   const handleRejoinResponse = (requestId, accept) => {
@@ -1490,6 +1509,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               {room.couples.length < 9 && killerCount > 1 && (
                 <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}><Lightbulb size={14} className="icon-inline" /> {t('gm.killerRecOne', { count: room.couples.length })}</p>
               )}
+              <div style={{ marginTop: '15px' }}>
+                <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.killMode')}</label>
+                <select className="cyber-select" value={killMode} onChange={(e) => setKillMode(e.target.value)} style={{ width: '100%' }}>
+                  <option value="classic">{t('gm.killModeClassic')}</option>
+                  <option value="silent">{t('gm.killModeSilent')}</option>
+                </select>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
+                  {killMode === 'silent' ? t('gm.killModeSilentDesc') : t('gm.killModeClassicDesc')}
+                </p>
+              </div>
             </div>
 
             <button
@@ -1629,7 +1658,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       {/* DANCING PHASE */}
       {room.status === 'dancing' && (() => {
         const aliveCouplesToKill = aliveCouples.filter(c => c.role !== 'killer');
-        const aliveKillerCount = aliveCouples.filter(c => c.role === 'killer').length;
+        const aliveKillerCouples = aliveCouples.filter(c => c.role === 'killer');
+        const aliveKillerCount = aliveKillerCouples.length;
         const markedCount = room.pendingVictimIds?.length || 0;
         const limitReached = markedCount >= aliveKillerCount;
         return (
@@ -1685,56 +1715,258 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>{t('gm.everyoneDancing')}</p>
             </div>
 
-            <div className="panel panel--purple">
-              <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.observeTitle')}</h4>
-              <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
-                {t('gm.observeBody')}
-              </p>
-              <p style={{ color: 'var(--text-muted)', marginBottom: '5px' }}>
-                <strong>{t('gm.markKilled')}</strong> <span style={{ color: 'var(--neon-purple)' }}>{t('gm.markedCount', { marked: markedCount, total: aliveKillerCount })}</span>
-              </p>
-
-              <div className="couple-list" style={{ marginBottom: '20px' }}>
-                {aliveCouplesToKill.map(couple => {
-                  const isMarked = room.pendingVictimIds?.includes(couple.id);
-                  const disabled = !isMarked && limitReached;
-                  return (
-                    <button
-                      key={couple.id}
-                      className={`kill-option-btn ${isMarked ? 'selected' : ''}`}
-                      onClick={() => handleReportKill(couple.id)}
-                      disabled={disabled}
-                      style={disabled ? { opacity: 0.4, cursor: 'not-allowed' } : undefined}
-                    >
-                      <span style={{ flexShrink: 0, minWidth: '100px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        {isMarked ? <><Check size={14} className="icon-inline" /> {t('gm.marked')}</> : <><Skull size={14} className="icon-inline" /> {t('gm.kill')}</>}
-                      </span>
-                      {renderTruncatedNames(couple.name)}
-                    </button>
-                  );
-                })}
-              </div>
-              {limitReached && aliveKillerCount > 0 && (
-                <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', margin: '-10px 0 15px 0', fontStyle: 'italic' }}>
-                  {t('gm.killLimitReached', { count: aliveKillerCount })}
+            {room.killMode === 'silent' ? (
+              <div className="panel panel--purple">
+                <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.silentReportReadyTitle')}</h4>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
+                  {t('gm.silentReportReadyBody')}
                 </p>
-              )}
-              <button
-                className={`nobody-option-btn ${!room.pendingVictimIds?.length ? 'selected' : ''}`}
-                onClick={() => handleReportKill(null)}
-                style={{ marginBottom: '20px' }}
-              >
-                {!room.pendingVictimIds?.length ? <><Check size={16} className="icon-inline" /> {t('gm.markedNobody')}</> : t('gm.nobodyKilled')}
-              </button>
+                <button
+                  className="cyber-button pulse-animation"
+                  style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
+                  onClick={() => socket.emit('proceedToSilentReport', { roomId: room.id })}
+                >
+                  {t('gm.proceedToSilentReportBtn')}
+                </button>
+              </div>
+            ) : (
+              <div className="panel panel--purple">
+                <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.observeTitle')}</h4>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
+                  {t('gm.observeBody')}
+                </p>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '5px' }}>
+                  <strong>{t('gm.markKilled')}</strong> <span style={{ color: 'var(--neon-purple)' }}>{t('gm.markedCount', { marked: markedCount, total: aliveKillerCount })}</span>
+                </p>
 
-              <button
-                className="cyber-button pulse-animation"
-                style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
-                onClick={handleRevealKill}
-              >
-                {t('gm.revealKillBtn')}
-              </button>
-            </div>
+                <div className="couple-list" style={{ marginBottom: '20px' }}>
+                  {aliveCouplesToKill.map(couple => {
+                    const isMarked = room.pendingVictimIds?.includes(couple.id);
+                    const disabled = !isMarked && limitReached;
+                    return (
+                      <button
+                        key={couple.id}
+                        className={`kill-option-btn ${isMarked ? 'selected' : ''}`}
+                        onClick={() => handleReportKill(couple.id)}
+                        disabled={disabled}
+                        style={disabled ? { opacity: 0.4, cursor: 'not-allowed' } : undefined}
+                      >
+                        <span style={{ flexShrink: 0, minWidth: '100px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          {isMarked ? <><Check size={14} className="icon-inline" /> {t('gm.marked')}</> : <><Skull size={14} className="icon-inline" /> {t('gm.kill')}</>}
+                        </span>
+                        {renderTruncatedNames(couple.name)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {limitReached && aliveKillerCount > 0 && (
+                  <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', margin: '-10px 0 15px 0', fontStyle: 'italic' }}>
+                    {t('gm.killLimitReached', { count: aliveKillerCount })}
+                  </p>
+                )}
+                <button
+                  className={`nobody-option-btn ${!room.pendingVictimIds?.length ? 'selected' : ''}`}
+                  onClick={() => handleReportKill(null)}
+                  style={{ marginBottom: '20px' }}
+                >
+                  {!room.pendingVictimIds?.length ? <><Check size={16} className="icon-inline" /> {t('gm.markedNobody')}</> : t('gm.nobodyKilled')}
+                </button>
+
+                <button
+                  className="cyber-button pulse-animation"
+                  style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
+                  onClick={handleRevealKill}
+                >
+                  {t('gm.revealKillBtn')}
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* SILENT REPORT PHASE */}
+      {room.status === 'silent_report' && (() => {
+        const aliveCouplesToKill = aliveCouples.filter(c => c.role !== 'killer');
+        const aliveKillerCouples = aliveCouples.filter(c => c.role === 'killer');
+        const aliveKillerCount = aliveKillerCouples.length;
+        const markedCount = room.pendingVictimIds?.length || 0;
+        const limitReached = markedCount >= aliveKillerCount;
+        return (
+          <div className="phase-enter" style={{ marginBottom: '20px' }}>
+            {renderSpotifyControls()}
+
+            {!room.silentReportsResolved ? (
+              <div className="panel panel--purple">
+                <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.silentReportTitle')}</h4>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
+                  {t('gm.silentReportBody')}
+                </p>
+
+                <p style={{ color: 'var(--text-muted)', marginBottom: '5px', fontWeight: 'bold' }}>{t('gm.silentReportKillerClaims')}</p>
+                <div className="couple-list" style={{ marginBottom: '15px' }}>
+                  {aliveKillerCouples.map(couple => {
+                    const hasSubmitted = Object.prototype.hasOwnProperty.call(room.killClaims || {}, couple.id);
+                    const claimId = room.killClaims?.[couple.id];
+                    const claimedVictim = claimId ? room.couples.find(c => c.id === claimId) : null;
+                    const needsGmSubmit = !hasSubmitted && isCoupleFullyPhoneless(couple);
+                    const selectedVictim = gmKillClaimSelections[couple.id] ?? '';
+                    return (
+                      <div key={couple.id} className="panel panel--purple" style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: 0, minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minWidth: 0 }}>
+                          {renderTruncatedNames(couple.name)}
+                          <span className={`badge ${hasSubmitted ? 'badge--blue' : 'badge--muted'}`}>
+                            {hasSubmitted ? (claimedVictim ? maskName(claimedVictim.name) : t('gm.silentReportNobody')) : t('gm.waitingBadge')}
+                          </span>
+                        </div>
+                        {needsGmSubmit && (
+                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <select
+                              className="cyber-select"
+                              style={{ flex: '1 1 150px' }}
+                              value={selectedVictim}
+                              onChange={(e) => setGmKillClaimSelections({ ...gmKillClaimSelections, [couple.id]: e.target.value })}
+                            >
+                              <option value="">{t('gm.chooseVictim')}</option>
+                              {aliveCouplesToKill.map(v => (
+                                <option key={v.id} value={v.id}>{maskName(v.name)}</option>
+                              ))}
+                            </select>
+                            <button
+                              className="cyber-button"
+                              style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, flex: '0 0 auto' }}
+                              disabled={!selectedVictim}
+                              onClick={() => handleSubmitKillClaimForCouple(couple.id)}
+                            >
+                              {t('gm.silentReportSubmit')}
+                            </button>
+                            <button
+                              className="cyber-button"
+                              style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', flex: '0 0 auto' }}
+                              onClick={() => { setGmKillClaimSelections({ ...gmKillClaimSelections, [couple.id]: '' }); socket.emit('gmSubmitKillClaim', { roomId: room.id, killerCoupleId: couple.id, victimId: null }); }}
+                            >
+                              {t('gm.silentReportNobody')}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <p style={{ color: 'var(--text-muted)', marginBottom: '5px', fontWeight: 'bold' }}>{t('gm.silentReportVictimReports')}</p>
+                <div className="couple-list" style={{ marginBottom: '20px' }}>
+                  {aliveCouplesToKill.map(couple => {
+                    const hasSubmitted = Object.prototype.hasOwnProperty.call(room.victimReports || {}, couple.id);
+                    const report = room.victimReports?.[couple.id];
+                    const suspect = report?.suspectCoupleId ? room.couples.find(c => c.id === report.suspectCoupleId) : null;
+                    const needsGmSubmit = !hasSubmitted && isCoupleFullyPhoneless(couple);
+                    const selectedSuspect = gmVictimReportSelections[couple.id] ?? '';
+                    return (
+                      <div key={couple.id} className="panel panel--purple" style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: 0, minWidth: 0 }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', minWidth: 0 }}>
+                          {renderTruncatedNames(couple.name)}
+                          <span className={`badge ${hasSubmitted ? 'badge--blue' : 'badge--muted'}`}>
+                            {hasSubmitted
+                              ? (report.feltKilled ? t('gm.silentReportFeltKilled', { name: suspect ? maskName(suspect.name) : '?' }) : t('gm.silentReportNotKilled'))
+                              : t('gm.waitingBadge')}
+                          </span>
+                        </div>
+                        {needsGmSubmit && (
+                          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }}>
+                            <select
+                              className="cyber-select"
+                              style={{ flex: '1 1 150px' }}
+                              value={selectedSuspect}
+                              onChange={(e) => setGmVictimReportSelections({ ...gmVictimReportSelections, [couple.id]: e.target.value })}
+                            >
+                              <option value="">{t('gm.chooseSuspect')}</option>
+                              {room.couples.filter(c => c.status === 'alive' && c.id !== couple.id).map(s => (
+                                <option key={s.id} value={s.id}>{maskName(s.name)}</option>
+                              ))}
+                            </select>
+                            <button
+                              className="cyber-button"
+                              style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, flex: '0 0 auto' }}
+                              disabled={!selectedSuspect}
+                              onClick={() => handleSubmitVictimReportForCouple(couple.id, true)}
+                            >
+                              {t('gm.silentReportFeltKilledBtn')}
+                            </button>
+                            <button
+                              className="cyber-button"
+                              style={{ width: 'auto', padding: '8px 12px', fontSize: '0.85rem', margin: 0, background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', flex: '0 0 auto' }}
+                              onClick={() => handleSubmitVictimReportForCouple(couple.id, false)}
+                            >
+                              {t('gm.silentReportNotKilledBtn')}
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <button
+                  className="cyber-button pulse-animation"
+                  style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
+                  onClick={handleResolveSilentReports}
+                >
+                  {t('gm.resolveSilentReportsBtn')}
+                </button>
+              </div>
+            ) : (
+              <div className="panel panel--purple">
+                <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.observeTitle')}</h4>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
+                  {t('gm.silentReportResolvedBody')}
+                </p>
+                <p style={{ color: 'var(--text-muted)', marginBottom: '5px' }}>
+                  <strong>{t('gm.markKilled')}</strong> <span style={{ color: 'var(--neon-purple)' }}>{t('gm.markedCount', { marked: markedCount, total: aliveKillerCount })}</span>
+                </p>
+
+                <div className="couple-list" style={{ marginBottom: '20px' }}>
+                  {aliveCouplesToKill.map(couple => {
+                    const isMarked = room.pendingVictimIds?.includes(couple.id);
+                    const disabled = !isMarked && limitReached;
+                    return (
+                      <button
+                        key={couple.id}
+                        className={`kill-option-btn ${isMarked ? 'selected' : ''}`}
+                        onClick={() => handleReportKill(couple.id)}
+                        disabled={disabled}
+                        style={disabled ? { opacity: 0.4, cursor: 'not-allowed' } : undefined}
+                      >
+                        <span style={{ flexShrink: 0, minWidth: '100px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          {isMarked ? <><Check size={14} className="icon-inline" /> {t('gm.marked')}</> : <><Skull size={14} className="icon-inline" /> {t('gm.kill')}</>}
+                        </span>
+                        {renderTruncatedNames(couple.name)}
+                      </button>
+                    );
+                  })}
+                </div>
+                {limitReached && aliveKillerCount > 0 && (
+                  <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', margin: '-10px 0 15px 0', fontStyle: 'italic' }}>
+                    {t('gm.killLimitReached', { count: aliveKillerCount })}
+                  </p>
+                )}
+                <button
+                  className={`nobody-option-btn ${!room.pendingVictimIds?.length ? 'selected' : ''}`}
+                  onClick={() => handleReportKill(null)}
+                  style={{ marginBottom: '20px' }}
+                >
+                  {!room.pendingVictimIds?.length ? <><Check size={16} className="icon-inline" /> {t('gm.markedNobody')}</> : t('gm.nobodyKilled')}
+                </button>
+
+                <button
+                  className="cyber-button pulse-animation"
+                  style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
+                  onClick={handleRevealKill}
+                >
+                  {t('gm.revealKillBtn')}
+                </button>
+              </div>
+            )}
           </div>
         );
       })()}

@@ -348,8 +348,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startGame', ({ roomId, killerCount }) => {
-    const room = gameStore.startGame(roomId, killerCount);
+  socket.on('startGame', ({ roomId, killerCount, killMode }) => {
+    const room = gameStore.startGame(roomId, killerCount, killMode);
     if (room) {
       io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
       
@@ -382,11 +382,55 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('proceedToSilentReport', ({ roomId }) => {
+    const room = gameStore.proceedToSilentReport(roomId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      console.log(`Silent report phase started in room ${roomId}`);
+    }
+  });
+
   socket.on('reportKill', ({ roomId, victimId }) => {
     const room = gameStore.reportKill(roomId, victimId);
     if (room) {
       io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
       console.log(`Kill reported in room ${roomId}`);
+    }
+  });
+
+  socket.on('submitKillClaim', ({ roomId, clientId, victimId }) => {
+    const room = gameStore.submitKillClaim(roomId, clientId, victimId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+    }
+  });
+
+  socket.on('submitVictimReport', ({ roomId, clientId, feltKilled, suspectId }) => {
+    const room = gameStore.submitVictimReport(roomId, clientId, feltKilled, suspectId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+    }
+  });
+
+  socket.on('gmSubmitKillClaim', ({ roomId, killerCoupleId, victimId }) => {
+    const room = gameStore.gmSubmitKillClaim(roomId, killerCoupleId, victimId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+    }
+  });
+
+  socket.on('gmSubmitVictimReport', ({ roomId, coupleId, feltKilled, suspectId }) => {
+    const room = gameStore.gmSubmitVictimReport(roomId, coupleId, feltKilled, suspectId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+    }
+  });
+
+  socket.on('resolveSilentReports', ({ roomId }) => {
+    const room = gameStore.resolveSilentReports(roomId);
+    if (room) {
+      io.to(roomId).emit('roomUpdated', { ...room, serverTime: Date.now() });
+      console.log(`Silent reports resolved in room ${roomId}`);
     }
   });
 
