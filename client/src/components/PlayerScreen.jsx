@@ -54,6 +54,10 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
   const isCurrentVotingPlayer = !!(myCouple && myCouple.votingPlayerId === clientId);
   const canSwitchVotingRole = isCurrentVotingPlayer && otherPhoneHavingPartners.length > 0;
 
+  const otherKillerCouples = role === 'killer' && room.couples
+    ? room.couples.filter(c => c.role === 'killer' && (!myCouple || c.id !== myCouple.id))
+    : [];
+
   // Derived from the server's vote record (not local state) so a page refresh or
   // reconnect after voting doesn't bring the vote form back up.
   const hasVoted = !!(myCouple && room.votes && Object.prototype.hasOwnProperty.call(room.votes, myCouple.id));
@@ -383,6 +387,11 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
                   <Skull size={28} className="icon-inline" /> {t('player.youAreKillers')} <Skull size={28} className="icon-inline" />
                 </h2>
                 <p style={{ fontSize: '1.1rem' }}>{t('player.killerInstructions')}<br/><strong style={{color: 'white', marginTop: '10px', display: 'block'}}>{t('player.killerLimit')}</strong></p>
+                {otherKillerCouples.length > 0 && (
+                  <p style={{ fontSize: '1rem', marginTop: '15px', color: 'white' }}>
+                    {t('player.otherKillers', { names: otherKillerCouples.map(c => c.name).join(', ') })}
+                  </p>
+                )}
               </div>
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>

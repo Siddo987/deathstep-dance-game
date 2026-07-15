@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
-import { ConfirmModal } from './Modal.jsx';
+import { ConfirmModal, AlertModal } from './Modal.jsx';
 import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify } from '../spotify.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
@@ -28,6 +28,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const [chatInput, setChatInput] = useState('');
   const [seenChatCount, setSeenChatCount] = useState(0);
   const [confirmState, setConfirmState] = useState(null);
+  const [alertState, setAlertState] = useState(null);
   const [privacyMode, setPrivacyMode] = useState(() => {
     return localStorage.getItem('deathstep_privacy_mode') === 'true';
   });
@@ -63,6 +64,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   // New states
   const [bypassRoleView, setBypassRoleView] = useState(false);
   const [bypassPaired, setBypassPaired] = useState(false);
+  const [bypassSongReady, setBypassSongReady] = useState(false);
 
   // Manual (phoneless) player form
   const [manualPlayerName, setManualPlayerName] = useState('');
@@ -111,6 +113,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   React.useEffect(() => {
     if (room.status !== 'paired') setBypassPaired(false);
     if (room.status !== 'role_reveal') setBypassRoleView(false);
+    if (room.status !== 'voting' && room.status !== 'role_reveal' && room.status !== 'kill_reveal') setBypassSongReady(false);
   }, [room.status]);
 
   React.useEffect(() => {
@@ -304,7 +307,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         await playTrack(selectedTrack.uri, spotifyPlayerId);
       } catch (e) {
         if (e.message === 'NO_ACTIVE_DEVICE') {
-          alert(t('spotify.noDevice'));
+          setAlertState({ message: t('spotify.noDevice') });
         } else {
           console.error("Failed to play track", e);
         }
@@ -319,7 +322,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         await playTrack(selectedTrack.uri, spotifyPlayerId);
       } catch (e) {
         if (e.message === 'NO_ACTIVE_DEVICE') {
-          alert(t('spotify.noDevice'));
+          setAlertState({ message: t('spotify.noDevice') });
         } else {
           console.error("Failed to play track", e);
         }
@@ -362,6 +365,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     socket.emit('startDiscussion', { roomId: room.id });
   };
 
+  const handleSkipToNextRound = () => {
+    handleExecuteVote(null);
+  };
+
   const handleResetGame = () => {
     setConfirmState({
       message: t('gm.resetConfirm'),
@@ -402,7 +409,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         setManualPlayerName('');
         setManualIsFlexible(false);
       } else {
-        alert(response.messageKey ? t(`server.${response.messageKey}`) : t('gm.addPlayerFailed'));
+        setAlertState({ message: response.messageKey ? t(`server.${response.messageKey}`) : t('gm.addPlayerFailed') });
       }
     });
   };
@@ -561,7 +568,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       return player && hasPhone(player);
     }));
     if (phonelessCouples.length > 0) {
-      alert(t('gm.phonelessWarning', { count: phonelessCouples.length, names: phonelessCouples.map(c => maskName(c.name)).join(', ') }));
+      setAlertState({ message: t('gm.phonelessWarning', { count: phonelessCouples.length, names: phonelessCouples.map(c => maskName(c.name)).join(', ') }) });
     }
 
     setPendingCouples(newCouples);
@@ -575,7 +582,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const handleRandomPairsClick = () => {
     const unpaired = getUnpairedPlayers();
     if (unpaired.length < 2) {
-      alert(t('gm.notEnoughUnpaired'));
+      setAlertState({ message: t('gm.notEnoughUnpaired') });
       return;
     }
 
@@ -659,7 +666,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
 
     if (currentMinSwitchNeeded > 0) {
-      alert(t('gm.randNotEnough'));
+      setAlertState({ message: t('gm.randNotEnough') });
       return;
     }
 
@@ -699,7 +706,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const handleCreateManualCouple = () => {
     if (currentGroup.length < 2) return;
     if (currentGroup.length > 3) {
-      alert(t('gm.groupMax3'));
+      setAlertState({ message: t('gm.groupMax3') });
       return;
     }
 
@@ -708,12 +715,12 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     const hasFollow = selectedPlayers.some(p => p.danceRole === 'follow');
 
     if (!hasLead || !hasFollow) {
-      alert(t('gm.groupNeedsLeadFollow'));
+      setAlertState({ message: t('gm.groupNeedsLeadFollow') });
       return;
     }
 
     if (!selectedPlayers.some(hasPhone)) {
-      alert(t('gm.groupNeedsPhone'));
+      setAlertState({ message: t('gm.groupNeedsPhone') });
       return;
     }
 
@@ -733,10 +740,13 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   };
 
   const handleReleasePairs = () => {
-    if (pendingCouples.length === 0) return alert(t('gm.noCouplesToRelease'));
+    if (pendingCouples.length === 0) {
+      setAlertState({ message: t('gm.noCouplesToRelease') });
+      return;
+    }
 
     if (pendingCouples.length <= 2) {
-      alert(t('gm.need3Couples'));
+      setAlertState({ message: t('gm.need3Couples') });
       return;
     }
 
@@ -1516,7 +1526,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           })
         );
         const isSpotifyReady = !useSpotify || (selectedTrack && spotifyPlayer);
-        const canStart = (allCouplesViewedRole || bypassRoleView) && isSpotifyReady;
+        const canProceedSong = isSpotifyReady || bypassSongReady;
+        const canStart = (allCouplesViewedRole || bypassRoleView) && canProceedSong;
 
         return (
           <div className="phase-enter" style={{ marginBottom: '20px' }}>
@@ -1531,6 +1542,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <span style={{ color: 'white' }}>
                     {!selectedTrack ? t('gm.selectSongFirst') : t('gm.playerInitializing')}
                   </span>
+                  {!bypassSongReady && (
+                    <div>
+                      <button
+                        onClick={() => setBypassSongReady(true)}
+                        style={{ marginTop: '10px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
+                      >
+                        {t('gm.bypassSongReady')}
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -1540,7 +1561,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 </p>
               )}
 
-              {(allCouplesViewedRole || bypassRoleView) && isSpotifyReady && (
+              {(allCouplesViewedRole || bypassRoleView) && canProceedSong && (
                 <p style={{ color: '#00ff66', marginBottom: '20px' }}>
                   {t('gm.allChecksPassed')}
                 </p>
@@ -1721,6 +1742,23 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       {/* KILL REVEAL PHASE */}
       {room.status === 'kill_reveal' && (() => {
         const victimCouples = (room.victimIds || []).map(id => room.couples.find(c => c.id === id)).filter(Boolean);
+        const canSkipToNextRound = isSpotifyReady || bypassSongReady;
+        const skipWarning = !isSpotifyReady && (
+          <div className="panel panel--danger" style={{ textAlign: 'center' }}>
+            <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> {t('gm.musicNotReady')}</strong><br />
+            <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>{t('gm.selectSongNextRound')}</span>
+            {!bypassSongReady && (
+              <div>
+                <button
+                  onClick={() => setBypassSongReady(true)}
+                  style={{ marginTop: '10px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
+                >
+                  {t('gm.bypassSongReady')}
+                </button>
+              </div>
+            )}
+          </div>
+        );
         return (
           <div className="phase-enter" style={{ marginBottom: '20px', textAlign: 'center' }}>
             {renderSpotifyControls()}
@@ -1737,6 +1775,15 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <button className="cyber-button" onClick={handleStartDiscussion} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
                     {t('gm.startDiscussion')}
                   </button>
+                  <button
+                    className="cyber-button"
+                    onClick={handleSkipToNextRound}
+                    disabled={!canSkipToNextRound}
+                    style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)', opacity: canSkipToNextRound ? 1 : 0.5, cursor: canSkipToNextRound ? 'pointer' : 'not-allowed' }}
+                  >
+                    {t('gm.skipToNextRound')}
+                  </button>
+                  {skipWarning}
                 </div>
               </>
             ) : (
@@ -1751,6 +1798,15 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <button className="cyber-button" onClick={handleStartDiscussion} style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)' }}>
                     {t('gm.startDiscussion')}
                   </button>
+                  <button
+                    className="cyber-button"
+                    onClick={handleSkipToNextRound}
+                    disabled={!canSkipToNextRound}
+                    style={{ width: '100%', background: 'transparent', color: 'var(--text-muted)', opacity: canSkipToNextRound ? 1 : 0.5, cursor: canSkipToNextRound ? 'pointer' : 'not-allowed' }}
+                  >
+                    {t('gm.skipToNextRound')}
+                  </button>
+                  {skipWarning}
                 </div>
               </>
             )}
@@ -1771,7 +1827,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       )}
 
       {/* VOTING PHASE */}
-      {room.status === 'voting' && (
+      {room.status === 'voting' && (() => {
+        const canProceedVoting = isSpotifyReady || bypassSongReady;
+        return (
         <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
           <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.votingPhase')}</h3>
@@ -1787,6 +1845,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             <div className="panel panel--danger" style={{ textAlign: 'center' }}>
               <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> {t('gm.musicNotReady')}</strong><br />
               <span style={{ fontSize: '0.9rem', color: 'var(--text-muted)' }}>{t('gm.selectSongNextRound')}</span>
+              {!bypassSongReady && (
+                <div>
+                  <button
+                    onClick={() => setBypassSongReady(true)}
+                    style={{ marginTop: '10px', background: 'transparent', border: 'none', color: 'var(--neon-red)', textDecoration: 'underline', cursor: 'pointer' }}
+                  >
+                    {t('gm.bypassSongReady')}
+                  </button>
+                </div>
+              )}
             </div>
           )}
           <div className="couple-list">
@@ -1841,10 +1909,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                     </div>
                   )}
                   <button
-                    className={isSpotifyReady ? "cyber-button danger" : "cyber-button disabled"}
-                    style={{ padding: '8px', fontSize: '0.9rem', opacity: isSpotifyReady ? 1 : 0.5, cursor: isSpotifyReady ? 'pointer' : 'not-allowed' }}
+                    className={canProceedVoting ? "cyber-button danger" : "cyber-button disabled"}
+                    style={{ padding: '8px', fontSize: '0.9rem', opacity: canProceedVoting ? 1 : 0.5, cursor: canProceedVoting ? 'pointer' : 'not-allowed' }}
                     onClick={() => handleExecuteVoteSafe(couple.id)}
-                    disabled={!isSpotifyReady}
+                    disabled={!canProceedVoting}
                   >
                     {t('gm.kickNextRound')}
                   </button>
@@ -1853,15 +1921,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             })}
           </div>
           <button
-            className={isSpotifyReady ? "cyber-button" : "cyber-button disabled"}
-            style={{ marginTop: '15px', opacity: isSpotifyReady ? 1 : 0.5, cursor: isSpotifyReady ? 'pointer' : 'not-allowed' }}
+            className={canProceedVoting ? "cyber-button" : "cyber-button disabled"}
+            style={{ marginTop: '15px', opacity: canProceedVoting ? 1 : 0.5, cursor: canProceedVoting ? 'pointer' : 'not-allowed' }}
             onClick={() => handleExecuteVoteSafe(null)}
-            disabled={!isSpotifyReady}
+            disabled={!canProceedVoting}
           >
             {t('gm.tieKickNobody')}
           </button>
         </div>
-      )}
+        );
+      })()}
 
       {room.status === 'ended' && (() => {
         if (room.endReason === 'aborted') {
@@ -2091,6 +2160,12 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           setConfirmState(null);
         }}
         onCancel={() => setConfirmState(null)}
+      />
+
+      <AlertModal
+        isOpen={!!alertState}
+        message={alertState?.message}
+        onClose={() => setAlertState(null)}
       />
 
       {showSpotifyModal && createPortal(
