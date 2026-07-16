@@ -2,7 +2,8 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
 import { ConfirmModal, AlertModal } from './Modal.jsx';
-import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify } from '../spotify.js';
+import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify, getValidToken } from '../spotify.js';
+import { fetchMyPlaylists, fetchPlaylist, addTrackToPlaylist, createPlaylist } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
 import coupleIcon from './couple_icon.png';
@@ -12,7 +13,7 @@ import {
   Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone
 } from 'lucide-react';
 
-function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMessage }) {
+function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMessage, currentUser }) {
   const { t } = useLanguage();
   const spotifyAllowed = getCookieConsent()?.spotify === true;
 
@@ -54,12 +55,24 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const [playerStatus, setPlayerStatus] = useState({ key: 'spotify.statusInit', detail: '', isError: false });
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
+  const [searchDone, setSearchDone] = useState(false); // true once a search has actually returned, so an empty result set can say "no results" instead of looking unsearched
   const [selectedTrack, setSelectedTrack] = useState(() => {
     const saved = localStorage.getItem('deathstep_selected_track');
     return saved ? JSON.parse(saved) : null;
   });
   const [playbackProgress, setPlaybackProgress] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(1);
+
+  // Playlist-for-this-dance mode - an alternative to selectedTrack, not a
+  // combination of both (see handleSelectPlaylist/track-picking below).
+  // Reset on the same round/game boundaries as selectedTrack.
+  const [gmPlaylists, setGmPlaylists] = useState([]);
+  const [activePlaylist, setActivePlaylist] = useState(null); // { id, name, tracks: [{ id, uri, name, artist }] }
+  const [queueIndex, setQueueIndex] = useState(0);
+  const [showPlaylistPicker, setShowPlaylistPicker] = useState(false);
+  const [addToPlaylistFor, setAddToPlaylistFor] = useState(null); // track uri whose "add to playlist" picker is expanded, or null
+  const [addToPlaylistNewName, setAddToPlaylistNewName] = useState('');
+  const [addToPlaylistStatus, setAddToPlaylistStatus] = useState('');
 
   // New states
   const [bypassRoleView, setBypassRoleView] = useState(false);
@@ -106,7 +119,19 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     }
   }, [room.status, room.votingEndTime]);
 
-  const isSpotifyReady = !useSpotify || (selectedTrack && spotifyPlayer);
+  const isSpotifyReady = !useSpotify || ((selectedTrack || activePlaylist) && spotifyPlayer);
+
+  // Normalizes the two "what's chosen for this dance" sources (raw Spotify
+  // search result vs. our own DB-stored playlist track) into one shape for
+  // display - playlist tracks have no album art, so imageUrl is null there.
+  const nowPlayingTrack = activePlaylist
+    ? (() => {
+        const track = activePlaylist.tracks[queueIndex % activePlaylist.tracks.length];
+        return track ? { uri: track.uri, name: track.name, artist: track.artist, imageUrl: null } : null;
+      })()
+    : selectedTrack
+      ? { uri: selectedTrack.uri, name: selectedTrack.name, artist: selectedTrack.artists?.map(a => a.name).join(', ') || '', imageUrl: selectedTrack.album?.images?.[2]?.url || null }
+      : null;
 
   // Update default killer count when couples array changes
   React.useEffect(() => {
@@ -165,8 +190,33 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   React.useEffect(() => {
     if (room.status === 'kill_reveal' || room.status === 'lobby') {
       setSelectedTrack(null);
+      setActivePlaylist(null);
+      setQueueIndex(0);
     }
   }, [room.status]);
+
+  // Per-round GM-local UI state (the kill-claim/victim-report/vote proxy
+  // dropdowns, the "add to playlist" picker) must not survive into the next
+  // round - a stale selection would otherwise resurface pointing at whatever
+  // couple happened to share that same id/position in the new round.
+  React.useEffect(() => {
+    setGmKillClaimSelections({});
+    setGmVictimReportSelections({});
+    setGmVoteSelections({});
+    setAddToPlaylistFor(null);
+    setAddToPlaylistNewName('');
+    setAddToPlaylistStatus('');
+  }, [room.round]);
+
+  // Load the GM's own playlists once they've opted into Spotify and are
+  // logged into a Deathstep account - playlists are account-bound, so an
+  // anonymous GM never sees this option and nothing changes for them.
+  React.useEffect(() => {
+    if (!currentUser || !useSpotify) { setGmPlaylists([]); return; }
+    fetchMyPlaylists().then(result => {
+      if (!result.error) setGmPlaylists(result.playlists);
+    });
+  }, [currentUser?.id, useSpotify]);
 
   React.useEffect(() => {
     if (!spotifyPlayer || !isPlaying) return;
@@ -193,13 +243,52 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   React.useEffect(() => {
     setHasSongFinished(false);
-  }, [selectedTrack, room?.status, room?.round]);
+  }, [selectedTrack, room?.status, room?.round, queueIndex]);
+
+  // Tells the server a track actually started playing, for the per-game
+  // "played songs" record shown at game end - fire-and-forget, no callback
+  // needed since it's purely additive bookkeeping. Accepts either a Spotify
+  // search-result track (`.artists` array) or a playlist track (`.artist`
+  // string) and normalizes to the single shape the server expects.
+  const reportTrackPlayed = (track) => {
+    if (!track?.uri) return;
+    const artist = track.artist ?? (track.artists ? track.artists.map(a => a.name).join(', ') : '');
+    socket.emit('trackPlayed', { roomId: room.id, track: { uri: track.uri, name: track.name, artist } });
+  };
+
+  // Plays whichever track is currently at queueIndex, then advances the
+  // index for next time (looping back to the start) - the single place that
+  // both the round-start handlers and the auto-advance-on-finish effect call.
+  const playQueueTrack = async () => {
+    if (!activePlaylist || activePlaylist.tracks.length === 0) return;
+    const track = activePlaylist.tracks[queueIndex % activePlaylist.tracks.length];
+    setQueueIndex(prev => (prev + 1) % activePlaylist.tracks.length);
+    try {
+      await playTrack(track.uri, spotifyPlayerId);
+      reportTrackPlayed(track);
+    } catch (e) {
+      if (e.message === 'NO_ACTIVE_DEVICE') {
+        setAlertState({ message: t('spotify.noDevice') });
+      } else {
+        console.error('Failed to play queued track', e);
+      }
+    }
+  };
+
+  // The actual "auto-advance to the next track" behavior: once the current
+  // playlist track nears its end during dancing, move straight to the next one.
+  React.useEffect(() => {
+    if (!activePlaylist || !hasSongFinished || room.status !== 'dancing') return;
+    playQueueTrack();
+  }, [hasSongFinished]);
 
   React.useEffect(() => {
-    const token = localStorage.getItem('spotify_access_token');
-    if (token) {
-      setSpotifyToken(token);
-    }
+    // Reads through getValidToken() (not the raw localStorage value) so a
+    // token that's already expired by the time the dashboard loads gets
+    // silently refreshed instead of handing the SDK a dead token.
+    getValidToken().then(token => {
+      if (token) setSpotifyToken(token);
+    });
   }, []);
 
   // Only fetch Spotify's SDK from their CDN once the GM has actually opted
@@ -219,7 +308,11 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     window.onSpotifyWebPlaybackSDKReady = () => {
       const player = new window.Spotify.Player({
         name: 'Deathstep Web Player',
-        getOAuthToken: cb => { cb(spotifyToken); },
+        // The SDK calls this every time it needs a (re)fresh token, including
+        // well after the token spotifyToken was created with has expired -
+        // route it through getValidToken() so it always gets a live one
+        // instead of the value captured when the player was first built.
+        getOAuthToken: cb => { getValidToken().then(cb); },
         volume: 0.5
       });
 
@@ -303,6 +396,39 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     socket.emit('respondToRejoinRequest', { roomId: room.id, requestId, accept });
   };
 
+  // A Spotify-type suggestion is already a full Spotify track object
+  // (searched or playlist-picked on the player's own device), so "adopting"
+  // it is just setting it as the selected track directly - no re-search
+  // needed. A text-type suggestion has no real track to select - there's
+  // nothing to adopt into playback, this just acknowledges it to the player.
+  const handleConfirmSuggestion = (suggestion) => {
+    if (suggestion.type !== 'text') {
+      setSelectedTrack(suggestion.track);
+      setActivePlaylist(null);
+      // Mirrors the manual search-select behavior: adopting mid-round should
+      // switch the currently playing song immediately, not just stage the
+      // pick silently for the next round.
+      if (room.status === 'dancing' && spotifyPlayerId) {
+        playTrack(suggestion.track.uri, spotifyPlayerId).then(() => reportTrackPlayed(suggestion.track)).catch(console.error);
+      }
+    }
+    socket.emit('confirmSongSuggestion', { roomId: room.id, suggestionId: suggestion.id }, (response) => {
+      // Two co-GMs handling the same suggestion at once: the losing call
+      // gets told it's already gone instead of silently doing nothing.
+      if (!response?.success) {
+        setAlertState({ message: response?.messageKey ? t(`server.${response.messageKey}`) : t('server.suggestionNotFound') });
+      }
+    });
+  };
+
+  const handleDismissSuggestion = (suggestionId) => {
+    socket.emit('dismissSongSuggestion', { roomId: room.id, suggestionId }, (response) => {
+      if (!response?.success) {
+        setAlertState({ message: response?.messageKey ? t(`server.${response.messageKey}`) : t('server.suggestionNotFound') });
+      }
+    });
+  };
+
   const handleReportKill = (victimCoupleId) => {
     if (victimCoupleId === null) {
       socket.emit('reportKill', { roomId: room.id, victimId: null });
@@ -321,14 +447,19 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
     socket.emit('executeVote', { roomId: room.id, suspectId: suspectCoupleId });
 
-    if (!willEnd && selectedTrack && spotifyToken) {
-      try {
-        await playTrack(selectedTrack.uri, spotifyPlayerId);
-      } catch (e) {
-        if (e.message === 'NO_ACTIVE_DEVICE') {
-          setAlertState({ message: t('spotify.noDevice') });
-        } else {
-          console.error("Failed to play track", e);
+    if (!willEnd && spotifyToken) {
+      if (activePlaylist) {
+        await playQueueTrack();
+      } else if (selectedTrack) {
+        try {
+          await playTrack(selectedTrack.uri, spotifyPlayerId);
+          reportTrackPlayed(selectedTrack);
+        } catch (e) {
+          if (e.message === 'NO_ACTIVE_DEVICE') {
+            setAlertState({ message: t('spotify.noDevice') });
+          } else {
+            console.error("Failed to play track", e);
+          }
         }
       }
     }
@@ -336,14 +467,19 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   const handleStartDancing = async () => {
     socket.emit('startDancing', { roomId: room.id });
-    if (selectedTrack && spotifyToken) {
-      try {
-        await playTrack(selectedTrack.uri, spotifyPlayerId);
-      } catch (e) {
-        if (e.message === 'NO_ACTIVE_DEVICE') {
-          setAlertState({ message: t('spotify.noDevice') });
-        } else {
-          console.error("Failed to play track", e);
+    if (spotifyToken) {
+      if (activePlaylist) {
+        await playQueueTrack();
+      } else if (selectedTrack) {
+        try {
+          await playTrack(selectedTrack.uri, spotifyPlayerId);
+          reportTrackPlayed(selectedTrack);
+        } catch (e) {
+          if (e.message === 'NO_ACTIVE_DEVICE') {
+            setAlertState({ message: t('spotify.noDevice') });
+          } else {
+            console.error("Failed to play track", e);
+          }
         }
       }
     }
@@ -371,9 +507,112 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     try {
       const results = await searchTracks(searchQuery);
       setSearchResults(results);
+      setSearchDone(true);
     } catch (e) {
       console.error("Failed to search tracks", e);
     }
+  };
+
+  const handleSelectPlaylist = async (playlistId) => {
+    const result = await fetchPlaylist(playlistId);
+    if (result.error || !result.playlist.tracks.length) return;
+    setActivePlaylist(result.playlist);
+    setQueueIndex(0);
+    setSelectedTrack(null);
+    setShowPlaylistPicker(false);
+  };
+
+  // Generalized over any track (the now-playing one, or one from the
+  // post-game played-songs summary) - addToPlaylistFor tracks which single
+  // track's picker is currently expanded, identified by its uri.
+  const handleAddTrackToPlaylist = async (playlistId, track) => {
+    const result = await addTrackToPlaylist(playlistId, { uri: track.uri, name: track.name, artist: track.artist });
+    // On a Spotify-linked playlist the track is only staged, not pushed yet -
+    // say so instead of implying it's already on Spotify (confirm/undo happens on the Playlists page).
+    const messageKey = result.error ? 'gm.addToPlaylistFailed' : result.track?.syncStatus === 'pending_add' ? 'gm.addToPlaylistPending' : 'gm.addToPlaylistSuccess';
+    setAddToPlaylistStatus(t(messageKey));
+    setTimeout(() => setAddToPlaylistStatus(''), 2500);
+    if (!result.error) setAddToPlaylistFor(null);
+  };
+
+  const handleCreatePlaylistWithTrack = async (track) => {
+    const name = addToPlaylistNewName.trim();
+    if (!name) return;
+    const created = await createPlaylist(name);
+    if (created.error) return;
+    setGmPlaylists(prev => [...prev, created.playlist]);
+    setAddToPlaylistNewName('');
+    await handleAddTrackToPlaylist(created.playlist.id, track);
+  };
+
+  // Post-game summary of every track the server recorded as actually played
+  // this game (server/gameStore.js addPlayedSong) - empty whenever the whole
+  // game was own-audio mode, since the app never sees what plays externally.
+  const renderPlayedSongs = () => {
+    if (!room.playedSongs || room.playedSongs.length === 0) return null;
+    return (
+      <div className="panel panel--success" style={{ textAlign: 'left', marginTop: '20px' }}>
+        <div className="panel-title" style={{ color: 'var(--neon-green)' }}>
+          <Music2 size={16} className="icon-inline" /> {t('gm.playedSongs')}
+        </div>
+        {room.playedSongs.map(song => {
+          const rowKey = `${song.uri}-${song.playedAt}`;
+          return (
+          <div key={rowKey} style={{ marginBottom: '10px' }}>
+            <div className="list-item">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: 'white', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{song.name}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{song.artist}</div>
+              </div>
+              {currentUser && (
+                <button
+                  className="icon-btn"
+                  title={t('gm.addToPlaylist')}
+                  style={{ flexShrink: 0 }}
+                  onClick={() => setAddToPlaylistFor(prev => prev === rowKey ? null : rowKey)}
+                >
+                  <Plus size={18} style={{ color: 'var(--neon-purple)' }} />
+                </button>
+              )}
+            </div>
+            {currentUser && addToPlaylistFor === rowKey && (
+              <div style={{ border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
+                {gmPlaylists.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+                    {gmPlaylists.map(pl => (
+                      <button
+                        key={pl.id}
+                        onClick={() => handleAddTrackToPlaylist(pl.id, song)}
+                        style={{ textAlign: 'left', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: 'var(--radius-sm)', padding: '8px 12px', color: 'var(--text-main)', cursor: 'pointer', fontSize: '0.85rem' }}
+                      >
+                        {pl.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <input
+                    type="text"
+                    className="cyber-input"
+                    style={{ marginBottom: 0, flex: 1, padding: '8px 12px', fontSize: '0.85rem' }}
+                    placeholder={t('playlists.newNamePlaceholder')}
+                    value={addToPlaylistNewName}
+                    onChange={(e) => setAddToPlaylistNewName(e.target.value)}
+                  />
+                  <button className="cyber-button" style={{ width: 'auto', padding: '8px 14px', fontSize: '0.85rem' }} onClick={() => handleCreatePlaylistWithTrack(song)}>
+                    <Plus size={14} className="icon-inline" />
+                  </button>
+                </div>
+                {addToPlaylistStatus && (
+                  <p style={{ color: 'var(--neon-green)', fontSize: '0.8rem', textAlign: 'center', marginTop: '8px', marginBottom: 0 }}>{addToPlaylistStatus}</p>
+                )}
+              </div>
+            )}
+          </div>
+          );
+        })}
+      </div>
+    );
   };
 
   const handleProceedToVoting = () => {
@@ -842,9 +1081,24 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   );
 
   const renderSpotifyControls = (hideIfConnected = false, isModal = false) => {
-    if (!useSpotify) return null;
+    if (!useSpotify) {
+      // Own-audio mode never shows Spotify search/connect UI, but a track
+      // adopted from a player's suggestion (handleConfirmSuggestion) still
+      // needs to be visible somewhere - otherwise the GM has no way to know
+      // what to go play manually on their own device.
+      if (!selectedTrack) return null;
+      return (
+        <div className="panel panel--success" style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.selectedTrack')}</div>
+          <div style={{ color: 'white' }}>{selectedTrack.name} — {selectedTrack.artists?.map(a => a.name).join(', ') || ''}</div>
+          <button className="icon-btn" onClick={() => setSelectedTrack(null)} style={{ marginTop: '8px' }}>
+            <X size={18} />
+          </button>
+        </div>
+      );
+    }
     if (hideIfConnected && spotifyToken) return null;
-    if (!isModal && selectedTrack) return null;
+    if (!isModal && (selectedTrack || activePlaylist)) return null;
 
     return (
       <div className="panel panel--success">
@@ -877,58 +1131,125 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               {t('spotify.selectHint')}
             </div>
 
-            <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-              <input
-                type="text"
-                className="cyber-input"
-                style={{ marginBottom: 0, flex: 1 }}
-                placeholder={t('spotify.searchPlaceholder')}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
-              <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <Search size={16} className="icon-inline" /> {t('spotify.search')}
-              </button>
-            </form>
+            {!activePlaylist && (
+              <>
+                <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+                  <input
+                    type="text"
+                    className="cyber-input"
+                    style={{ marginBottom: 0, flex: 1 }}
+                    placeholder={t('spotify.searchPlaceholder')}
+                    value={searchQuery}
+                    onChange={(e) => { setSearchQuery(e.target.value); setSearchDone(false); }}
+                  />
+                  <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Search size={16} className="icon-inline" /> {t('spotify.search')}
+                  </button>
+                </form>
 
-            {searchResults.length > 0 && (
-              <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
-                {searchResults.map(track => (
-                  <div key={track.id}
-                    onClick={() => {
-                      setSelectedTrack(track);
-                      setSearchResults([]);
-                      setSearchQuery('');
-                      if (room.status === 'dancing' && spotifyPlayerId) {
-                        playTrack(track.uri, spotifyPlayerId).catch(console.error);
-                      }
-                    }}
-                    className="list-item list-item--purple"
-                    style={{ cursor: 'pointer' }}
-                  >
-                    <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artists.map(a => a.name).join(', ')}</div>
-                    </div>
+                {searchDone && searchResults.length === 0 && (
+                  <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '15px', fontSize: '0.9rem' }}>{t('spotify.noResults')}</p>
+                )}
+
+                {searchResults.length > 0 && (
+                  <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
+                    {searchResults.map(track => (
+                      <div key={track.id}
+                        onClick={() => {
+                          setSelectedTrack(track);
+                          setActivePlaylist(null);
+                          setSearchResults([]);
+                          setSearchQuery('');
+                          setSearchDone(false);
+                          if (room.status === 'dancing' && spotifyPlayerId) {
+                            playTrack(track.uri, spotifyPlayerId).then(() => reportTrackPlayed(track)).catch(console.error);
+                          }
+                        }}
+                        className="list-item list-item--purple"
+                        style={{ cursor: 'pointer' }}
+                      >
+                        <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artists.map(a => a.name).join(', ')}</div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                )}
+
+                {selectedTrack && (
+                  <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
+                    <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.selectedTrack')}</div>
+                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
+                    </div>
+                    <button
+                      className="icon-btn"
+                      onClick={() => setSelectedTrack(null)}
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                )}
+              </>
             )}
 
-            {selectedTrack && (
-              <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
-                <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.selectedTrack')}</div>
-                  <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
-                </div>
-                <button
-                  className="icon-btn"
-                  onClick={() => setSelectedTrack(null)}
-                >
-                  <X size={18} />
-                </button>
+            {!selectedTrack && currentUser && gmPlaylists.length > 0 && (
+              <div style={{ marginTop: '15px' }}>
+                {!activePlaylist ? (
+                  <>
+                    <div style={{ margin: '15px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                      <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
+                      {t('home.or')}
+                      <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
+                    </div>
+                    <button
+                      onClick={() => setShowPlaylistPicker(v => !v)}
+                      className="cyber-button"
+                      style={{ background: 'transparent', border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                    >
+                      <Music2 size={16} className="icon-inline" />
+                      {t('gm.usePlaylistForDance')}
+                    </button>
+                    {showPlaylistPicker && (
+                      <div className="couple-list" style={{ marginTop: '10px' }}>
+                        {gmPlaylists.map(pl => (
+                          <div
+                            key={pl.id}
+                            onClick={() => handleSelectPlaylist(pl.id)}
+                            className="list-item list-item--purple"
+                            style={{ cursor: 'pointer' }}
+                          >
+                            <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{pl.name}</div>
+                              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <div className="list-item panel--success" style={{ borderColor: 'var(--neon-purple)', background: 'rgba(181,43,255,0.15)' }}>
+                    <Music2 size={24} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--neon-purple)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('gm.playlistForDance')}</div>
+                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{activePlaylist.name}</div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                        {t('gm.playlistTrackProgress', { current: (queueIndex % activePlaylist.tracks.length) + 1, total: activePlaylist.tracks.length })}
+                      </div>
+                    </div>
+                    <button
+                      className="icon-btn"
+                      onClick={() => { setActivePlaylist(null); setQueueIndex(0); }}
+                    >
+                      <X size={18} />
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -938,13 +1259,19 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   };
 
   const renderSpotifyPlaybackBar = () => {
-    if (!useSpotify || !spotifyToken || !selectedTrack) return null;
+    if (!useSpotify || !spotifyToken || !nowPlayingTrack) return null;
     return (
       <div style={{ position: 'relative', marginBottom: '20px', padding: '15px', background: 'rgba(29, 185, 84, 0.1)', border: '1px solid #1db954', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '15px', overflow: 'hidden' }}>
         <div style={{ position: 'absolute', bottom: 0, left: 0, height: '4px', background: '#1db954', width: `${(playbackProgress / playbackDuration) * 100}%`, transition: 'width 1s linear' }}></div>
-        <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '50px', height: '50px', borderRadius: '50%', position: 'relative', zIndex: 2 }} />
+        {nowPlayingTrack.imageUrl ? (
+          <img src={nowPlayingTrack.imageUrl} alt="" style={{ width: '50px', height: '50px', borderRadius: '50%', position: 'relative', zIndex: 2 }} />
+        ) : (
+          <div style={{ width: '50px', height: '50px', borderRadius: '50%', position: 'relative', zIndex: 2, background: 'rgba(29,185,84,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <Music2 size={22} style={{ color: '#1db954' }} />
+          </div>
+        )}
         <div style={{ flex: 1, minWidth: 0, position: 'relative', zIndex: 2 }}>
-          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white', fontWeight: 'bold' }}>{selectedTrack.name}</div>
+          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white', fontWeight: 'bold' }}>{nowPlayingTrack.name}</div>
           <div style={{ fontSize: '0.8rem', color: '#1db954' }}>{t('spotify.nowPlaying')}</div>
         </div>
         <button
@@ -972,10 +1299,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 spotifyPlayer.pause();
               } else {
                 const state = await spotifyPlayer.getCurrentState();
-                if (state && state.track_window.current_track.uri === selectedTrack.uri) {
+                if (state && state.track_window.current_track.uri === nowPlayingTrack.uri) {
                   spotifyPlayer.resume();
                 } else {
-                  playTrack(selectedTrack.uri, spotifyPlayerId).catch(console.error);
+                  playTrack(nowPlayingTrack.uri, spotifyPlayerId).catch(console.error);
                 }
               }
             }
@@ -1010,7 +1337,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           {/* 3-Dot Menu Container */}
           <div style={{ position: 'relative', zIndex: 100 }} ref={menuRef}>
             <div style={{ display: 'flex', gap: '10px' }}>
-              {selectedTrack && room.status !== 'dancing' && (
+              {(selectedTrack || activePlaylist) && room.status !== 'dancing' && (
                 <button
                   className="kebab-menu-btn pulse-animation"
                   onClick={() => setShowSpotifyModal(true)}
@@ -1107,6 +1434,36 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <div className="btn-row" style={{ flexShrink: 0 }}>
                 <button className="cyber-button" style={{ padding: '5px 15px' }} onClick={() => handleRejoinResponse(req.id, true)}>{t('gm.accept')}</button>
                 <button className="cyber-button" style={{ padding: '5px 15px', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={() => handleRejoinResponse(req.id, false)}>{t('gm.deny')}</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* SONG SUGGESTIONS - players can suggest any time, independent of phase and of the GM's own audio mode */}
+      {room.songSuggestions?.length > 0 && (
+        <div className="panel panel--success">
+          <div className="panel-title" style={{ color: 'var(--neon-green)' }}>
+            <Music2 size={16} className="icon-inline" /> {t('gm.songSuggestions')}
+          </div>
+          {room.songSuggestions.map(s => (
+            <div key={s.id} className="list-item" style={{ marginBottom: '10px' }}>
+              {s.type === 'text' ? (
+                <MessageCircle size={36} className="icon-inline" style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+              ) : (
+                <img src={s.track.album?.images?.[2]?.url} alt="" style={{ width: '36px', height: '36px', borderRadius: '4px', flexShrink: 0 }} />
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: 'white', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {s.type === 'text' ? s.text : s.track.name}
+                </div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {s.type === 'text' ? t('gm.suggestionTextHint') : s.track.artists?.map(a => a.name).join(', ')} · {t('gm.suggestedBy', { name: maskName(s.playerName) })}
+                </div>
+              </div>
+              <div className="btn-row" style={{ flexShrink: 0 }}>
+                <button className="cyber-button" style={{ padding: '5px 15px' }} onClick={() => handleConfirmSuggestion(s)}>{t('gm.adoptSuggestion')}</button>
+                <button className="cyber-button" style={{ padding: '5px 15px', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={() => handleDismissSuggestion(s.id)}>{t('gm.deny')}</button>
               </div>
             </div>
           ))}
@@ -1554,7 +1911,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             return player && player.hasViewedRole;
           })
         );
-        const isSpotifyReady = !useSpotify || (selectedTrack && spotifyPlayer);
+        const isSpotifyReady = !useSpotify || ((selectedTrack || activePlaylist) && spotifyPlayer);
         const canProceedSong = isSpotifyReady || bypassSongReady;
         const canStart = (allCouplesViewedRole || bypassRoleView) && canProceedSong;
 
@@ -1569,7 +1926,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <div className="panel panel--danger">
                   <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> {t('gm.musicNotReady')}</strong><br />
                   <span style={{ color: 'white' }}>
-                    {!selectedTrack ? t('gm.selectSongFirst') : t('gm.playerInitializing')}
+                    {!selectedTrack && !activePlaylist ? t('gm.selectSongFirst') : t('gm.playerInitializing')}
                   </span>
                   {!bypassSongReady && (
                     <div>
@@ -1669,14 +2026,20 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <Music2 size={20} className="icon-inline" /> {t('gm.dancingInProgress')} <Music2 size={20} className="icon-inline" />
               </h3>
 
-              {useSpotify && selectedTrack && (
+              {useSpotify && nowPlayingTrack && (
                 <div style={{ marginBottom: '15px' }}>
                   {!hasSongFinished ? (
                     <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
-                      <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                      {nowPlayingTrack.imageUrl ? (
+                        <img src={nowPlayingTrack.imageUrl} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                      ) : (
+                        <div style={{ width: '40px', height: '40px', borderRadius: '4px', background: 'rgba(29,185,84,0.3)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                          <Music2 size={18} style={{ color: 'var(--neon-green)' }} />
+                        </div>
+                      )}
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('gm.currentSong')}</div>
-                        <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
+                        <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{nowPlayingTrack.name}</div>
                       </div>
                       <button
                         disabled={!spotifyPlayer}
@@ -1692,10 +2055,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                               spotifyPlayer.pause();
                             } else {
                               const state = await spotifyPlayer.getCurrentState();
-                              if (state && state.track_window.current_track.uri === selectedTrack.uri) {
+                              if (state && state.track_window.current_track.uri === nowPlayingTrack.uri) {
                                 spotifyPlayer.resume();
                               } else {
-                                playTrack(selectedTrack.uri, spotifyPlayerId).catch(console.error);
+                                playTrack(nowPlayingTrack.uri, spotifyPlayerId).catch(console.error);
                               }
                             }
                           }
@@ -1703,10 +2066,54 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                       >
                         {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
                       </button>
+                      {currentUser && (
+                        <button
+                          className="icon-btn"
+                          title={t('gm.addToPlaylist')}
+                          style={{ flexShrink: 0 }}
+                          onClick={() => setAddToPlaylistFor(prev => prev === nowPlayingTrack.uri ? null : nowPlayingTrack.uri)}
+                        >
+                          <Plus size={18} style={{ color: 'var(--neon-purple)' }} />
+                        </button>
+                      )}
                     </div>
                   ) : (
                     <div className="panel panel--danger" style={{ textAlign: 'center', color: 'var(--neon-red)', fontWeight: 'bold', marginBottom: 0 }}>
                       {t('gm.songOver')}
+                    </div>
+                  )}
+
+                  {currentUser && addToPlaylistFor === nowPlayingTrack.uri && (
+                    <div style={{ marginTop: '10px', border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
+                      {gmPlaylists.length > 0 && (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+                          {gmPlaylists.map(pl => (
+                            <button
+                              key={pl.id}
+                              onClick={() => handleAddTrackToPlaylist(pl.id, nowPlayingTrack)}
+                              style={{ textAlign: 'left', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: 'var(--radius-sm)', padding: '8px 12px', color: 'var(--text-main)', cursor: 'pointer', fontSize: '0.85rem' }}
+                            >
+                              {pl.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <input
+                          type="text"
+                          className="cyber-input"
+                          style={{ marginBottom: 0, flex: 1, padding: '8px 12px', fontSize: '0.85rem' }}
+                          placeholder={t('playlists.newNamePlaceholder')}
+                          value={addToPlaylistNewName}
+                          onChange={(e) => setAddToPlaylistNewName(e.target.value)}
+                        />
+                        <button className="cyber-button" style={{ width: 'auto', padding: '8px 14px', fontSize: '0.85rem' }} onClick={() => handleCreatePlaylistWithTrack(nowPlayingTrack)}>
+                          <Plus size={14} className="icon-inline" />
+                        </button>
+                      </div>
+                      {addToPlaylistStatus && (
+                        <p style={{ color: 'var(--neon-green)', fontSize: '0.8rem', textAlign: 'center', marginTop: '8px', marginBottom: 0 }}>{addToPlaylistStatus}</p>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2174,7 +2581,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <p style={{ color: 'white', marginBottom: '20px' }}>
                 {t('gm.abortedBody')}
               </p>
-              <button className="cyber-button pulse-animation" style={{ width: '100%' }} onClick={handleResetGame}>
+              {renderPlayedSongs()}
+              <button className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '20px' }} onClick={handleResetGame}>
                 {t('gm.backToLobby')}
               </button>
             </div>
@@ -2202,7 +2610,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>
               {t('gm.gameEnded')}
             </p>
-            <button className="cyber-button pulse-animation" style={{ width: '100%' }} onClick={handleResetGame}>
+            {renderPlayedSongs()}
+            <button className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '20px' }} onClick={handleResetGame}>
               ZURÜCK ZUR LOBBY / NEUE RUNDE
             </button>
           </div>

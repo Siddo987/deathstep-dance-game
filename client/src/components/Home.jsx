@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
-import { Users, Crown, LogIn, Repeat, ArrowLeft, Globe } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Users, Crown, LogIn, LogOut, Repeat, ArrowLeft, Globe, UserCircle2, Trophy, BarChart3, Settings as SettingsIcon, Music2 } from 'lucide-react';
 import { openCookieSettings } from './CookieBanner.jsx';
+import { fetchMyStats } from '../auth.js';
 import { useLanguage } from '../i18n.jsx';
 
 function LanguageSwitcher() {
@@ -34,7 +35,79 @@ function LanguageSwitcher() {
   );
 }
 
-function Home({ onCreateRoom, onJoinRoom }) {
+function AccountBar({ currentUser, onLoginClick, onLogout }) {
+  const { t } = useLanguage();
+  const [stats, setStats] = useState(null);
+
+  useEffect(() => {
+    if (!currentUser) { setStats(null); return; }
+    let cancelled = false;
+    fetchMyStats().then((s) => { if (!cancelled) setStats(s); });
+    return () => { cancelled = true; };
+  }, [currentUser?.id]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', marginBottom: '15px' }}>
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px', fontSize: '0.85rem' }}>
+        <UserCircle2 size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
+        {currentUser ? (
+          <>
+            <span style={{ color: 'var(--text-main)' }}>{t('auth.greeting', { name: currentUser.displayName })}</span>
+            <button
+              onClick={onLogout}
+              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', textDecoration: 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+            >
+              <LogOut size={14} className="icon-inline" />
+              {t('auth.logout')}
+            </button>
+          </>
+        ) : (
+          <button
+            onClick={onLoginClick}
+            style={{ background: 'transparent', border: 'none', color: 'var(--neon-blue)', textDecoration: 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+          >
+            <LogIn size={14} className="icon-inline" />
+            {t('auth.loginOrRegister')}
+          </button>
+        )}
+      </div>
+
+      {currentUser && stats && (
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '16px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Trophy size={14} className="icon-inline" />
+            {t('stats.winsSummary', { wins: stats.wins, games: stats.gamesPlayed })}
+          </span>
+          {stats.gamesHosted > 0 && (
+            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <Crown size={14} className="icon-inline" />
+              {t('stats.hostedSummary', { count: stats.gamesHosted })}
+            </span>
+          )}
+        </div>
+      )}
+
+      {currentUser && (
+        <div style={{ display: 'flex', justifyContent: 'center', gap: '15px', fontSize: '0.8rem' }}>
+          <a href="/stats" style={{ color: 'var(--text-muted)', textDecoration: 'underline', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <BarChart3 size={14} className="icon-inline" />
+            {t('stats.pageLink')}
+          </a>
+          <a href="/settings" style={{ color: 'var(--text-muted)', textDecoration: 'underline', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <SettingsIcon size={14} className="icon-inline" />
+            {t('settings.pageLink')}
+          </a>
+          <a href="/playlists" style={{ color: 'var(--text-muted)', textDecoration: 'underline', display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Music2 size={14} className="icon-inline" />
+            {t('playlists.pageLink')}
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Home({ onCreateRoom, onJoinRoom, currentUser, onLoginClick, onLogout }) {
   const { t } = useLanguage();
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
@@ -51,9 +124,20 @@ function Home({ onCreateRoom, onJoinRoom }) {
     }
   }, []);
 
+  // Pre-fill the join form from the logged-in account's saved defaults
+  // (Settings page) - only fills in the name if it's still empty, so it
+  // never overwrites something the player already typed.
+  React.useEffect(() => {
+    if (!currentUser) return;
+    if (currentUser.defaultDanceRole) setDanceRole(currentUser.defaultDanceRole);
+    setIsFlexible(!!currentUser.defaultIsFlexible);
+    setPlayerName((prev) => prev || currentUser.displayName || '');
+  }, [currentUser?.id]);
+
   if (view === 'main') {
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center' }}>
+        <AccountBar currentUser={currentUser} onLoginClick={onLoginClick} onLogout={onLogout} />
         <LanguageSwitcher />
         <h2 style={{ marginBottom: '8px', color: 'var(--neon-blue)' }}>{t('home.title')}</h2>
         <p style={{ color: 'var(--text-muted)', marginBottom: '30px', fontSize: '0.95rem' }}>
@@ -85,6 +169,12 @@ function Home({ onCreateRoom, onJoinRoom }) {
         </button>
 
         <div style={{ marginTop: '30px', display: 'flex', flexWrap: 'wrap', gap: '8px 15px', justifyContent: 'center' }}>
+          <a
+            href="/leaderboard"
+            style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
+          >
+            {t('leaderboard.pageLink')}
+          </a>
           <a
             href="/feedback"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}

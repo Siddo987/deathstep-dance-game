@@ -4,6 +4,9 @@ WORKDIR /app/client
 COPY client/package*.json ./
 RUN npm install
 COPY client/ ./
+# Single .env for the whole app (see /.env.example) - needed here so Vite can
+# inline the VITE_* build-time variables into the static bundle.
+COPY .env /app/.env
 RUN npm run build
 
 # Stage 2: Setup the Node.js server
@@ -14,6 +17,9 @@ WORKDIR /app
 COPY server/package*.json ./server/
 RUN cd server && npm install
 COPY server/ ./server/
+
+# Same .env again, this time for the server to read at runtime (DB/JWT/etc.)
+COPY .env /app/.env
 
 # Copy the built React app from Stage 1 into the location expected by the server
 COPY --from=build /app/client/dist ./client/dist

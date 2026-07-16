@@ -47,13 +47,35 @@ class GameStore {
   constructor() {
     this.rooms = new Map();
     this.gmChats = new Map(); // roomId -> [{ id, senderName, text, timestamp }] - kept separate from `rooms` so it never leaks into the player-facing roomUpdated broadcast.
+    this.roomLastActivity = new Map(); // roomId -> timestamp, for cleanupAbandonedRooms - kept separate so this bookkeeping never leaks into the client broadcast either
   }
 
   generateRoomCode() {
     return Math.floor(1000 + Math.random() * 9000).toString();
   }
 
-  createRoom(socketId) {
+  // Called from index.js's broadcastRoom() - the one place virtually every
+  // state-changing socket handler already passes through - so this doesn't
+  // need touching from dozens of individual action methods.
+  touchRoom(roomId) {
+    this.roomLastActivity.set(roomId, Date.now());
+  }
+
+  // A GM's tab closing without emitting leaveRoom (crash, force-quit, lost
+  // connection) never destroys the room - nothing else in the app ever
+  // revisits it, so it would otherwise sit in memory forever. Call
+  // periodically (see index.js) to reclaim anything untouched for maxAgeMs.
+  cleanupAbandonedRooms(maxAgeMs) {
+    const now = Date.now();
+    for (const roomId of this.rooms.keys()) {
+      const lastActivity = this.roomLastActivity.get(roomId) ?? now; // never touched yet - treat as fresh, not abandoned
+      if (now - lastActivity > maxAgeMs) {
+        this.destroyRoom(roomId);
+      }
+    }
+  }
+
+  createRoom(socketId, userId = null, gmClientId = null) {
     let code;
     do {
       code = this.generateRoomCode();
@@ -62,6 +84,8 @@ class GameStore {
     const newRoom = {
       id: code,
       gmId: socketId,
+      gmClientId, // persistent device id of the room's creator - lets reconnectToRoom verify a claimed GM reconnect actually belongs to them
+      gmUserId: userId, // logged-in account of the main GM, for gm_sessions stats - null if anonymous
       status: 'lobby', // lobby, paired, role_reveal, dancing, silent_report (silent kill mode only), kill_reveal, discussion, voting, ended
       round: 0,
       players: [], // { id, socketId, name, danceRole: 'lead'|'follow'|'spectator', isConfirmed: false }
@@ -71,14 +95,17 @@ class GameStore {
       victimIds: [], // couple ids eliminated this round (one kill per killer couple)
       pendingVictimIds: [], // secretly marked before reveal
       pendingRejoinRequests: [], // { id, playerName, targetPlayerId, requestingClientId, requestingSocketId }
-      coGms: [], // { id, socketId, name } - additional GMs promoted from the player pool
+      coGms: [], // { id, socketId, name, userId } - additional GMs promoted from the player pool
       killMode: 'classic', // 'classic' (GM marks kills manually) or 'silent' (phone-based report/match) - a room-level preference, like votingRole
       killClaims: {}, // silent mode: { killerCoupleId: victimCoupleId | null }
       victimReports: {}, // silent mode: { coupleId: { feltKilled: boolean, suspectCoupleId: string | null } }
       silentReportsResolved: false, // silent mode: whether this round's reports have been matched into pendingVictimIds yet
+      songSuggestions: [], // { id, playerId, playerName, track, createdAt } - track is a raw Spotify track object, players can suggest any time
+      playedSongs: [], // { uri, name, artist, playedAt } - reported by the GM's client whenever it actually starts a track; own-audio mode never reports anything since the app has no visibility into what plays on an external device/speaker
     };
     
     this.rooms.set(code, newRoom);
+    this.touchRoom(code); // in case it's abandoned before broadcastRoom() ever fires for it (e.g. no player joins)
     return newRoom;
   }
 
@@ -86,7 +113,7 @@ class GameStore {
     return this.rooms.get(roomId);
   }
 
-  addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socketId) {
+  addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socketId, userId = null) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     if (room.status !== 'lobby') return null; // Can't join mid-game right now
@@ -100,7 +127,8 @@ class GameStore {
       isFlexible: !!isFlexible,
       isConfirmed: false,
       hasViewedRole: false,
-      hasNoPhone: false
+      hasNoPhone: false,
+      userId: userId, // logged-in account, for game_participations stats - null if anonymous
     };
 
     room.players.push(newPlayer);
@@ -123,7 +151,8 @@ class GameStore {
       isFlexible: !!isFlexible,
       isConfirmed: false,
       hasViewedRole: false,
-      hasNoPhone: true
+      hasNoPhone: true,
+      userId: null, // manually added players never have an account
     };
 
     room.players.push(newPlayer);
@@ -182,7 +211,7 @@ class GameStore {
     if (!player) return null;
     if (player.hasNoPhone) return null; // Can't hand GM control to someone without a device
 
-    const playerSnapshot = { id: player.id, socketId: player.socketId, name: player.name };
+    const playerSnapshot = { id: player.id, socketId: player.socketId, name: player.name, userId: player.userId || null };
 
     const couple = room.couples.find(c => c.playerIds.includes(playerId));
     let removedPartners = [];
@@ -283,6 +312,84 @@ class GameStore {
     });
 
     return { room, request, accepted: true, oldSocketId, newPlayerId };
+  }
+
+  // Players can suggest a song any time. Two shapes: a real Spotify track
+  // (searched from the player's own connected Spotify, or picked from one of
+  // their own imported playlists) or a plain-text hint (title/artist typed by
+  // hand) for players without their own Spotify connected - either way it's
+  // capped per-player and per-room so it can't be used to spam the GM's list.
+  // playerId must belong to an actual player in the room - the display name
+  // is always read from there too, never trusted from the caller, so a
+  // forged clientId can't spoof another player's name or dodge the per-player cap.
+  addSongSuggestion(roomId, playerId, payload) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { error: 'roomNotFound' };
+
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return { error: 'notInRoom' };
+
+    let typedFields;
+    if (payload?.type === 'text') {
+      const text = (payload.text || '').trim().slice(0, 200);
+      if (!text) return { error: 'invalidTrack' };
+      typedFields = { type: 'text', text };
+    } else {
+      const track = payload?.track;
+      if (!track || !track.uri) return { error: 'invalidTrack' };
+      typedFields = { type: 'spotify', track };
+    }
+
+    const ownCount = room.songSuggestions.filter(s => s.playerId === playerId).length;
+    if (ownCount >= 5) return { error: 'suggestionLimitReached' };
+    if (room.songSuggestions.length >= 20) return { error: 'suggestionLimitReached' };
+
+    const suggestion = {
+      id: `suggestion_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+      ...typedFields,
+      playerId,
+      playerName: player.name,
+      createdAt: Date.now(),
+    };
+    room.songSuggestions.push(suggestion);
+    return { room, suggestion };
+  }
+
+  confirmSongSuggestion(roomId, suggestionId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { error: 'roomNotFound' };
+
+    const idx = room.songSuggestions.findIndex(s => s.id === suggestionId);
+    if (idx === -1) return { error: 'suggestionNotFound' };
+    const [suggestion] = room.songSuggestions.splice(idx, 1);
+    return { room, suggestion };
+  }
+
+  dismissSongSuggestion(roomId, suggestionId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return { error: 'roomNotFound' };
+
+    const idx = room.songSuggestions.findIndex(s => s.id === suggestionId);
+    if (idx === -1) return { error: 'suggestionNotFound' };
+    const [suggestion] = room.songSuggestions.splice(idx, 1);
+    return { room, suggestion };
+  }
+
+  // Reported by the GM's client the moment it actually starts a track through
+  // the Spotify Web Playback SDK - this is the only source of truth for "what
+  // played", since track selection/playback itself is entirely client-side.
+  // Skips a duplicate entry if it's the same track as the last one played
+  // (redundant reconnect/resume calls shouldn't pad the post-game list).
+  addPlayedSong(roomId, track) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (!track?.uri || !track?.name) return room;
+
+    const last = room.playedSongs[room.playedSongs.length - 1];
+    if (last && last.uri === track.uri) return room;
+
+    room.playedSongs.push({ uri: track.uri, name: track.name, artist: track.artist || '', playedAt: Date.now() });
+    return room;
   }
 
   updatePlayerRole(roomId, clientId, newRole) {
@@ -391,6 +498,7 @@ class GameStore {
   destroyRoom(roomId) {
     this.rooms.delete(roomId);
     this.gmChats.delete(roomId);
+    this.roomLastActivity.delete(roomId);
   }
 
   startGame(roomId, killerCount = 1, killMode = 'classic') {
@@ -621,9 +729,12 @@ class GameStore {
     if (!room) return null;
 
     const couple = room.couples.find(c => c.id === coupleId);
-    if (couple) {
-      couple.votingPlayerId = votingPlayerId;
-    }
+    if (!couple) return room;
+    // Only an actual member of this couple may be handed the vote - a bogus
+    // or unrelated id here would just softlock the couple's own voting UI
+    // (nothing else reads votingPlayerId), but there's no reason to allow it.
+    if (!couple.playerIds.includes(votingPlayerId)) return room;
+    couple.votingPlayerId = votingPlayerId;
     return room;
   }
 
@@ -714,6 +825,8 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.endReason = null;
+    room.songSuggestions = [];
+    room.playedSongs = [];
     room.couples = []; // Reset couples completely for a new pairing
     room.players.forEach(p => {
       p.isConfirmed = false;

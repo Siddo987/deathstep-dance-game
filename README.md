@@ -16,13 +16,17 @@
 
 - **Game Master (GM) Dashboard**: A powerful control center for the host to manage the game flow, observe players, trigger events, and manage Spotify playback.
 - **Mobile-First Player Interface**: Players join the room using a 4-digit code, see their secret roles, and cast votes directly from their phones.
-- **Live Spotify Integration**: The GM can search for songs and play them directly through the browser using the Spotify Web Playback SDK.
+- **Live Spotify Integration**: The GM can search for songs, queue one of their own playlists, and play them directly through the browser using the Spotify Web Playback SDK.
 - **Dynamic Game States**: Real-time synchronization across all devices using WebSockets (Socket.io) for phases like Lobby, Pairing, Role Reveal, Dancing, Kill Reveal, Discussion, and Voting.
+- **Player Song Suggestions**: Players can suggest a track to the GM at any time - either a real Spotify track (searched, or picked from their own imported playlists) or a plain-text hint if they have no Spotify connected.
+- **Optional Accounts**: Email/password or Google Sign-In accounts (requires the optional MariaDB setup below) unlock a default dance-role/name for faster joining, personal win/loss stats, an opt-in public leaderboard, and Spotify account linking.
+- **Live-Synced Playlists**: A logged-in account can import a Spotify playlist into the app; new tracks added or removed on either side are staged and reconciled automatically once confirmed (see `server/playlists.js`).
 
 ## 🛠️ Tech Stack
 
 - **Frontend**: React (Vite), Socket.io-client, CSS (Cyberpunk/Neon Aesthetics)
 - **Backend**: Node.js, Express, Socket.io
+- **Accounts** (optional): MariaDB, JWT session cookies, bcrypt, Google Sign-In
 - **Music API**: Spotify Web Playback SDK & Spotify Web API
 - **Deployment**: Dockerized for simple hosting
 
@@ -33,6 +37,7 @@
 - Node.js (v16+)
 - A Spotify Premium account (for the GM to use the Web Playback SDK)
 - A registered Spotify Developer App (to get a `Client ID` for the Spotify API)
+- Optional: a MariaDB server, to enable accounts/stats/leaderboard/playlists (the core game works without it - see `.env.example`)
 
 ### 1. Installation
 
@@ -50,11 +55,13 @@ npm install
 
 ### 2. Environment Variables
 
-Create a `.env` file in the `client` directory to configure your Spotify Client ID:
+Copy `.env.example` to `.env` in the **repository root** (not in `client/` or `server/` - both the client build and the server read from this single file) and fill in your values:
 
-```env
-VITE_SPOTIFY_CLIENT_ID=your_spotify_client_id_here
+```bash
+cp .env.example .env
 ```
+
+At minimum, set your Spotify Client ID. Login/accounts (MariaDB + optional Google Sign-In) are optional - see the comments in `.env.example` for those variables.
 
 ### 3. Running Locally
 

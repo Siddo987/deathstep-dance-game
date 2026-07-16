@@ -1,15 +1,196 @@
 import React, { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
-import { X, Music2, Skull, Sparkles, MessageCircle, Timer, Smartphone } from 'lucide-react';
+import { X, Music2, Skull, Sparkles, MessageCircle, Timer, Smartphone, Search, Send, Plus } from 'lucide-react';
 
 import { ConfirmModal } from './Modal.jsx';
 import { useLanguage } from '../i18n.jsx';
+import { loginWithSpotify, searchTracks, getValidToken } from '../spotify.js';
+import { fetchMyPlaylists, fetchPlaylist, createPlaylist, addTrackToPlaylist } from '../spotifyPlaylists.js';
 
-function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
+function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser }) {
   const { t } = useLanguage();
   const [showRole, setShowRole] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
   const [votingTimeLeft, setVotingTimeLeft] = useState(0);
+
+  // Song suggestions - three ways to suggest, gated by what the player has
+  // connected: plain text always works (no Spotify needed); a player's own
+  // device can also connect to Spotify the same way the GM does
+  // (client/src/spotify.js, local PKCE flow, no Deathstep account needed) to
+  // search real tracks; and a logged-in Deathstep account with imported
+  // playlists (server/playlists.js) can pick a track from one of those. Each
+  // is independent of the GM's own Spotify session/account.
+  const [showSongSuggest, setShowSongSuggest] = useState(false);
+  const [spotifySuggestToken, setSpotifySuggestToken] = useState(null);
+  const [suggestMode, setSuggestMode] = useState('text'); // 'text' | 'spotify' | 'playlist'
+  const [suggestText, setSuggestText] = useState('');
+  const [suggestQuery, setSuggestQuery] = useState('');
+  const [suggestResults, setSuggestResults] = useState([]);
+  const [suggestSearchDone, setSuggestSearchDone] = useState(false); // true once a search has actually returned, so an empty result set can say "no results" instead of looking unsearched
+  const [suggestJustSent, setSuggestJustSent] = useState(false);
+  const [suggestErrorKey, setSuggestErrorKey] = useState('');
+  const [playerPlaylists, setPlayerPlaylists] = useState([]);
+  const [activeSuggestPlaylist, setActiveSuggestPlaylist] = useState(null);
+
+  // Post-game "played songs" summary - lets a logged-in player add any track
+  // from the game straight into one of their own playlists.
+  const [addToPlaylistFor, setAddToPlaylistFor] = useState(null); // track uri whose picker is expanded, or null
+  const [addToPlaylistNewName, setAddToPlaylistNewName] = useState('');
+  const [addToPlaylistStatus, setAddToPlaylistStatus] = useState('');
+
+  React.useEffect(() => {
+    getValidToken().then(token => { if (token) setSpotifySuggestToken(token); });
+  }, []);
+
+  React.useEffect(() => {
+    if (!currentUser) { setPlayerPlaylists([]); return; }
+    let cancelled = false;
+    fetchMyPlaylists().then(result => { if (!cancelled && !result.error) setPlayerPlaylists(result.playlists); });
+    return () => { cancelled = true; };
+  }, [currentUser?.id]);
+
+  const handleAddTrackToPlaylist = async (playlistId, track) => {
+    const result = await addTrackToPlaylist(playlistId, { uri: track.uri, name: track.name, artist: track.artist });
+    const messageKey = result.error ? 'gm.addToPlaylistFailed' : result.track?.syncStatus === 'pending_add' ? 'gm.addToPlaylistPending' : 'gm.addToPlaylistSuccess';
+    setAddToPlaylistStatus(t(messageKey));
+    setTimeout(() => setAddToPlaylistStatus(''), 2500);
+    if (!result.error) setAddToPlaylistFor(null);
+  };
+
+  const handleCreatePlaylistWithTrack = async (track) => {
+    const name = addToPlaylistNewName.trim();
+    if (!name) return;
+    const created = await createPlaylist(name);
+    if (created.error) return;
+    setPlayerPlaylists(prev => [...prev, created.playlist]);
+    setAddToPlaylistNewName('');
+    await handleAddTrackToPlaylist(created.playlist.id, track);
+  };
+
+  // Post-game summary of every track the server recorded as actually played
+  // (server/gameStore.js addPlayedSong) - empty whenever the GM used
+  // own-audio mode the whole game, since the app never sees what plays
+  // externally.
+  const renderPlayedSongs = () => {
+    if (!room.playedSongs || room.playedSongs.length === 0) return null;
+    return (
+      <div className="panel panel--success" style={{ textAlign: 'left', marginTop: '20px' }}>
+        <div className="panel-title" style={{ color: 'var(--neon-green)' }}>
+          <Music2 size={16} className="icon-inline" /> {t('player.playedSongs')}
+        </div>
+        {room.playedSongs.map(song => {
+          const rowKey = `${song.uri}-${song.playedAt}`;
+          return (
+          <div key={rowKey} style={{ marginBottom: '10px' }}>
+            <div className="list-item">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ color: 'white', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{song.name}</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{song.artist}</div>
+              </div>
+              {currentUser && (
+                <button
+                  className="icon-btn"
+                  title={t('gm.addToPlaylist')}
+                  style={{ flexShrink: 0 }}
+                  onClick={() => setAddToPlaylistFor(prev => prev === rowKey ? null : rowKey)}
+                >
+                  <Plus size={18} style={{ color: 'var(--neon-purple)' }} />
+                </button>
+              )}
+            </div>
+            {currentUser && addToPlaylistFor === rowKey && (
+              <div style={{ border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
+                {playerPlaylists.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
+                    {playerPlaylists.map(pl => (
+                      <button
+                        key={pl.id}
+                        onClick={() => handleAddTrackToPlaylist(pl.id, song)}
+                        style={{ textAlign: 'left', background: 'rgba(255,255,255,0.05)', border: 'none', borderRadius: 'var(--radius-sm)', padding: '8px 12px', color: 'var(--text-main)', cursor: 'pointer', fontSize: '0.85rem' }}
+                      >
+                        {pl.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <input
+                    type="text"
+                    className="cyber-input"
+                    style={{ marginBottom: 0, flex: 1, padding: '8px 12px', fontSize: '0.85rem' }}
+                    placeholder={t('playlists.newNamePlaceholder')}
+                    value={addToPlaylistNewName}
+                    onChange={(e) => setAddToPlaylistNewName(e.target.value)}
+                  />
+                  <button className="cyber-button" style={{ width: 'auto', padding: '8px 14px', fontSize: '0.85rem' }} onClick={() => handleCreatePlaylistWithTrack(song)}>
+                    <Plus size={14} className="icon-inline" />
+                  </button>
+                </div>
+                {addToPlaylistStatus && (
+                  <p style={{ color: 'var(--neon-green)', fontSize: '0.8rem', textAlign: 'center', marginTop: '8px', marginBottom: 0 }}>{addToPlaylistStatus}</p>
+                )}
+              </div>
+            )}
+          </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const mySuggestions = (room.songSuggestions || []).filter(s => s.playerId === clientId);
+
+  const sendSuggestion = (suggestion) => {
+    setSuggestErrorKey('');
+    socket.emit('suggestSong', { roomId: room.id, clientId, suggestion }, (response) => {
+      if (!response?.success) {
+        setSuggestErrorKey(`server.${response?.messageKey || 'suggestionFailed'}`);
+      }
+    });
+    setSuggestJustSent(true);
+    setTimeout(() => setSuggestJustSent(false), 2500);
+  };
+
+  const handleSuggestSearch = async (e) => {
+    e.preventDefault();
+    if (!suggestQuery.trim()) return;
+    try {
+      const results = await searchTracks(suggestQuery);
+      setSuggestResults(results);
+      setSuggestSearchDone(true);
+    } catch (err) {
+      console.error('Failed to search tracks', err);
+    }
+  };
+
+  const handleSuggestTrack = (track) => {
+    sendSuggestion({ type: 'spotify', track });
+    setSuggestResults([]);
+    setSuggestSearchDone(false);
+    setSuggestQuery('');
+  };
+
+  const handleSuggestTextSubmit = (e) => {
+    e.preventDefault();
+    const text = suggestText.trim();
+    if (!text) return;
+    sendSuggestion({ type: 'text', text });
+    setSuggestText('');
+  };
+
+  const handlePickSuggestPlaylist = async (playlistId) => {
+    const result = await fetchPlaylist(playlistId);
+    if (!result.error) setActiveSuggestPlaylist(result.playlist);
+  };
+
+  // Playlist tracks are stored as { uri, name, artist } (artist is a plain
+  // string) - normalized here into the same { name, artists: [...] } shape a
+  // Spotify search result has, so the GM's suggestion panel can render either
+  // kind identically.
+  const handleSuggestPlaylistTrack = (track) => {
+    sendSuggestion({ type: 'spotify', track: { uri: track.uri, name: track.name, artists: [{ name: track.artist }], album: { images: [] } } });
+  };
 
   // Silent-report dancing phase: whether this couple's non-killer felt killed this round, and
   // the decoy puzzle shown to those who say "no" (regenerated once per round, unchecked).
@@ -120,6 +301,185 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
     </>
   );
 
+  const songSuggestButton = (
+    <>
+      <button
+        onClick={() => setShowSongSuggest(true)}
+        className="icon-btn"
+        style={{ position: 'absolute', top: '54px', right: '10px', zIndex: 10 }}
+        title={t('player.suggestSongTitle')}
+      >
+        <Music2 size={20} />
+      </button>
+      {showSongSuggest && createPortal(
+        <div className="modal-overlay" onClick={() => setShowSongSuggest(false)}>
+          <div className="modal-card cyber-card" style={{ maxWidth: '420px', border: '1px solid var(--neon-green)' }} onClick={(e) => e.stopPropagation()}>
+            <button className="icon-btn modal-close-btn" onClick={() => setShowSongSuggest(false)}>
+              <X size={20} />
+            </button>
+            <h3 style={{ color: 'var(--neon-green)', marginBottom: '15px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+              <Music2 size={20} />
+              {t('player.suggestSongTitle')}
+            </h3>
+
+            {spotifySuggestToken && (
+              <div className="segmented-control" style={{ marginBottom: '15px' }}>
+                <button className={`segmented-option accent-green ${suggestMode === 'text' ? 'is-active' : ''}`} onClick={() => setSuggestMode('text')}>
+                  {t('player.suggestModeText')}
+                </button>
+                <button className={`segmented-option accent-green ${suggestMode === 'spotify' ? 'is-active' : ''}`} onClick={() => setSuggestMode('spotify')}>
+                  {t('player.suggestModeSpotify')}
+                </button>
+                {currentUser && playerPlaylists.length > 0 && (
+                  <button className={`segmented-option accent-green ${suggestMode === 'playlist' ? 'is-active' : ''}`} onClick={() => setSuggestMode('playlist')}>
+                    {t('player.suggestModePlaylist')}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {(!spotifySuggestToken || suggestMode === 'text') && (
+              <form onSubmit={handleSuggestTextSubmit} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+                <input
+                  type="text"
+                  className="cyber-input"
+                  style={{ marginBottom: 0, flex: 1 }}
+                  placeholder={t('player.suggestTextPlaceholder')}
+                  value={suggestText}
+                  onChange={(e) => setSuggestText(e.target.value)}
+                  maxLength={200}
+                />
+                <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 16px' }}>
+                  <Send size={16} className="icon-inline" />
+                </button>
+              </form>
+            )}
+
+            {!spotifySuggestToken && (
+              <button className="cyber-button" style={{ background: 'transparent', border: '1px solid var(--neon-green)', color: 'var(--neon-green)' }} onClick={loginWithSpotify}>
+                {t('player.connectForMoreOptions')}
+              </button>
+            )}
+
+            {spotifySuggestToken && suggestMode === 'spotify' && (
+              <>
+                <form onSubmit={handleSuggestSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+                  <input
+                    type="text"
+                    className="cyber-input"
+                    style={{ marginBottom: 0, flex: 1 }}
+                    placeholder={t('spotify.searchPlaceholder')}
+                    value={suggestQuery}
+                    onChange={(e) => { setSuggestQuery(e.target.value); setSuggestSearchDone(false); }}
+                  />
+                  <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 16px' }}>
+                    <Search size={16} className="icon-inline" />
+                  </button>
+                </form>
+
+                {suggestResults.length > 0 && (
+                  <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
+                    {suggestResults.map(track => (
+                      <div
+                        key={track.id}
+                        onClick={() => handleSuggestTrack(track)}
+                        className="list-item list-item--purple"
+                        style={{ cursor: 'pointer' }}
+                      >
+                        <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artists.map(a => a.name).join(', ')}</div>
+                        </div>
+                        <Send size={16} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {suggestSearchDone && suggestResults.length === 0 && (
+                  <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '15px', fontSize: '0.9rem' }}>{t('spotify.noResults')}</p>
+                )}
+              </>
+            )}
+
+            {spotifySuggestToken && suggestMode === 'playlist' && (
+              <>
+                {!activeSuggestPlaylist ? (
+                  <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
+                    {playerPlaylists.map(pl => (
+                      <div
+                        key={pl.id}
+                        onClick={() => handlePickSuggestPlaylist(pl.id)}
+                        className="list-item list-item--purple"
+                        style={{ cursor: 'pointer' }}
+                      >
+                        <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{pl.name}</div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => setActiveSuggestPlaylist(null)}
+                      style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', textDecoration: 'underline', cursor: 'pointer', marginBottom: '10px', padding: 0 }}
+                    >
+                      {t('common.back')}
+                    </button>
+                    <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
+                      {activeSuggestPlaylist.tracks.length === 0 && (
+                        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{t('playlists.noTracks')}</p>
+                      )}
+                      {activeSuggestPlaylist.tracks.map(track => (
+                        <div
+                          key={track.id}
+                          onClick={() => handleSuggestPlaylistTrack(track)}
+                          className="list-item list-item--purple"
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artist}</div>
+                          </div>
+                          <Send size={16} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            {suggestJustSent && !suggestErrorKey && (
+              <p style={{ color: 'var(--neon-green)', textAlign: 'center', marginBottom: '10px', fontSize: '0.9rem' }}>{t('player.suggestSent')}</p>
+            )}
+            {suggestErrorKey && (
+              <p style={{ color: 'var(--neon-red)', textAlign: 'center', marginBottom: '10px', fontSize: '0.9rem' }}>{t(suggestErrorKey)}</p>
+            )}
+
+            {mySuggestions.length > 0 && (
+              <div style={{ marginTop: '10px' }}>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '8px', textTransform: 'uppercase' }}>{t('player.yourSuggestions')}</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {mySuggestions.map(s => (
+                    <div key={s.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85rem', color: 'var(--text-muted)' }}>
+                      <span>{s.type === 'text' ? s.text : `${s.track.name} — ${s.track.artists.map(a => a.name).join(', ')}`}</span>
+                      <span style={{ color: 'var(--neon-purple)' }}>{t('player.suggestionPending')}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body
+      )}
+    </>
+  );
+
   const playerNameTag = me ? (
     <div style={{ position: 'absolute', top: '15px', left: '15px', right: '50px', color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left', zIndex: 5 }}>
       <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name}</strong>
@@ -178,6 +538,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
         {leaveButton}
+        {songSuggestButton}
         <h2 style={{ color: 'var(--neon-blue)', marginBottom: '20px', marginTop: '20px' }}>{t('phase.lobby')}</h2>
         <div className="pulse-animation" style={{ width: '50px', height: '50px', borderRadius: '50%', background: 'var(--neon-purple)', margin: '0 auto 20px' }}></div>
         <p style={{ color: 'var(--text-muted)' }}>{t('player.lobbyWait')}</p>
@@ -191,6 +552,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
         <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
           {playerNameTag}
           {leaveButton}
+        {songSuggestButton}
           <h2 style={{ color: 'var(--text-muted)', marginBottom: '20px', marginTop: '20px' }}>{t('player.spectatorTitle')}</h2>
           <p>{t('player.spectatorBody')}</p>
         </div>
@@ -203,6 +565,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
         {leaveButton}
+        {songSuggestButton}
         <h2 style={{ color: 'var(--neon-purple)', marginBottom: '20px', marginTop: '20px' }}>{t('player.partnerTitle')}</h2>
         <p style={{ fontSize: '1.2rem', marginBottom: '20px' }}>
           {t('player.dancingWith')}<br/>
@@ -233,6 +596,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
         {leaveButton}
+        {songSuggestButton}
         <h2 style={{ color: 'var(--text-muted)', marginBottom: '20px', marginTop: '20px' }}>{t('player.spectatingTitle')}</h2>
         <p>{t('player.gameInProgress')}</p>
         <p>{t('player.currentPhase')} <strong>{t(`phase.${room.status}`)}</strong></p>
@@ -246,12 +610,14 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
         <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
           {playerNameTag}
           {leaveButton}
+        {songSuggestButton}
           <h2 className="glitch-text" style={{ color: 'var(--text-muted)', fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px', textShadow: 'none' }}>
             {t('player.abortedTitle')}
           </h2>
           <h3 style={{ color: 'var(--text-muted)' }}>
             {t('player.abortedBody')}
           </h3>
+          {renderPlayedSongs()}
         </div>
       );
     }
@@ -266,6 +632,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
         {leaveButton}
+        {songSuggestButton}
         <h2 className="glitch-text" style={{
           color: playerWon ? '#00ff66' : 'var(--neon-red)',
           fontSize: '2.5rem',
@@ -312,6 +679,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
         })()}
 
         <p style={{ color: 'var(--text-muted)' }}>{t('player.waitNewRound')}</p>
+        {renderPlayedSongs()}
       </div>
     );
   }
@@ -322,6 +690,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', borderColor: 'var(--neon-red)', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
         {leaveButton}
+        {songSuggestButton}
         <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '20px', marginTop: '20px' }}>{t('player.eliminatedTitle')}</h2>
         <p style={{ color: 'var(--text-muted)' }}>{t('player.eliminatedBody')}</p>
       </div>
@@ -339,6 +708,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId }) {
     <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
       {playerNameTag}
       {leaveButton}
+        {songSuggestButton}
       {(room.status === 'dancing' || room.status === 'silent_report' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'discussion') && (
         <p style={{ color: 'var(--text-muted)', marginBottom: '10px', marginTop: '20px' }}>{t('player.round', { n: room.round })}</p>
       )}

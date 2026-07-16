@@ -6,8 +6,14 @@ import PlayerScreen from './components/PlayerScreen.jsx';
 import Feedback from './components/Feedback.jsx';
 import Datenschutz from './components/Datenschutz.jsx';
 import Impressum from './components/Impressum.jsx';
+import Stats from './components/Stats.jsx';
+import Settings from './components/Settings.jsx';
+import Leaderboard from './components/Leaderboard.jsx';
+import Playlists from './components/Playlists.jsx';
 import CookieBanner from './components/CookieBanner.jsx';
 import { AlertModal, ConfirmModal } from './components/Modal.jsx';
+import { AuthModal } from './components/Auth.jsx';
+import { fetchMe, logout as logoutRequest } from './auth.js';
 import { useLanguage } from './i18n.jsx';
 
 // Server responses/events carry a messageKey (+ optional messageParams) that is
@@ -29,6 +35,8 @@ function App() {
   const [rejoinPending, setRejoinPending] = useState(false);
   const [rejoinPrompt, setRejoinPrompt] = useState(null); // { roomId, playerName }
   const [gmChatMessages, setGmChatMessages] = useState([]);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [clientId, setClientId] = useState(() => {
     let id = localStorage.getItem('deathstep_client_id');
     if (!id) {
@@ -39,6 +47,30 @@ function App() {
   });
 
   const isLeavingRef = useRef(false);
+
+  useEffect(() => {
+    fetchMe().then(setCurrentUser);
+  }, []);
+
+  // The server derives which account a socket belongs to from the login
+  // cookie present at connect time (see server/index.js's
+  // authenticatedUserId) - it never trusts a client-supplied userId, so a
+  // socket that connected while logged out stays "anonymous" server-side
+  // even after this tab logs in, until it reconnects. Reconnect right away
+  // on every login/logout so a room created/joined immediately after either
+  // one is correctly attributed (or not) without needing a page reload.
+  const handleAuthenticated = (user) => {
+    setCurrentUser(user);
+    socket.disconnect();
+    socket.connect();
+  };
+
+  const handleLogout = () => {
+    logoutRequest();
+    setCurrentUser(null);
+    socket.disconnect();
+    socket.connect();
+  };
 
   useEffect(() => {
     // Force re-login once to get the new 'streaming' scope
@@ -129,6 +161,10 @@ function App() {
       setAlertMessage(serverAlert(payload, 'server.removedGeneric'));
     });
 
+    socket.on('songSuggestionHandled', (payload) => {
+      setAlertMessage({ ...serverAlert(payload), success: payload?.messageKey === 'suggestionConfirmed' });
+    });
+
     socket.on('promotedToGM', ({ room: newRoom, gmChatHistory }) => {
       isLeavingRef.current = false;
       setRoom(newRoom);
@@ -151,6 +187,7 @@ function App() {
       socket.off('rejoinDenied');
       socket.off('sessionReplaced');
       socket.off('removedFromGame');
+      socket.off('songSuggestionHandled');
       socket.off('promotedToGM');
       socket.off('gmChatMessage');
     };
@@ -159,18 +196,30 @@ function App() {
   useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const code = urlParams.get('code');
-    if (code) {
-      import('./spotify.js').then(({ getToken }) => {
-        getToken(code).then((token) => {
-          if (token) {
-            window.history.replaceState({}, document.title, window.location.pathname);
-            setAlertMessage({ key: 'alert.spotifyConnected', success: true });
-          } else {
-            setAlertMessage({ key: 'alert.spotifyFailed' });
-          }
+    if (!code) return;
+
+    import('./spotify.js').then(({ isSpotifyLinkMode, clearSpotifyLinkMode, getTokenForAccountLink, getToken }) => {
+      if (isSpotifyLinkMode()) {
+        // Account-level link (Settings/Playlists) - result is persisted
+        // server-side, not this browser's localStorage. Distinguished from
+        // the GM local-playback flow below via a flag set before the redirect.
+        clearSpotifyLinkMode();
+        getTokenForAccountLink(code).then(({ connected }) => {
+          window.history.replaceState({}, document.title, window.location.pathname);
+          setAlertMessage({ key: connected ? 'alert.spotifyConnected' : 'alert.spotifyFailed', success: connected });
         });
+        return;
+      }
+
+      getToken(code).then((token) => {
+        if (token) {
+          window.history.replaceState({}, document.title, window.location.pathname);
+          setAlertMessage({ key: 'alert.spotifyConnected', success: true });
+        } else {
+          setAlertMessage({ key: 'alert.spotifyFailed' });
+        }
       });
-    }
+    });
   }, []);
 
   const handleLeaveRoom = (emitToServer = true) => {
@@ -194,7 +243,7 @@ function App() {
   const handleCreateRoom = () => {
     isLeavingRef.current = false;
     localStorage.setItem('deathstep_privacy_mode', 'false');
-    socket.emit('createRoom', (response) => {
+    socket.emit('createRoom', { clientId }, (response) => {
       if (response.success) {
         setRoom(response.room);
         setGmChatMessages(response.gmChatHistory || []);
@@ -280,6 +329,58 @@ function App() {
     );
   }
 
+  if (window.location.pathname === '/stats') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Stats currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
+  if (window.location.pathname === '/settings') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Settings currentUser={currentUser} onUserUpdated={setCurrentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
+  if (window.location.pathname === '/leaderboard') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Leaderboard currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
+  if (window.location.pathname === '/playlists') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Playlists currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
   return (
     <div className="app-container">
       <div className="header">
@@ -294,7 +395,13 @@ function App() {
       )}
 
       {view === 'home' && !rejoinPending && (
-        <Home onCreateRoom={handleCreateRoom} onJoinRoom={handleJoinRoom} />
+        <Home
+          onCreateRoom={handleCreateRoom}
+          onJoinRoom={handleJoinRoom}
+          currentUser={currentUser}
+          onLoginClick={() => setIsAuthModalOpen(true)}
+          onLogout={handleLogout}
+        />
       )}
 
       {view === 'gm' && room && (
@@ -304,6 +411,7 @@ function App() {
           myGmName={myGmName}
           gmChatMessages={gmChatMessages}
           onSendGMChatMessage={handleSendGMChatMessage}
+          currentUser={currentUser}
         />
       )}
 
@@ -313,6 +421,7 @@ function App() {
           role={playerRole}
           isEliminated={isEliminated}
           clientId={clientId}
+          currentUser={currentUser}
           onLeave={() => handleLeaveRoom(true)}
         />
       )}
@@ -322,6 +431,12 @@ function App() {
         message={alertMessage ? t(alertMessage.key, alertMessage.params) : null}
         isSuccess={!!alertMessage?.success}
         onClose={() => setAlertMessage(null)}
+      />
+
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onAuthenticated={handleAuthenticated}
       />
 
       <ConfirmModal
