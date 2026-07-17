@@ -177,9 +177,9 @@ class GameStore {
     return room;
   }
 
-  // Removes an entire couple (all members) - used both when the GM deletes a
-  // couple directly, and when one partner leaves/gets kicked and the rest of
-  // the couple can no longer continue on their own.
+  // Removes an entire couple (all members) - used when the GM deletes a
+  // couple directly or kicks one of its members (see kickPlayer/kickCouple
+  // in index.js) - a GM removal takes the whole couple out deliberately.
   removeCouple(roomId, coupleId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -198,6 +198,48 @@ class GameStore {
     }
 
     return { room, removedPlayers };
+  }
+
+  // A player voluntarily leaving (closing the tab, clicking "leave") should
+  // only remove that one player - their partner(s) didn't leave and
+  // shouldn't be ejected too (see index.js's leaveRoom, as opposed to
+  // kickPlayer/kickCouple which are deliberate GM removals of the whole
+  // couple via removeCouple above). A 3-person group losing one member
+  // still has a valid pair left, so the couple stays intact with that
+  // member dropped; a 2-person couple losing one has nobody left to dance
+  // with, so it's dissolved and whoever remains becomes an unpaired
+  // spectator for the rest of this round instead of losing their spot
+  // entirely - same as anyone else without a partner.
+  removeCoupleMember(roomId, leavingClientId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const couple = room.couples.find(c => c.playerIds.includes(leavingClientId));
+    if (!couple) return null;
+
+    room.players = room.players.filter(p => p.id !== leavingClientId);
+    room.pendingRejoinRequests = room.pendingRejoinRequests.filter(r => r.targetPlayerId !== leavingClientId);
+
+    const remainingIds = couple.playerIds.filter(id => id !== leavingClientId);
+    const dissolved = remainingIds.length < 2;
+
+    if (dissolved) {
+      room.couples = room.couples.filter(c => c.id !== couple.id);
+      remainingIds.forEach(id => {
+        const player = room.players.find(p => p.id === id);
+        if (player) player.danceRole = 'spectator';
+      });
+    } else {
+      couple.playerIds = remainingIds;
+      if (couple.votingPlayerId === leavingClientId) {
+        couple.votingPlayerId = remainingIds[0];
+      }
+    }
+
+    if (room.status !== 'lobby' && room.status !== 'paired') {
+      this.checkEndCondition(room);
+    }
+
+    return { room, remainingIds, dissolved };
   }
 
   // Promotes an existing player to co-GM. If they were part of a couple, the

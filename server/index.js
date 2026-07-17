@@ -218,17 +218,17 @@ io.on('connection', (socket) => {
 
     if (couple) {
       const leavingPlayer = room.players.find(p => p.id === clientId);
-      const result = gameStore.removeCouple(roomId, couple.id);
+      const result = gameStore.removeCoupleMember(roomId, clientId);
       if (result?.room) {
-        result.removedPlayers.forEach(p => {
-          if (p.id === clientId || !p.socketId) return; // they left on purpose, they already know
-          const sock = io.sockets.sockets.get(p.socketId);
-          if (sock) {
-            sock.emit('removedFromGame', { messageKey: 'partnerLeft', messageParams: { name: leavingPlayer?.name || '?' } });
+        const messageKey = result.dissolved ? 'partnerLeftSpectating' : 'groupmateLeftContinuing';
+        result.remainingIds.forEach(id => {
+          const p = result.room.players.find(pl => pl.id === id);
+          if (p?.socketId) {
+            io.to(p.socketId).emit('partnerLeftNotice', { messageKey, messageParams: { name: leavingPlayer?.name || '?' } });
           }
         });
         broadcastRoom(result.room);
-        console.log(`Player ${clientId} left room ${roomId} (couple removed)`);
+        console.log(`Player ${clientId} left room ${roomId} (partner(s) remain${result.dissolved ? ' as spectator' : ''})`);
       }
     } else {
       const updatedRoom = gameStore.removePlayer(roomId, clientId);

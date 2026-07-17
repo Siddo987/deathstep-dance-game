@@ -78,6 +78,19 @@ function App() {
       localStorage.removeItem('spotify_access_token');
       localStorage.setItem('spotify_scope_fix_2', 'true');
     }
+    // Force re-login once more to get the new playlist-read-* scope (see
+    // client/src/spotify.js's SCOPES) - refreshing an existing token only
+    // ever preserves whatever scope it originally consented to, so a full
+    // logout (not just clearing the access token) is needed to actually
+    // pick up newly-added scopes; the user just goes through Spotify's
+    // consent screen again next time they connect.
+    if (!localStorage.getItem('spotify_scope_fix_3')) {
+      localStorage.removeItem('spotify_access_token');
+      localStorage.removeItem('spotify_refresh_token');
+      localStorage.removeItem('spotify_token_expires_at');
+      localStorage.removeItem('spotify_code_verifier');
+      localStorage.setItem('spotify_scope_fix_3', 'true');
+    }
 
     socket.connect();
 
@@ -161,6 +174,14 @@ function App() {
       setAlertMessage(serverAlert(payload, 'server.removedGeneric'));
     });
 
+    // Unlike removedFromGame, this player is staying in the room (as a
+    // spectator, or paired down from a 3-person group) - just tell them why
+    // their partner situation changed, roomUpdated (right behind this on
+    // the same socket) already carries the actual new state.
+    socket.on('partnerLeftNotice', (payload) => {
+      setAlertMessage(serverAlert(payload));
+    });
+
     socket.on('songSuggestionHandled', (payload) => {
       setAlertMessage({ ...serverAlert(payload), success: payload?.messageKey === 'suggestionConfirmed' });
     });
@@ -187,6 +208,7 @@ function App() {
       socket.off('rejoinDenied');
       socket.off('sessionReplaced');
       socket.off('removedFromGame');
+      socket.off('partnerLeftNotice');
       socket.off('songSuggestionHandled');
       socket.off('promotedToGM');
       socket.off('gmChatMessage');

@@ -5,7 +5,10 @@ import { X, Music2, Skull, Sparkles, MessageCircle, Timer, Smartphone, Search, S
 
 import { ConfirmModal } from './Modal.jsx';
 import { useLanguage } from '../i18n.jsx';
-import { loginWithSpotify, searchTracks, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT } from '../spotify.js';
+import {
+  loginWithSpotify, searchTracks, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT,
+  fetchMySpotifyPlaylists, fetchSpotifyPlaylistTracks,
+} from '../spotify.js';
 import { fetchMyPlaylists, fetchPlaylist, createPlaylist, addTrackToPlaylist } from '../spotifyPlaylists.js';
 
 function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser }) {
@@ -57,12 +60,34 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     return () => window.removeEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
   }, []);
 
+  // Two independent sources, same as GMDashboard.jsx's gmPlaylists: a
+  // logged-in Deathstep account's DB-backed playlists (source: 'account'),
+  // and, with no account needed at all, whatever's already on the
+  // connected Spotify account itself (source: 'local', read-only, fetched
+  // fresh from Spotify - nothing imported or stored).
   React.useEffect(() => {
-    if (!currentUser) { setPlayerPlaylists([]); return; }
     let cancelled = false;
-    fetchMyPlaylists().then(result => { if (!cancelled && !result.error) setPlayerPlaylists(result.playlists); });
+    (async () => {
+      const lists = [];
+      if (currentUser) {
+        const result = await fetchMyPlaylists();
+        if (!result.error) lists.push(...result.playlists.map(p => ({ ...p, source: 'account' })));
+      }
+      if (spotifySuggestToken) {
+        try {
+          const local = await fetchMySpotifyPlaylists();
+          lists.push(...local.map(p => ({ ...p, source: 'local' })));
+        } catch (e) { /* local Spotify playlists just won't show this time - not fatal */ }
+      }
+      if (!cancelled) setPlayerPlaylists(lists);
+    })();
     return () => { cancelled = true; };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, spotifySuggestToken]);
+
+  // "Add this track to a playlist" (post-game summary) only ever writes to
+  // a DB-backed playlist - local, non-account Spotify playlists are
+  // read-only browsing, nothing to persist to.
+  const accountPlayerPlaylists = playerPlaylists.filter(pl => pl.source !== 'local');
 
   const handleAddTrackToPlaylist = async (playlistId, track) => {
     const result = await addTrackToPlaylist(playlistId, { uri: track.uri, name: track.name, artist: track.artist });
@@ -115,9 +140,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             </div>
             {currentUser && addToPlaylistFor === rowKey && (
               <div style={{ border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
-                {playerPlaylists.length > 0 && (
+                {accountPlayerPlaylists.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
-                    {playerPlaylists.map(pl => (
+                    {accountPlayerPlaylists.map(pl => (
                       <button
                         key={pl.id}
                         onClick={() => handleAddTrackToPlaylist(pl.id, song)}
@@ -195,8 +220,27 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     setSuggestText('');
   };
 
-  const handlePickSuggestPlaylist = async (playlistId) => {
-    const result = await fetchPlaylist(playlistId);
+  const handlePickSuggestPlaylist = async (playlist) => {
+    if (playlist.source === 'local') {
+      try {
+        // Normalized to the same { id, uri, name, artist } shape a
+        // DB-backed playlist's tracks have (artist as one joined string,
+        // not Spotify's .artists array) so this render block and
+        // handleSuggestPlaylistTrack below don't need to know the source.
+        const tracks = await fetchSpotifyPlaylistTracks(playlist.id);
+        setActiveSuggestPlaylist({
+          id: playlist.id,
+          name: playlist.name,
+          tracks: tracks.map((t, i) => ({ id: `${playlist.id}_${i}`, uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(', ') })),
+        });
+      } catch (e) {
+        if (e.message !== 'SPOTIFY_NOT_CONNECTED') console.error('Failed to load local Spotify playlist', e);
+        // SPOTIFY_NOT_CONNECTED: the SPOTIFY_SESSION_EXPIRED_EVENT listener
+        // already reset spotifySuggestToken and set the error message.
+      }
+      return;
+    }
+    const result = await fetchPlaylist(playlist.id);
     if (!result.error) setActiveSuggestPlaylist(result.playlist);
   };
 
@@ -346,7 +390,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                 <button className={`segmented-option accent-green ${suggestMode === 'spotify' ? 'is-active' : ''}`} onClick={() => setSuggestMode('spotify')}>
                   {t('player.suggestModeSpotify')}
                 </button>
-                {currentUser && playerPlaylists.length > 0 && (
+                {playerPlaylists.length > 0 && (
                   <button className={`segmented-option accent-green ${suggestMode === 'playlist' ? 'is-active' : ''}`} onClick={() => setSuggestMode('playlist')}>
                     {t('player.suggestModePlaylist')}
                   </button>
@@ -425,13 +469,15 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                     {playerPlaylists.map(pl => (
                       <div
                         key={pl.id}
-                        onClick={() => handlePickSuggestPlaylist(pl.id)}
+                        onClick={() => handlePickSuggestPlaylist(pl)}
                         className="list-item list-item--purple"
                         style={{ cursor: 'pointer' }}
                       >
                         <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{pl.name}</div>
+                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>
+                            {pl.name}{pl.source === 'local' && <span style={{ color: 'var(--text-muted)' }}> ({t('playlists.spotifySource')})</span>}
+                          </div>
                           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
                         </div>
                       </div>

@@ -2,7 +2,10 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
 import { ConfirmModal, AlertModal } from './Modal.jsx';
-import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT } from '../spotify.js';
+import {
+  loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT,
+  fetchMySpotifyPlaylists, fetchSpotifyPlaylistTracks,
+} from '../spotify.js';
 import { fetchMyPlaylists, fetchPlaylist, addTrackToPlaylist, createPlaylist } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
@@ -133,6 +136,11 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       ? { uri: selectedTrack.uri, name: selectedTrack.name, artist: selectedTrack.artists?.map(a => a.name).join(', ') || '', imageUrl: selectedTrack.album?.images?.[2]?.url || null }
       : null;
 
+  // "Add this track to a playlist" only ever writes to a DB-backed playlist
+  // (server/playlists.js) - local, non-account Spotify playlists (source:
+  // 'local' in gmPlaylists) are read-only browsing, nothing to persist to.
+  const accountGmPlaylists = gmPlaylists.filter(pl => pl.source !== 'local');
+
   // Update default killer count when couples array changes
   React.useEffect(() => {
     if (room.status === 'lobby') {
@@ -195,6 +203,17 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     }
   }, [room.status]);
 
+  // Privacy mode is a per-game toggle (hide player names on the GM's own
+  // screen) - reset it the moment a game concludes, whether that's a
+  // natural win/loss or the GM aborting via "End Game", rather than only on
+  // the later "back to lobby" click. Otherwise it silently carries into the
+  // next game unless the GM remembers to turn it off themselves.
+  React.useEffect(() => {
+    if (room.status === 'ended') {
+      setPrivacyMode(false);
+    }
+  }, [room.status]);
+
   // Per-round GM-local UI state (the kill-claim/victim-report/vote proxy
   // dropdowns, the "add to playlist" picker) must not survive into the next
   // round - a stale selection would otherwise resurface pointing at whatever
@@ -208,15 +227,31 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     setAddToPlaylistStatus('');
   }, [room.round]);
 
-  // Load the GM's own playlists once they've opted into Spotify and are
-  // logged into a Deathstep account - playlists are account-bound, so an
-  // anonymous GM never sees this option and nothing changes for them.
+  // Two independent sources feed the same picker: a logged-in Deathstep
+  // account's DB-backed playlists (source: 'account' - persisted, can be
+  // added to), and, with no account needed at all, whatever playlists
+  // already exist on the connected Spotify account itself (source:
+  // 'local' - read-only, fetched fresh from Spotify each time, nothing
+  // stored). Either, both, or neither can be available at once.
   React.useEffect(() => {
-    if (!currentUser || !useSpotify) { setGmPlaylists([]); return; }
-    fetchMyPlaylists().then(result => {
-      if (!result.error) setGmPlaylists(result.playlists);
-    });
-  }, [currentUser?.id, useSpotify]);
+    if (!useSpotify) { setGmPlaylists([]); return; }
+    let cancelled = false;
+    (async () => {
+      const lists = [];
+      if (currentUser) {
+        const result = await fetchMyPlaylists();
+        if (!result.error) lists.push(...result.playlists.map(p => ({ ...p, source: 'account' })));
+      }
+      if (spotifyToken) {
+        try {
+          const local = await fetchMySpotifyPlaylists();
+          lists.push(...local.map(p => ({ ...p, source: 'local' })));
+        } catch (e) { /* local Spotify playlists just won't show this time - not fatal */ }
+      }
+      if (!cancelled) setGmPlaylists(lists);
+    })();
+    return () => { cancelled = true; };
+  }, [currentUser?.id, useSpotify, spotifyToken]);
 
   React.useEffect(() => {
     if (!spotifyPlayer || !isPlaying) return;
@@ -557,8 +592,29 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     }
   };
 
-  const handleSelectPlaylist = async (playlistId) => {
-    const result = await fetchPlaylist(playlistId);
+  const handleSelectPlaylist = async (playlist) => {
+    if (playlist.source === 'local') {
+      try {
+        const tracks = await fetchSpotifyPlaylistTracks(playlist.id);
+        if (tracks.length === 0) return;
+        // Normalized to the same { id, uri, name, artist } shape as a
+        // DB-backed playlist's tracks (artist as one joined string, not
+        // Spotify's .artists array) so activePlaylist/playQueueTrack/
+        // nowPlayingTrack don't need to know which source a track came from.
+        setActivePlaylist({
+          id: playlist.id,
+          name: playlist.name,
+          tracks: tracks.map((t, i) => ({ id: `${playlist.id}_${i}`, uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(', ') })),
+        });
+        setQueueIndex(0);
+        setSelectedTrack(null);
+        setShowPlaylistPicker(false);
+      } catch (e) {
+        handleSpotifyPlaybackError(e, 'Failed to load local Spotify playlist');
+      }
+      return;
+    }
+    const result = await fetchPlaylist(playlist.id);
     if (result.error || !result.playlist.tracks.length) return;
     setActivePlaylist(result.playlist);
     setQueueIndex(0);
@@ -621,9 +677,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             </div>
             {currentUser && addToPlaylistFor === rowKey && (
               <div style={{ border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
-                {gmPlaylists.length > 0 && (
+                {accountGmPlaylists.length > 0 && (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
-                    {gmPlaylists.map(pl => (
+                    {accountGmPlaylists.map(pl => (
                       <button
                         key={pl.id}
                         onClick={() => handleAddTrackToPlaylist(pl.id, song)}
@@ -682,7 +738,6 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         setPendingCouples([]);
         setCurrentGroup([]);
         setRandomizerFlow(null);
-        setPrivacyMode(false);
       }
     });
   };
@@ -1242,7 +1297,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               </>
             )}
 
-            {!selectedTrack && currentUser && gmPlaylists.length > 0 && (
+            {!selectedTrack && gmPlaylists.length > 0 && (
               <div style={{ marginTop: '15px' }}>
                 {!activePlaylist ? (
                   <>
@@ -1264,13 +1319,15 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         {gmPlaylists.map(pl => (
                           <div
                             key={pl.id}
-                            onClick={() => handleSelectPlaylist(pl.id)}
+                            onClick={() => handleSelectPlaylist(pl)}
                             className="list-item list-item--purple"
                             style={{ cursor: 'pointer' }}
                           >
                             <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
                             <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{pl.name}</div>
+                              <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>
+                                {pl.name}{pl.source === 'local' && <span style={{ color: 'var(--text-muted)' }}> ({t('playlists.spotifySource')})</span>}
+                              </div>
                               <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
                             </div>
                           </div>
@@ -2131,9 +2188,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
                   {currentUser && addToPlaylistFor === nowPlayingTrack.uri && (
                     <div style={{ marginTop: '10px', border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
-                      {gmPlaylists.length > 0 && (
+                      {accountGmPlaylists.length > 0 && (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
-                          {gmPlaylists.map(pl => (
+                          {accountGmPlaylists.map(pl => (
                             <button
                               key={pl.id}
                               onClick={() => handleAddTrackToPlaylist(pl.id, nowPlayingTrack)}

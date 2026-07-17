@@ -1,10 +1,16 @@
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID;
-const SCOPES = 'streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state';
-// Used only by the account-link flow (Settings/Playlists) - adds read AND
-// write access to the user's playlists on top of the GM playback scopes
-// above, since imported playlists live-sync both ways (adding a track in
-// the app pushes it to the real Spotify playlist too).
-const LINK_SCOPES = `${SCOPES} playlist-read-private playlist-read-collaborative playlist-modify-private playlist-modify-public`;
+// playlist-read-* lets this local, browser-only session (no Deathstep
+// account needed) browse the connected Spotify account's own playlists
+// directly - see fetchMySpotifyPlaylists/fetchSpotifyPlaylistTracks below -
+// as a lighter alternative to the DB-backed, account-linked playlists
+// feature (server/playlists.js), which still requires a Deathstep account
+// since it persists/syncs tracks server-side.
+const SCOPES = 'streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state playlist-read-private playlist-read-collaborative';
+// Used only by the account-link flow (Settings/Playlists) - adds write
+// access to the user's playlists on top of the scopes above, since imported
+// playlists live-sync both ways (adding a track in the app pushes it to the
+// real Spotify playlist too).
+const LINK_SCOPES = `${SCOPES} playlist-modify-private playlist-modify-public`;
 const LINK_MODE_KEY = 'deathstep_spotify_link_mode';
 
 export const getRedirectUri = () => {
@@ -225,6 +231,56 @@ export const searchTracks = async (query) => {
 
   const data = await response.json();
   return data.tracks ? data.tracks.items : [];
+}
+
+// Read-only playlist browsing straight from Spotify's API using this local
+// session's token - a lighter alternative to server/playlists.js's
+// account-linked playlists (which need a Deathstep account, since they're
+// persisted/synced server-side). Nothing here is imported or stored
+// anywhere; it just lists what's already on the connected Spotify account
+// so a track from it can be picked, same as a search result.
+export const fetchMySpotifyPlaylists = async () => {
+  const token = await getValidToken();
+  if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
+
+  const playlists = [];
+  let url = 'https://api.spotify.com/v1/me/playlists?limit=50';
+  while (url && playlists.length < 200) {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error('FAILED');
+    const data = await response.json();
+    playlists.push(...(data.items || []).filter(Boolean).map(p => ({
+      id: p.id,
+      name: p.name,
+      trackCount: p.tracks?.total ?? 0,
+    })));
+    url = data.next || null;
+  }
+  return playlists;
+}
+
+export const fetchSpotifyPlaylistTracks = async (playlistId) => {
+  const token = await getValidToken();
+  if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
+
+  const tracks = [];
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100&fields=next,items(track(uri,name,artists(name),album(images)))`;
+  while (url && tracks.length < 500) {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error('FAILED');
+    const data = await response.json();
+    for (const item of data.items || []) {
+      if (!item.track || !item.track.uri) continue; // skip local/unavailable tracks
+      tracks.push({
+        uri: item.track.uri,
+        name: item.track.name,
+        artists: item.track.artists || [],
+        album: item.track.album || { images: [] },
+      });
+    }
+    url = data.next || null;
+  }
+  return tracks;
 }
 
 export const playTrack = async (trackUri, deviceId = null, positionMs = 0) => {
