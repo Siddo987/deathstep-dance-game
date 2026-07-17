@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
 import { ConfirmModal, AlertModal } from './Modal.jsx';
-import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify, getValidToken } from '../spotify.js';
+import { loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT } from '../spotify.js';
 import { fetchMyPlaylists, fetchPlaylist, addTrackToPlaylist, createPlaylist } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
@@ -256,6 +256,21 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     socket.emit('trackPlayed', { roomId: room.id, track: { uri: track.uri, name: track.name, artist } });
   };
 
+  // Shared failure handling for every playTrack() call below - surfaces the
+  // two cases a GM can actually act on (no active playback device; the
+  // Spotify session expired and getValidToken() couldn't refresh it) with a
+  // clear message instead of letting playback silently do nothing, and only
+  // falls back to a console log for anything else (network hiccup, etc.).
+  const handleSpotifyPlaybackError = (e, fallbackLog) => {
+    if (e.message === 'NO_ACTIVE_DEVICE') {
+      setAlertState({ message: t('spotify.noDevice') });
+    } else if (e.message === 'SPOTIFY_NOT_CONNECTED') {
+      setAlertState({ message: t('spotify.sessionExpired') });
+    } else {
+      console.error(fallbackLog, e);
+    }
+  };
+
   // Plays whichever track is currently at queueIndex, then advances the
   // index for next time (looping back to the start) - the single place that
   // both the round-start handlers and the auto-advance-on-finish effect call.
@@ -267,11 +282,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       await playTrack(track.uri, spotifyPlayerId);
       reportTrackPlayed(track);
     } catch (e) {
-      if (e.message === 'NO_ACTIVE_DEVICE') {
-        setAlertState({ message: t('spotify.noDevice') });
-      } else {
-        console.error('Failed to play queued track', e);
-      }
+      handleSpotifyPlaybackError(e, 'Failed to play queued track');
     }
   };
 
@@ -290,6 +301,41 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       if (token) setSpotifyToken(token);
     });
   }, []);
+
+  // Proactively keeps the token fresh on a fixed schedule (well inside its
+  // ~1h lifetime) instead of only ever refreshing reactively when something
+  // happens to need one. With this running, playback/search/the SDK's own
+  // getOAuthToken calls should basically never hit the "token's already
+  // stale, refresh it right now" path during a normal session at all -
+  // there's simply always a recently-refreshed one sitting ready. Doesn't
+  // touch spotifyToken (React) state on purpose: the effect below that
+  // creates the Web Playback SDK player is keyed on that state and would
+  // tear down and recreate the player - interrupting playback - on every
+  // change, and the SDK already reads a fresh token per-call via its own
+  // getOAuthToken callback regardless of what's in state.
+  React.useEffect(() => {
+    if (!useSpotify) return;
+    const interval = setInterval(() => { getValidToken(); }, 30 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [useSpotify]);
+
+  // client/src/spotify.js dispatches this the moment a token refresh
+  // definitively fails (the stored refresh token is dead, e.g. revoked on
+  // Spotify's side) - without this, the GM would only ever notice via a
+  // silently-failing play/pause/search click. Tear down the local player
+  // state so the UI drops back to the "connect to Spotify" button (the SDK
+  // player itself is now holding a dead session and can't recover).
+  React.useEffect(() => {
+    const handleExpired = () => {
+      setSpotifyToken(null);
+      setSpotifyPlayer(null);
+      setSpotifyPlayerId(null);
+      setPlayerStatus({ key: 'spotify.statusInit', detail: '', isError: false });
+      setAlertState({ message: t('spotify.sessionExpired') });
+    };
+    window.addEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
+    return () => window.removeEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
+  }, [t]);
 
   // Only fetch Spotify's SDK from their CDN once the GM has actually opted
   // into the Spotify integration - never load third-party scripts by default.
@@ -409,7 +455,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       // switch the currently playing song immediately, not just stage the
       // pick silently for the next round.
       if (room.status === 'dancing' && spotifyPlayerId) {
-        playTrack(suggestion.track.uri, spotifyPlayerId).then(() => reportTrackPlayed(suggestion.track)).catch(console.error);
+        playTrack(suggestion.track.uri, spotifyPlayerId)
+          .then(() => reportTrackPlayed(suggestion.track))
+          .catch(e => handleSpotifyPlaybackError(e, 'Failed to play adopted suggestion'));
       }
     }
     socket.emit('confirmSongSuggestion', { roomId: room.id, suggestionId: suggestion.id }, (response) => {
@@ -455,11 +503,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           await playTrack(selectedTrack.uri, spotifyPlayerId);
           reportTrackPlayed(selectedTrack);
         } catch (e) {
-          if (e.message === 'NO_ACTIVE_DEVICE') {
-            setAlertState({ message: t('spotify.noDevice') });
-          } else {
-            console.error("Failed to play track", e);
-          }
+          handleSpotifyPlaybackError(e, 'Failed to play track');
         }
       }
     }
@@ -475,11 +519,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           await playTrack(selectedTrack.uri, spotifyPlayerId);
           reportTrackPlayed(selectedTrack);
         } catch (e) {
-          if (e.message === 'NO_ACTIVE_DEVICE') {
-            setAlertState({ message: t('spotify.noDevice') });
-          } else {
-            console.error("Failed to play track", e);
-          }
+          handleSpotifyPlaybackError(e, 'Failed to play track');
         }
       }
     }
@@ -509,6 +549,10 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       setSearchResults(results);
       setSearchDone(true);
     } catch (e) {
+      if (e.message === 'SPOTIFY_NOT_CONNECTED') {
+        setAlertState({ message: t('spotify.sessionExpired') });
+        return;
+      }
       console.error("Failed to search tracks", e);
     }
   };
@@ -1162,7 +1206,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                           setSearchQuery('');
                           setSearchDone(false);
                           if (room.status === 'dancing' && spotifyPlayerId) {
-                            playTrack(track.uri, spotifyPlayerId).then(() => reportTrackPlayed(track)).catch(console.error);
+                            playTrack(track.uri, spotifyPlayerId)
+                              .then(() => reportTrackPlayed(track))
+                              .catch(e => handleSpotifyPlaybackError(e, 'Failed to play selected track'));
                           }
                         }}
                         className="list-item list-item--purple"
@@ -1302,7 +1348,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 if (state && state.track_window.current_track.uri === nowPlayingTrack.uri) {
                   spotifyPlayer.resume();
                 } else {
-                  playTrack(nowPlayingTrack.uri, spotifyPlayerId).catch(console.error);
+                  playTrack(nowPlayingTrack.uri, spotifyPlayerId).catch(e => handleSpotifyPlaybackError(e, 'Failed to resume track'));
                 }
               }
             }
@@ -2058,7 +2104,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                               if (state && state.track_window.current_track.uri === nowPlayingTrack.uri) {
                                 spotifyPlayer.resume();
                               } else {
-                                playTrack(nowPlayingTrack.uri, spotifyPlayerId).catch(console.error);
+                                playTrack(nowPlayingTrack.uri, spotifyPlayerId).catch(e => handleSpotifyPlaybackError(e, 'Failed to resume track'));
                               }
                             }
                           }

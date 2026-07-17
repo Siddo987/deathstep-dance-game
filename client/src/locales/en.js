@@ -521,6 +521,7 @@ export default {
   'spotify.statusAuthError': 'Auth error:',
   'spotify.statusPremium': 'Premium required:',
   'spotify.noDevice': "Error: No active Spotify device found!\n\nPlease wait until the web player shows status 'Ready'.",
+  'spotify.sessionExpired': 'Your Spotify connection has expired. Please connect to Spotify again.',
 
   // Cookie banner
   'cookie.textBefore': '🍪 We only store technically necessary data in your browser (e.g. to connect you to your ballroom/role). The optional Spotify integration loads additional content from Spotify when a GM enables it. More in our ',

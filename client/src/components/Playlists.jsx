@@ -70,6 +70,16 @@ function Playlists({ currentUser, onLoginClick }) {
   const importedSpotifyIds = new Set(playlists.map(p => p.spotifyPlaylistId).filter(Boolean));
   const translateError = (code) => t(PLAYLIST_ERROR_KEYS[code] || 'playlists.error.generic');
 
+  // spotify_not_connected can mean "never connected", but can also mean the
+  // account WAS connected and the server just found the stored connection
+  // dead (see server/spotify.js's getValidAccessToken, which deletes it on
+  // invalid_grant) - flip the visible status now instead of leaving the
+  // "Connected as ..." banner up while every action quietly keeps failing.
+  const reportError = (code) => {
+    setErrorMessage(translateError(code));
+    if (code === 'spotify_not_connected') setSpotifyStatus(s => ({ ...s, connected: false }));
+  };
+
   if (!currentUser) {
     return (
       <div className="app-container" style={{ padding: '20px' }}>
@@ -93,7 +103,7 @@ function Playlists({ currentUser, onLoginClick }) {
   const handleDisconnect = async () => {
     setErrorMessage('');
     const result = await disconnectSpotify();
-    if (result.error) { setErrorMessage(translateError(result.error)); return; }
+    if (result.error) { reportError(result.error); return; }
     setSpotifyStatus({ connected: false, displayName: null });
   };
 
@@ -103,7 +113,7 @@ function Playlists({ currentUser, onLoginClick }) {
     if (!name) return;
     setErrorMessage('');
     const result = await createPlaylist(name);
-    if (result.error) { setErrorMessage(translateError(result.error)); return; }
+    if (result.error) { reportError(result.error); return; }
     setNewName('');
     setPlaylists(prev => [result.playlist, ...prev]);
   };
@@ -111,7 +121,7 @@ function Playlists({ currentUser, onLoginClick }) {
   const handleDelete = async (id) => {
     setErrorMessage('');
     const result = await deletePlaylist(id);
-    if (result.error) { setErrorMessage(translateError(result.error)); return; }
+    if (result.error) { reportError(result.error); return; }
     setPlaylists(prev => prev.filter(p => p.id !== id));
     if (expanded?.id === id) setExpanded(null);
   };
@@ -140,7 +150,7 @@ function Playlists({ currentUser, onLoginClick }) {
     setErrorMessage('');
     const result = await importSpotifyPlaylist(spotifyPlaylist.id, spotifyPlaylist.name);
     if (result.error) {
-      setErrorMessage(translateError(result.error));
+      reportError(result.error);
       return;
     }
     setPlaylists(prev => [result.playlist, ...prev]);
@@ -153,7 +163,7 @@ function Playlists({ currentUser, onLoginClick }) {
     if (!q) return;
     setErrorMessage('');
     const result = await searchSpotifyTracks(q);
-    if (result.error) { setErrorMessage(translateError(result.error)); return; }
+    if (result.error) { reportError(result.error); return; }
     setSearchResults(result.tracks || []);
   };
 
@@ -161,7 +171,7 @@ function Playlists({ currentUser, onLoginClick }) {
     setErrorMessage('');
     const result = await addTrackToPlaylist(expanded.id, track);
     if (result.error) {
-      setErrorMessage(translateError(result.error));
+      reportError(result.error);
       return;
     }
     setExpanded(prev => ({ ...prev, tracks: [...prev.tracks, result.track] }));
@@ -177,7 +187,7 @@ function Playlists({ currentUser, onLoginClick }) {
     setErrorMessage('');
     const result = await removeTrackFromPlaylist(expanded.id, trackId);
     if (result.error) {
-      setErrorMessage(translateError(result.error));
+      reportError(result.error);
       return;
     }
     const refreshed = await fetchPlaylist(expanded.id);
@@ -194,7 +204,7 @@ function Playlists({ currentUser, onLoginClick }) {
     setErrorMessage('');
     const result = await confirmPendingTrack(expanded.id, trackId);
     if (result.error) {
-      setErrorMessage(translateError(result.error));
+      reportError(result.error);
       return;
     }
     if (result.removed) {

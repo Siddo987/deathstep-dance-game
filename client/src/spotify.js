@@ -133,32 +133,71 @@ export const getToken = async (code) => {
   return null;
 }
 
+// Fired whenever a refresh definitively fails (the stored refresh token is
+// dead) so any mounted component can tell the user their Spotify session
+// expired and reset its own UI - see GMDashboard.jsx/PlayerScreen.jsx.
+export const SPOTIFY_SESSION_EXPIRED_EVENT = 'deathstep-spotify-session-expired';
+
+// De-dupes concurrent refresh attempts. The Web Playback SDK asks for a
+// fresh token on its own schedule (its internal getOAuthToken callback) on
+// top of every other getValidToken() caller (playTrack, searchTracks, the
+// mount-time check, ...) - several of these can land in the same tick,
+// especially right after a reload with an already-expired token. Spotify's
+// refresh tokens are single-use/rotating: two concurrent requests starting
+// from the same stored token race, only one is accepted, and if the
+// request that loses the race is the one whose response gets written to
+// localStorage last, it overwrites the correctly-rotated token with a
+// value Spotify has already invalidated - permanently breaking the
+// connection until a full re-login. Sharing one in-flight promise means
+// there is at most one actual refresh in progress at a time, no matter how
+// many callers ask for it simultaneously.
+let refreshPromise = null;
+
 export const refreshToken = async () => {
-  const refreshToken = localStorage.getItem('spotify_refresh_token');
-  if (!refreshToken) return null;
+  const currentRefreshToken = localStorage.getItem('spotify_refresh_token');
+  if (!currentRefreshToken) return null;
 
-  const response = await fetch("https://accounts.spotify.com/api/token", {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({
-      client_id: CLIENT_ID,
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken
-    }),
-  });
+  if (refreshPromise) return refreshPromise;
 
-  const data = await response.json();
-  if (data.access_token) {
-    localStorage.setItem('spotify_access_token', data.access_token);
-    if (data.refresh_token) {
-      localStorage.setItem('spotify_refresh_token', data.refresh_token);
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch("https://accounts.spotify.com/api/token", {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          client_id: CLIENT_ID,
+          grant_type: 'refresh_token',
+          refresh_token: currentRefreshToken
+        }),
+      });
+
+      const data = await response.json().catch(() => ({}));
+      if (data.access_token) {
+        localStorage.setItem('spotify_access_token', data.access_token);
+        if (data.refresh_token) {
+          localStorage.setItem('spotify_refresh_token', data.refresh_token);
+        }
+        localStorage.setItem('spotify_token_expires_at', Date.now() + data.expires_in * 1000);
+        return data.access_token;
+      }
+      // invalid_grant means the refresh token itself is dead (revoked, or
+      // already rotated away by a request that won a race against this
+      // one) - there is no recovering from this without the user
+      // reconnecting, so clear the now-useless tokens instead of retrying
+      // them forever, and tell whoever's listening why.
+      if (data.error === 'invalid_grant') {
+        logoutSpotify();
+        window.dispatchEvent(new Event(SPOTIFY_SESSION_EXPIRED_EVENT));
+      }
+      return null;
+    } finally {
+      refreshPromise = null;
     }
-    localStorage.setItem('spotify_token_expires_at', Date.now() + data.expires_in * 1000);
-    return data.access_token;
-  }
-  return null;
+  })();
+
+  return refreshPromise;
 }
 
 export const getValidToken = async () => {
@@ -176,7 +215,7 @@ export const getValidToken = async () => {
 
 export const searchTracks = async (query) => {
   const token = await getValidToken();
-  if (!token) return [];
+  if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
 
   const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=5`, {
     headers: {
@@ -190,7 +229,7 @@ export const searchTracks = async (query) => {
 
 export const playTrack = async (trackUri, deviceId = null, positionMs = 0) => {
   const token = await getValidToken();
-  if (!token) return;
+  if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
 
   const url = deviceId 
     ? `https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`

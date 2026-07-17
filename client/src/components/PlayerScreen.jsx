@@ -5,7 +5,7 @@ import { X, Music2, Skull, Sparkles, MessageCircle, Timer, Smartphone, Search, S
 
 import { ConfirmModal } from './Modal.jsx';
 import { useLanguage } from '../i18n.jsx';
-import { loginWithSpotify, searchTracks, getValidToken } from '../spotify.js';
+import { loginWithSpotify, searchTracks, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT } from '../spotify.js';
 import { fetchMyPlaylists, fetchPlaylist, createPlaylist, addTrackToPlaylist } from '../spotifyPlaylists.js';
 
 function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser }) {
@@ -41,6 +41,20 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
   React.useEffect(() => {
     getValidToken().then(token => { if (token) setSpotifySuggestToken(token); });
+  }, []);
+
+  // client/src/spotify.js dispatches this the moment a token refresh
+  // definitively fails (the stored refresh token is dead) - fall back to
+  // text-only suggestions and say why, instead of the Spotify/playlist tabs
+  // just silently disappearing next render.
+  React.useEffect(() => {
+    const handleExpired = () => {
+      setSpotifySuggestToken(null);
+      setSuggestMode('text');
+      setSuggestErrorKey('spotify.sessionExpired');
+    };
+    window.addEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
+    return () => window.removeEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
   }, []);
 
   React.useEffect(() => {
@@ -160,7 +174,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       setSuggestResults(results);
       setSuggestSearchDone(true);
     } catch (err) {
-      console.error('Failed to search tracks', err);
+      if (err.message !== 'SPOTIFY_NOT_CONNECTED') console.error('Failed to search tracks', err);
+      // SPOTIFY_NOT_CONNECTED: the SPOTIFY_SESSION_EXPIRED_EVENT listener
+      // above already reset spotifySuggestToken and set the error message.
     }
   };
 

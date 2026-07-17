@@ -41,21 +41,72 @@ async function refreshAccessToken(refreshToken) {
   return response.json();
 }
 
-// Looks up the account-linked refresh_token and exchanges it for a fresh
-// access_token on every call (no caching - this is click-driven, not
-// per-keystroke, so the extra round trip is cheap). Spotify occasionally
-// rotates the refresh_token itself; if it does, the new one is persisted.
+// userId -> { accessToken, expiresAt }. Access tokens last ~1h; caching
+// means most calls (search, playlist reads, the 8s/30s playlist pull-sync)
+// don't touch Spotify's token endpoint at all.
+const accessTokenCache = new Map();
+// userId -> in-flight Promise<string|null>, so concurrent callers for the
+// same user share one refresh instead of each independently exchanging the
+// same stored refresh_token. Spotify's refresh tokens are single-use/
+// rotating: two concurrent requests both starting from the same stored
+// token would race - only one is accepted, and if whichever one loses
+// finishes last, it overwrites the correctly-rotated token in the DB with
+// one Spotify has already invalidated, permanently breaking the connection.
+// This was easy to trigger in practice once playlists could sync
+// automatically (8s on-read throttle + a 30s background loop across every
+// linked playlist, on top of any foreground search/playlist-browse call).
+const refreshPromises = new Map();
+
+// Looks up the account-linked refresh_token and returns a valid access
+// token, refreshing (and persisting the rotated refresh_token) only when
+// the cached one is missing or near expiry. If Spotify reports the refresh
+// token itself as dead (invalid_grant - revoked, or rotated away by a
+// request that won a race against an earlier call before this caching
+// existed), the stored connection can never work again without the user
+// reconnecting, so it's deleted here rather than left silently broken.
 export async function getValidAccessToken(pool, userId) {
-  const [rows] = await pool.query('SELECT refresh_token FROM spotify_accounts WHERE user_id = ?', [userId]);
-  if (!rows[0]) return null;
-
-  const data = await refreshAccessToken(rows[0].refresh_token);
-  if (!data.access_token) return null;
-
-  if (data.refresh_token && data.refresh_token !== rows[0].refresh_token) {
-    await pool.query('UPDATE spotify_accounts SET refresh_token = ? WHERE user_id = ?', [data.refresh_token, userId]);
+  const cached = accessTokenCache.get(userId);
+  if (cached && Date.now() < cached.expiresAt - 60000) {
+    return cached.accessToken;
   }
-  return data.access_token;
+
+  if (refreshPromises.has(userId)) {
+    return refreshPromises.get(userId);
+  }
+
+  const promise = (async () => {
+    try {
+      const [rows] = await pool.query('SELECT refresh_token FROM spotify_accounts WHERE user_id = ?', [userId]);
+      if (!rows[0]) return null;
+
+      const data = await refreshAccessToken(rows[0].refresh_token);
+      if (!data.access_token) {
+        if (data.error === 'invalid_grant') {
+          await pool.query('DELETE FROM spotify_accounts WHERE user_id = ?', [userId]);
+        }
+        accessTokenCache.delete(userId);
+        return null;
+      }
+
+      if (data.refresh_token && data.refresh_token !== rows[0].refresh_token) {
+        await pool.query('UPDATE spotify_accounts SET refresh_token = ? WHERE user_id = ?', [data.refresh_token, userId]);
+      }
+      accessTokenCache.set(userId, { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 });
+      return data.access_token;
+    } finally {
+      refreshPromises.delete(userId);
+    }
+  })();
+  refreshPromises.set(userId, promise);
+  return promise;
+}
+
+// Called on connect/disconnect so a stale cached access token from a
+// previous (possibly different) Spotify account never lingers past a
+// reconnect - without this, switching accounts wouldn't actually take
+// effect until the old cached token's ~1h expiry.
+export function invalidateAccessTokenCache(userId) {
+  accessTokenCache.delete(userId);
 }
 
 export async function spotifyFetch(accessToken, path, options = {}) {
@@ -101,12 +152,14 @@ router.post('/connect', requireAuth, asyncRoute(async (req, res) => {
      ON DUPLICATE KEY UPDATE spotify_user_id = VALUES(spotify_user_id), display_name = VALUES(display_name), refresh_token = VALUES(refresh_token)`,
     [req.userId, profile.id, profile.display_name || profile.id, finalRefreshToken]
   );
+  invalidateAccessTokenCache(req.userId);
 
   res.json({ connected: true, displayName: profile.display_name || profile.id });
 }));
 
 router.post('/disconnect', requireAuth, asyncRoute(async (req, res) => {
   await req.db.query('DELETE FROM spotify_accounts WHERE user_id = ?', [req.userId]);
+  invalidateAccessTokenCache(req.userId);
   res.json({ success: true });
 }));
 

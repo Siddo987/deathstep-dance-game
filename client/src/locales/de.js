@@ -521,6 +521,7 @@ export default {
   'spotify.statusAuthError': 'Auth-Fehler:',
   'spotify.statusPremium': 'Premium erforderlich:',
   'spotify.noDevice': "Fehler: Kein aktives Spotify-Gerät gefunden!\n\nBitte warte, bis der Web Player den Status 'Ready' hat.",
+  'spotify.sessionExpired': 'Deine Spotify-Verbindung ist abgelaufen. Bitte verbinde dich erneut mit Spotify.',
 
   // Cookie-Banner
   'cookie.textBefore': '🍪 Wir speichern nur technisch notwendige Daten in deinem Browser (z.B. um dich mit deinem Ballroom/deiner Rolle zu verbinden). Die optionale Spotify-Integration lädt zusätzliche Inhalte von Spotify nach, wenn ein Spielleiter sie aktiviert. Mehr dazu in unserer ',
