@@ -104,7 +104,8 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }) {
     try {
       const result = mode === 'login'
         ? await login(email, password)
-        : await register(email, password, displayName);
+        : await register(email, password, displayName, localStorage.getItem('deathstep_ref_code'));
+      if (!result.error) localStorage.removeItem('deathstep_ref_code');
       handleResult(result);
     } catch (err) {
       setErrorKey('auth.error.unknown_error');
@@ -116,7 +117,8 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }) {
     setErrorKey('');
     setIsGoogleSubmitting(true);
     try {
-      const result = await loginWithGoogle(credential);
+      const result = await loginWithGoogle(credential, localStorage.getItem('deathstep_ref_code'));
+      if (!result.error) localStorage.removeItem('deathstep_ref_code');
       handleResult(result);
     } catch (err) {
       setErrorKey('auth.error.unknown_error');

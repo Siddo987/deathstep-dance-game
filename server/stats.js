@@ -26,6 +26,123 @@ function didKillersWin(room) {
   return aliveKillers >= aliveDancers;
 }
 
+// Spotify's "track" URIs (spotify:track:ID) are what room.playedSongs stores
+// (see gameStore.js's addPlayedSong) - this derives the shareable web link
+// for game_played_songs.spotify_url, null for anything that doesn't match
+// that shape (there shouldn't be anything else, but this is persistence code
+// for a live game's data, not worth throwing over).
+function spotifyUriToUrl(uri) {
+  const match = /^spotify:track:([A-Za-z0-9]+)$/.exec(uri || '');
+  return match ? `https://open.spotify.com/track/${match[1]}` : null;
+}
+
+// Persists the full round-by-round history captured in room.roundHistory
+// (see gameStore.js's pushRoundRecord/revealKill/executeVote/endGame) plus
+// every couple/member and played song - fully normalized (not JSON) so any
+// of it - who was a killer, who voted for whom, who claimed which kill - is
+// directly queryable later once a frontend exists to browse it. Runs
+// regardless of `aborted`, unlike the win/loss participation stats below it:
+// a log of what actually happened is still useful for a game cut short.
+async function recordGameHistory(pool, room, { aborted }) {
+  const killersWon = aborted ? null : didKillersWin(room);
+  const [gameResult] = await pool.query(
+    'INSERT INTO games (room_id, gm_user_id, kill_mode, started_at, aborted, killers_won) VALUES (?, ?, ?, ?, ?, ?)',
+    [room.id, room.gmUserId || null, room.killMode, new Date(room.startedAt || Date.now()), aborted ? 1 : 0, killersWon === null ? null : (killersWon ? 1 : 0)]
+  );
+  const gameId = gameResult.insertId;
+
+  // Maps this room's transient couple ids (e.g. 'couple_0', reused across
+  // different games) to this game's own game_couples row id, since every
+  // other table below references couples by that stable DB id instead.
+  const coupleDbIdByRoomId = new Map();
+  for (const couple of room.couples) {
+    const [coupleResult] = await pool.query(
+      'INSERT INTO game_couples (game_id, couple_key, name, role, final_status) VALUES (?, ?, ?, ?, ?)',
+      [gameId, couple.id, couple.name, couple.role, couple.status]
+    );
+    coupleDbIdByRoomId.set(couple.id, coupleResult.insertId);
+
+    const members = room.players.filter(p => couple.playerIds.includes(p.id));
+    if (members.length > 0) {
+      const values = members.map(p => [coupleResult.insertId, p.name, p.userId || null, p.danceRole]);
+      await pool.query('INSERT INTO game_couple_members (game_couple_id, player_name, user_id, dance_role) VALUES ?', [values]);
+    }
+  }
+
+  for (const round of room.roundHistory) {
+    const eliminatedByVoteDbId = round.votedOutCoupleId ? (coupleDbIdByRoomId.get(round.votedOutCoupleId) || null) : null;
+    const [roundResult] = await pool.query(
+      'INSERT INTO game_rounds (game_id, round_number, completed, eliminated_by_vote_couple_id) VALUES (?, ?, ?, ?)',
+      [gameId, round.roundNumber, round.completed ? 1 : 0, eliminatedByVoteDbId]
+    );
+    const roundId = roundResult.insertId;
+
+    if (round.killedCoupleIds.length > 0) {
+      const values = round.killedCoupleIds
+        .filter(coupleId => coupleDbIdByRoomId.has(coupleId))
+        .map(coupleId => [roundId, coupleDbIdByRoomId.get(coupleId)]);
+      if (values.length > 0) {
+        await pool.query('INSERT INTO game_round_kills (game_round_id, killed_couple_id) VALUES ?', [values]);
+      }
+    }
+
+    if (round.votes.length > 0) {
+      const values = round.votes
+        .filter(v => coupleDbIdByRoomId.has(v.voterCoupleId))
+        .map(v => [
+          roundId,
+          coupleDbIdByRoomId.get(v.voterCoupleId),
+          v.votingPlayerName,
+          v.suspectCoupleId ? (coupleDbIdByRoomId.get(v.suspectCoupleId) || null) : null,
+        ]);
+      if (values.length > 0) {
+        await pool.query('INSERT INTO game_round_votes (game_round_id, voter_couple_id, voting_player_name, suspect_couple_id) VALUES ?', [values]);
+      }
+    }
+
+    if (round.killClaims) {
+      const entries = Object.entries(round.killClaims).filter(([killerCoupleId]) => coupleDbIdByRoomId.has(killerCoupleId));
+      if (entries.length > 0) {
+        const values = entries.map(([killerCoupleId, victimCoupleId]) => [
+          roundId,
+          coupleDbIdByRoomId.get(killerCoupleId),
+          victimCoupleId ? (coupleDbIdByRoomId.get(victimCoupleId) || null) : null,
+        ]);
+        await pool.query('INSERT INTO game_round_kill_claims (game_round_id, killer_couple_id, victim_couple_id) VALUES ?', [values]);
+      }
+    }
+
+    if (round.victimReports) {
+      const entries = Object.entries(round.victimReports).filter(([coupleId]) => coupleDbIdByRoomId.has(coupleId));
+      if (entries.length > 0) {
+        const values = entries.map(([coupleId, report]) => [
+          roundId,
+          coupleDbIdByRoomId.get(coupleId),
+          report.feltKilled ? 1 : 0,
+          report.suspectCoupleId ? (coupleDbIdByRoomId.get(report.suspectCoupleId) || null) : null,
+        ]);
+        await pool.query('INSERT INTO game_round_victim_reports (game_round_id, couple_id, felt_killed, suspect_couple_id) VALUES ?', [values]);
+      }
+    }
+  }
+
+  if (room.playedSongs.length > 0) {
+    const values = room.playedSongs.map(song => [
+      gameId,
+      song.round ?? null,
+      song.uri,
+      spotifyUriToUrl(song.uri),
+      song.name,
+      song.artist || '',
+      new Date(song.playedAt),
+    ]);
+    await pool.query(
+      'INSERT INTO game_played_songs (game_id, round_number, track_uri, spotify_url, track_name, artist_name, played_at) VALUES ?',
+      [values]
+    );
+  }
+}
+
 // Called once per game conclusion (natural or aborted) from server/index.js.
 // Stats are a bonus on top of the core (DB-free) party game, so a missing/
 // unreachable DB - or any write failure - must never take down the game.
@@ -41,6 +158,8 @@ export async function recordGameConclusion(room, { aborted }) {
     for (const userId of gmUserIds) {
       await pool.query('INSERT INTO gm_sessions (user_id, room_id) VALUES (?, ?)', [userId, room.id]);
     }
+
+    await recordGameHistory(pool, room, { aborted });
 
     // An aborted game has no winner, so it doesn't count as a win/loss for
     // anyone - only that it was hosted (recorded above).
@@ -83,6 +202,13 @@ router.get('/me', requireDb, asyncRoute(async (req, res) => {
     'SELECT COUNT(*) as gamesHosted FROM gm_sessions WHERE user_id = ?',
     [userId]
   );
+  // Only counts accounts that actually completed registration through this
+  // user's invite link (referred_by_user_id is set once, at registration -
+  // see server/auth.js) - never inflated by someone merely clicking the link.
+  const [inviteRows] = await req.db.query(
+    'SELECT COUNT(*) as invitedCount FROM users WHERE referred_by_user_id = ?',
+    [userId]
+  );
 
   const p = participationRows[0];
   res.json({
@@ -94,6 +220,7 @@ router.get('/me', requireDb, asyncRoute(async (req, res) => {
       dancerGames: Number(p.dancerGames),
       dancerWins: Number(p.dancerWins),
       gamesHosted: Number(hostingRows[0].gamesHosted),
+      invitedCount: Number(inviteRows[0].invitedCount),
     },
   });
 }));

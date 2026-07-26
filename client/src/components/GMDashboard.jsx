@@ -3,17 +3,19 @@ import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
 import { ConfirmModal, AlertModal } from './Modal.jsx';
 import {
-  loginWithSpotify, searchTracks, playTrack, pausePlayback, logoutSpotify, getValidToken, SPOTIFY_SESSION_EXPIRED_EVENT,
+  loginWithSpotify, loginWithSpotifyForAccountLink, searchTracks, playTrack, pausePlayback, logoutSpotify,
+  getBestAvailableToken, SPOTIFY_SESSION_EXPIRED_EVENT,
   fetchMySpotifyPlaylists, fetchSpotifyPlaylistTracks,
 } from '../spotify.js';
-import { fetchMyPlaylists, fetchPlaylist, addTrackToPlaylist, createPlaylist } from '../spotifyPlaylists.js';
+import { fetchMyPlaylists, fetchPlaylist, addTrackToPlaylist, createPlaylist, fetchRoomSpotifyToken } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
 import coupleIcon from './couple_icon.png';
 import {
   MessageCircle, Crown, X, PhoneOff, Repeat, Scissors, AlertTriangle, Lightbulb,
   Music2, Skull, Sparkles, EyeOff, Eye, Check, Plus, Minus, LogOut, Flag,
-  Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone
+  Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone,
+  ChevronUp, ChevronDown, RotateCcw
 } from 'lucide-react';
 
 function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMessage, currentUser }) {
@@ -59,20 +61,15 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchDone, setSearchDone] = useState(false); // true once a search has actually returned, so an empty result set can say "no results" instead of looking unsearched
-  const [selectedTrack, setSelectedTrack] = useState(() => {
-    const saved = localStorage.getItem('deathstep_selected_track');
-    return saved ? JSON.parse(saved) : null;
-  });
   const [playbackProgress, setPlaybackProgress] = useState(0);
   const [playbackDuration, setPlaybackDuration] = useState(1);
 
-  // Playlist-for-this-dance mode - an alternative to selectedTrack, not a
-  // combination of both (see handleSelectPlaylist/track-picking below).
-  // Reset on the same round/game boundaries as selectedTrack.
   const [gmPlaylists, setGmPlaylists] = useState([]);
-  const [activePlaylist, setActivePlaylist] = useState(null); // { id, name, tracks: [{ id, uri, name, artist }] }
-  const [queueIndex, setQueueIndex] = useState(0);
   const [showPlaylistPicker, setShowPlaylistPicker] = useState(false);
+  // Which text-type queue entry the search box is currently resolving a real
+  // track for (see renderSpotifyControls' queue list) - null means a search
+  // hit just gets appended to the queue as usual.
+  const [resolvingQueueEntryId, setResolvingQueueEntryId] = useState(null);
   const [addToPlaylistFor, setAddToPlaylistFor] = useState(null); // track uri whose "add to playlist" picker is expanded, or null
   const [addToPlaylistNewName, setAddToPlaylistNewName] = useState('');
   const [addToPlaylistStatus, setAddToPlaylistStatus] = useState('');
@@ -122,19 +119,21 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     }
   }, [room.status, room.votingEndTime]);
 
-  const isSpotifyReady = !useSpotify || ((selectedTrack || activePlaylist) && spotifyPlayer);
+  // "Ready" means there's something to play right now, or something queued
+  // that will auto-play the moment the next round starts (see
+  // playNextQueuedTrack, called from handleStartDancing/handleExecuteVote) -
+  // not "the GM re-picked fresh for this exact round", since the queue
+  // already carries over and auto-advances on its own.
+  const hasMusicReady = !!room.nowPlaying || room.songQueue.some(e => e.type === 'spotify');
+  const isSpotifyReady = !useSpotify || (hasMusicReady && spotifyPlayer);
 
-  // Normalizes the two "what's chosen for this dance" sources (raw Spotify
-  // search result vs. our own DB-stored playlist track) into one shape for
-  // display - playlist tracks have no album art, so imageUrl is null there.
-  const nowPlayingTrack = activePlaylist
-    ? (() => {
-        const track = activePlaylist.tracks[queueIndex % activePlaylist.tracks.length];
-        return track ? { uri: track.uri, name: track.name, artist: track.artist, imageUrl: null } : null;
-      })()
-    : selectedTrack
-      ? { uri: selectedTrack.uri, name: selectedTrack.name, artist: selectedTrack.artists?.map(a => a.name).join(', ') || '', imageUrl: selectedTrack.album?.images?.[2]?.url || null }
-      : null;
+  // room.nowPlaying (server-broadcast room state, see server/gameStore.js's
+  // songQueue/nowPlaying) - not client-local, so a GM reload never loses it
+  // (this used to be client-only selectedTrack/activePlaylist state, which
+  // is exactly what made a GM reload mid-DANCING lose the "now playing" box).
+  const nowPlayingTrack = room.nowPlaying
+    ? { uri: room.nowPlaying.uri, name: room.nowPlaying.name, artist: room.nowPlaying.artist || '', imageUrl: null, suggestedBy: room.nowPlaying.suggestedBy || null }
+    : null;
 
   // "Add this track to a playlist" only ever writes to a DB-backed playlist
   // (server/playlists.js) - local, non-account Spotify playlists (source:
@@ -156,6 +155,13 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   React.useEffect(() => {
     localStorage.setItem('deathstep_use_spotify', useSpotify);
+    // Only meaningful (and only changeable by the GM) during the lobby - see
+    // the segmented control below - but also re-announced on every lobby
+    // mount so a fresh room always gets an explicit value instead of relying
+    // on whichever tab happens to click the toggle.
+    if (room.status === 'lobby') {
+      socket.emit('setUseSpotify', { roomId: room.id, useSpotify });
+    }
   }, [useSpotify]);
 
   React.useEffect(() => {
@@ -163,6 +169,16 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       setUseSpotify(false);
     }
   }, [spotifyAllowed]);
+
+  // Keeps this browser's local choice in sync with the room's broadcast
+  // value - matters for a co-GM's browser (which has its own localStorage
+  // default) or a reload after the primary GM already chose, so everyone
+  // agrees on what room.useSpotify actually is.
+  React.useEffect(() => {
+    if (typeof room.useSpotify === 'boolean' && room.useSpotify !== useSpotify) {
+      setUseSpotify(room.useSpotify);
+    }
+  }, [room.useSpotify]);
 
   React.useEffect(() => {
     localStorage.setItem('deathstep_privacy_mode', privacyMode);
@@ -187,22 +203,6 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     }
   }, [room.status, spotifyPlayer]);
 
-  React.useEffect(() => {
-    if (selectedTrack) {
-      localStorage.setItem('deathstep_selected_track', JSON.stringify(selectedTrack));
-    } else {
-      localStorage.removeItem('deathstep_selected_track');
-    }
-  }, [selectedTrack]);
-
-  React.useEffect(() => {
-    if (room.status === 'kill_reveal' || room.status === 'lobby') {
-      setSelectedTrack(null);
-      setActivePlaylist(null);
-      setQueueIndex(0);
-    }
-  }, [room.status]);
-
   // Privacy mode is a per-game toggle (hide player names on the GM's own
   // screen) - reset it the moment a game concludes, whether that's a
   // natural win/loss or the GM aborting via "End Game", rather than only on
@@ -226,6 +226,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     setAddToPlaylistNewName('');
     setAddToPlaylistStatus('');
   }, [room.round]);
+
+  // Guards against a stale reference if the entry being resolved got removed
+  // (e.g. by a co-GM) out from under the search box.
+  React.useEffect(() => {
+    if (resolvingQueueEntryId && !room.songQueue.some(e => e.id === resolvingQueueEntryId)) {
+      setResolvingQueueEntryId(null);
+    }
+  }, [room.songQueue, resolvingQueueEntryId]);
 
   // Two independent sources feed the same picker: a logged-in Deathstep
   // account's DB-backed playlists (source: 'account' - persisted, can be
@@ -278,7 +286,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
   React.useEffect(() => {
     setHasSongFinished(false);
-  }, [selectedTrack, room?.status, room?.round, queueIndex]);
+  }, [room?.nowPlaying?.uri, room?.status, room?.round]);
 
   // Tells the server a track actually started playing, for the per-game
   // "played songs" record shown at game end - fire-and-forget, no callback
@@ -288,8 +296,24 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const reportTrackPlayed = (track) => {
     if (!track?.uri) return;
     const artist = track.artist ?? (track.artists ? track.artists.map(a => a.name).join(', ') : '');
-    socket.emit('trackPlayed', { roomId: room.id, track: { uri: track.uri, name: track.name, artist } });
+    socket.emit('trackPlayed', { roomId: room.id, track: { uri: track.uri, name: track.name, artist, suggestedBy: track.suggestedBy || null } });
   };
+
+  // Re-runs whichever login flow actually backs this GM's playback (see
+  // getPlaybackToken below): the account-linked flow if logged into a
+  // Deathstep account (same connection as the Playlists page), otherwise the
+  // local browser-only PKCE flow - so "reconnect" always fixes the
+  // connection that's actually in use instead of the other one.
+  const handleReconnectSpotify = () => {
+    if (currentUser) loginWithSpotifyForAccountLink();
+    else loginWithSpotify();
+  };
+
+  const sessionExpiredAlert = () => ({
+    message: t('spotify.sessionExpired'),
+    actionLabel: t('spotify.reconnectNow'),
+    onAction: handleReconnectSpotify,
+  });
 
   // Shared failure handling for every playTrack() call below - surfaces the
   // two cases a GM can actually act on (no active playback device; the
@@ -300,42 +324,68 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     if (e.message === 'NO_ACTIVE_DEVICE') {
       setAlertState({ message: t('spotify.noDevice') });
     } else if (e.message === 'SPOTIFY_NOT_CONNECTED') {
-      setAlertState({ message: t('spotify.sessionExpired') });
+      setAlertState(sessionExpiredAlert());
     } else {
       console.error(fallbackLog, e);
     }
   };
 
-  // Plays whichever track is currently at queueIndex, then advances the
-  // index for next time (looping back to the start) - the single place that
-  // both the round-start handlers and the auto-advance-on-finish effect call.
-  const playQueueTrack = async () => {
-    if (!activePlaylist || activePlaylist.tracks.length === 0) return;
-    const track = activePlaylist.tracks[queueIndex % activePlaylist.tracks.length];
-    setQueueIndex(prev => (prev + 1) % activePlaylist.tracks.length);
+  // Removes one entry from the server-side queue and makes it the current
+  // pick (see server/gameStore.js's playQueueEntry) - own-audio mode has no
+  // SDK to hand it to, so it only updates room.nowPlaying for display; a
+  // Spotify-mode GM also actually starts playback and reports it played.
+  const handlePlayQueueEntry = async (entry) => {
+    socket.emit('playQueueEntry', { roomId: room.id, entryId: entry.id });
+    if (!useSpotify) return;
     try {
-      await playTrack(track.uri, spotifyPlayerId);
-      reportTrackPlayed(track);
+      await playTrack(entry.uri, spotifyPlayerId);
+      reportTrackPlayed(entry);
     } catch (e) {
       handleSpotifyPlaybackError(e, 'Failed to play queued track');
     }
   };
 
+  // Plays the first real (non-placeholder) track in the queue - the single
+  // place both the round-start handlers and the auto-advance-on-finish
+  // effect call. A no-op if the queue is empty or only holds unresolved
+  // text placeholders (see resolveQueueTextEntry) - nothing auto-plays
+  // until the GM gives one of those a real track.
+  const playNextQueuedTrack = async () => {
+    const nextEntry = room.songQueue.find(e => e.type === 'spotify');
+    if (!nextEntry) return;
+    await handlePlayQueueEntry(nextEntry);
+  };
+
   // The actual "auto-advance to the next track" behavior: once the current
-  // playlist track nears its end during dancing, move straight to the next one.
+  // track nears its end during dancing, move straight to the next queued one.
   React.useEffect(() => {
-    if (!activePlaylist || !hasSongFinished || room.status !== 'dancing') return;
-    playQueueTrack();
+    if (!hasSongFinished || room.status !== 'dancing') return;
+    playNextQueuedTrack();
   }, [hasSongFinished]);
 
+  // Priority: a player's lent Spotify connection (room.spotifyDelegate, see
+  // grantSpotifyToRoom) first, since if someone went out of their way to
+  // offer it, that's presumably because the GM doesn't have a working
+  // connection of their own. Otherwise, getBestAvailableToken already
+  // prefers the Deathstep-account-linked connection (server-linked,
+  // cross-device - the GM connected once on the Playlists page, or is simply
+  // logged into the same Deathstep account elsewhere) over this browser's
+  // own local PKCE flow, so no separate currentUser check is needed here.
+  const getPlaybackToken = React.useCallback(() => {
+    if (room.spotifyDelegate) {
+      return fetchRoomSpotifyToken(room.id).then(r => r.accessToken || null);
+    }
+    return getBestAvailableToken();
+  }, [room.id, room.spotifyDelegate]);
+
   React.useEffect(() => {
-    // Reads through getValidToken() (not the raw localStorage value) so a
+    // Reads through getPlaybackToken() (not the raw localStorage value) so a
     // token that's already expired by the time the dashboard loads gets
     // silently refreshed instead of handing the SDK a dead token.
-    getValidToken().then(token => {
+    getPlaybackToken().then(token => {
       if (token) setSpotifyToken(token);
     });
-  }, []);
+  }, [currentUser?.id]);
 
   // Proactively keeps the token fresh on a fixed schedule (well inside its
   // ~1h lifetime) instead of only ever refreshing reactively when something
@@ -350,9 +400,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   // getOAuthToken callback regardless of what's in state.
   React.useEffect(() => {
     if (!useSpotify) return;
-    const interval = setInterval(() => { getValidToken(); }, 30 * 60 * 1000);
+    const interval = setInterval(() => { getPlaybackToken(); }, 30 * 60 * 1000);
     return () => clearInterval(interval);
-  }, [useSpotify]);
+  }, [useSpotify, getPlaybackToken]);
 
   // client/src/spotify.js dispatches this the moment a token refresh
   // definitively fails (the stored refresh token is dead, e.g. revoked on
@@ -366,34 +416,43 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       setSpotifyPlayer(null);
       setSpotifyPlayerId(null);
       setPlayerStatus({ key: 'spotify.statusInit', detail: '', isError: false });
-      setAlertState({ message: t('spotify.sessionExpired') });
+      setAlertState(sessionExpiredAlert());
     };
     window.addEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
     return () => window.removeEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
   }, [t]);
 
-  // Only fetch Spotify's SDK from their CDN once the GM has actually opted
-  // into the Spotify integration - never load third-party scripts by default.
+  // getOAuthToken always needs the *current* getPlaybackToken (it changes
+  // whenever currentUser/room.spotifyDelegate changes), but the SDK callback
+  // below is only ever wired up once per useSpotify mount - a ref keeps it
+  // reading the latest one without re-running that setup.
+  const getPlaybackTokenRef = React.useRef(getPlaybackToken);
+  React.useEffect(() => { getPlaybackTokenRef.current = getPlaybackToken; }, [getPlaybackToken]);
+
+  // Loads Spotify's SDK from their CDN once the GM has opted into the
+  // Spotify integration (never load third-party scripts by default), and
+  // defines window.onSpotifyWebPlaybackSDKReady in the very same effect -
+  // previously that callback was only assigned once spotifyToken became
+  // truthy, in a separate effect. Since the SDK calls it the instant the
+  // script finishes loading (which can easily happen before the async
+  // token fetch resolves), that left a real race: onSpotifyWebPlaybackSDKReady
+  // could still be undefined when the script called it, crashing with
+  // "AnthemError: onSpotifyWebPlaybackSDKReady is not defined". Defining it
+  // unconditionally here (it doesn't actually need a token in hand - the
+  // player's getOAuthToken callback fetches one on demand) removes the race,
+  // and also stops a second bug this had: re-running per spotifyToken change
+  // used to create and connect() a brand new Spotify.Player every time the
+  // token refreshed, leaving old ones connected as orphaned duplicate devices.
   React.useEffect(() => {
     if (!useSpotify) return;
-    if (document.getElementById('spotify-sdk-script')) return;
-    const script = document.createElement('script');
-    script.id = 'spotify-sdk-script';
-    script.src = 'https://sdk.scdn.co/spotify-player.js';
-    document.body.appendChild(script);
-  }, [useSpotify]);
-
-  React.useEffect(() => {
-    if (!spotifyToken) return;
 
     window.onSpotifyWebPlaybackSDKReady = () => {
       const player = new window.Spotify.Player({
         name: 'Deathstep Web Player',
-        // The SDK calls this every time it needs a (re)fresh token, including
-        // well after the token spotifyToken was created with has expired -
-        // route it through getValidToken() so it always gets a live one
-        // instead of the value captured when the player was first built.
-        getOAuthToken: cb => { getValidToken().then(cb); },
+        // Always resolves a live token (including well after whatever token
+        // existed when the player was first built has expired) rather than
+        // ever closing over a single stale value.
+        getOAuthToken: cb => { getPlaybackTokenRef.current().then(cb); },
         volume: 0.5
       });
 
@@ -436,10 +495,18 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       player.connect();
     };
 
-    if (window.Spotify) {
-      window.onSpotifyWebPlaybackSDKReady();
+    if (document.getElementById('spotify-sdk-script')) {
+      // Script already injected by an earlier mount - the SDK only calls
+      // onSpotifyWebPlaybackSDKReady once per page load, so if it's already
+      // loaded, invoke it directly now that the callback is (re)assigned.
+      if (window.Spotify) window.onSpotifyWebPlaybackSDKReady();
+      return;
     }
-  }, [spotifyToken]);
+    const script = document.createElement('script');
+    script.id = 'spotify-sdk-script';
+    script.src = 'https://sdk.scdn.co/spotify-player.js';
+    document.body.appendChild(script);
+  }, [useSpotify]);
 
   const menuRef = React.useRef();
 
@@ -477,24 +544,11 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     socket.emit('respondToRejoinRequest', { roomId: room.id, requestId, accept });
   };
 
-  // A Spotify-type suggestion is already a full Spotify track object
-  // (searched or playlist-picked on the player's own device), so "adopting"
-  // it is just setting it as the selected track directly - no re-search
-  // needed. A text-type suggestion has no real track to select - there's
-  // nothing to adopt into playback, this just acknowledges it to the player.
+  // Adopting a suggestion always lands it in the queue (server/gameStore.js's
+  // confirmSongSuggestion pushes it there itself) rather than immediately
+  // hijacking playback - the GM decides when to actually play it, same as
+  // everything else queued.
   const handleConfirmSuggestion = (suggestion) => {
-    if (suggestion.type !== 'text') {
-      setSelectedTrack(suggestion.track);
-      setActivePlaylist(null);
-      // Mirrors the manual search-select behavior: adopting mid-round should
-      // switch the currently playing song immediately, not just stage the
-      // pick silently for the next round.
-      if (room.status === 'dancing' && spotifyPlayerId) {
-        playTrack(suggestion.track.uri, spotifyPlayerId)
-          .then(() => reportTrackPlayed(suggestion.track))
-          .catch(e => handleSpotifyPlaybackError(e, 'Failed to play adopted suggestion'));
-      }
-    }
     socket.emit('confirmSongSuggestion', { roomId: room.id, suggestionId: suggestion.id }, (response) => {
       // Two co-GMs handling the same suggestion at once: the losing call
       // gets told it's already gone instead of silently doing nothing.
@@ -530,34 +584,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
     socket.emit('executeVote', { roomId: room.id, suspectId: suspectCoupleId });
 
-    if (!willEnd && spotifyToken) {
-      if (activePlaylist) {
-        await playQueueTrack();
-      } else if (selectedTrack) {
-        try {
-          await playTrack(selectedTrack.uri, spotifyPlayerId);
-          reportTrackPlayed(selectedTrack);
-        } catch (e) {
-          handleSpotifyPlaybackError(e, 'Failed to play track');
-        }
-      }
+    if (!willEnd) {
+      await playNextQueuedTrack();
     }
   };
 
   const handleStartDancing = async () => {
     socket.emit('startDancing', { roomId: room.id });
-    if (spotifyToken) {
-      if (activePlaylist) {
-        await playQueueTrack();
-      } else if (selectedTrack) {
-        try {
-          await playTrack(selectedTrack.uri, spotifyPlayerId);
-          reportTrackPlayed(selectedTrack);
-        } catch (e) {
-          handleSpotifyPlaybackError(e, 'Failed to play track');
-        }
-      }
-    }
+    await playNextQueuedTrack();
   };
 
   const handleRevealKill = () => {
@@ -585,41 +619,63 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       setSearchDone(true);
     } catch (e) {
       if (e.message === 'SPOTIFY_NOT_CONNECTED') {
-        setAlertState({ message: t('spotify.sessionExpired') });
+        setAlertState(sessionExpiredAlert());
         return;
       }
       console.error("Failed to search tracks", e);
     }
   };
 
-  const handleSelectPlaylist = async (playlist) => {
+  // A search hit either resolves the queue placeholder currently being
+  // worked on (resolvingQueueEntryId, e.g. a confirmed free-text suggestion
+  // - see item 8) or, normally, just gets appended to the queue.
+  const handleSearchResultClick = (track) => {
+    const normalized = { uri: track.uri, name: track.name, artist: track.artists.map(a => a.name).join(', ') };
+    if (resolvingQueueEntryId) {
+      socket.emit('resolveQueueTextEntry', { roomId: room.id, entryId: resolvingQueueEntryId, track: normalized });
+      setResolvingQueueEntryId(null);
+    } else {
+      socket.emit('addToSongQueue', { roomId: room.id, track: normalized });
+    }
+    setSearchResults([]);
+    setSearchQuery('');
+    setSearchDone(false);
+  };
+
+  // Bulk-appends an entire playlist's tracks to the queue - replaces the old
+  // "use this playlist for the dance" single-playlist cycling mode.
+  const handleAddPlaylistToQueue = async (playlist) => {
+    let tracks;
     if (playlist.source === 'local') {
       try {
-        const tracks = await fetchSpotifyPlaylistTracks(playlist.id);
-        if (tracks.length === 0) return;
-        // Normalized to the same { id, uri, name, artist } shape as a
-        // DB-backed playlist's tracks (artist as one joined string, not
-        // Spotify's .artists array) so activePlaylist/playQueueTrack/
-        // nowPlayingTrack don't need to know which source a track came from.
-        setActivePlaylist({
-          id: playlist.id,
-          name: playlist.name,
-          tracks: tracks.map((t, i) => ({ id: `${playlist.id}_${i}`, uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(', ') })),
-        });
-        setQueueIndex(0);
-        setSelectedTrack(null);
-        setShowPlaylistPicker(false);
+        const raw = await fetchSpotifyPlaylistTracks(playlist.id);
+        tracks = raw.map(t => ({ uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(', ') }));
       } catch (e) {
         handleSpotifyPlaybackError(e, 'Failed to load local Spotify playlist');
+        return;
       }
-      return;
+    } else {
+      const result = await fetchPlaylist(playlist.id);
+      if (result.error) return;
+      tracks = result.playlist.tracks;
     }
-    const result = await fetchPlaylist(playlist.id);
-    if (result.error || !result.playlist.tracks.length) return;
-    setActivePlaylist(result.playlist);
-    setQueueIndex(0);
-    setSelectedTrack(null);
+    if (tracks.length === 0) return;
+    socket.emit('addPlaylistToSongQueue', { roomId: room.id, tracks });
     setShowPlaylistPicker(false);
+  };
+
+  const handleRemoveQueueEntry = (entryId) => {
+    socket.emit('removeFromSongQueue', { roomId: room.id, entryId });
+    if (resolvingQueueEntryId === entryId) setResolvingQueueEntryId(null);
+  };
+
+  const handleMoveQueueEntry = (entryId, direction) => {
+    const ids = room.songQueue.map(e => e.id);
+    const idx = ids.indexOf(entryId);
+    const targetIdx = idx + direction;
+    if (idx === -1 || targetIdx < 0 || targetIdx >= ids.length) return;
+    [ids[idx], ids[targetIdx]] = [ids[targetIdx], ids[idx]];
+    socket.emit('reorderSongQueue', { roomId: room.id, entryIds: ids });
   };
 
   // Generalized over any track (the now-playing one, or one from the
@@ -645,17 +701,26 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     await handleAddTrackToPlaylist(created.playlist.id, track);
   };
 
-  // Post-game summary of every track the server recorded as actually played
-  // this game (server/gameStore.js addPlayedSong) - empty whenever the whole
-  // game was own-audio mode, since the app never sees what plays externally.
+  // Post-round (from kill_reveal onward) and post-game summary of every
+  // track the server recorded as actually played (server/gameStore.js
+  // addPlayedSong), grouped by round - empty whenever the whole game was
+  // own-audio mode, since the app never sees what plays externally.
   const renderPlayedSongs = () => {
     if (!room.playedSongs || room.playedSongs.length === 0) return null;
+    const byRound = new Map();
+    room.playedSongs.forEach(song => {
+      if (!byRound.has(song.round)) byRound.set(song.round, []);
+      byRound.get(song.round).push(song);
+    });
     return (
       <div className="panel panel--success" style={{ textAlign: 'left', marginTop: '20px' }}>
         <div className="panel-title" style={{ color: 'var(--neon-green)' }}>
           <Music2 size={16} className="icon-inline" /> {t('gm.playedSongs')}
         </div>
-        {room.playedSongs.map(song => {
+        {[...byRound.entries()].map(([round, songs]) => (
+        <div key={round} style={{ marginBottom: '15px' }}>
+          <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '8px', textTransform: 'uppercase' }}>{t('player.round', { n: round })}</div>
+          {songs.map(song => {
           const rowKey = `${song.uri}-${song.playedAt}`;
           return (
           <div key={rowKey} style={{ marginBottom: '10px' }}>
@@ -663,6 +728,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: 'white', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{song.name}</div>
                 <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{song.artist}</div>
+                {song.suggestedBy && (
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t('gm.suggestedBy', { name: maskName(song.suggestedBy.name) })}</div>
+                )}
               </div>
               {currentUser && (
                 <button
@@ -710,7 +778,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             )}
           </div>
           );
-        })}
+          })}
+        </div>
+        ))}
       </div>
     );
   };
@@ -832,6 +902,23 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     socket.emit('delegateVote', { roomId: room.id, coupleId, votingPlayerId });
   };
 
+  // Marks a player's phone dead mid-game (or reverses that) - see
+  // gameStore.setPlayerPhoneStatus. Never offered for a manually-added
+  // (from-the-start phoneless) player, identified by their id prefix (see
+  // gameStore.addManualPlayer) - toggling "restore" on one of those would be
+  // meaningless, since they never had a real device/socket to begin with.
+  const isManualPlayer = (player) => player.id.startsWith('manual_');
+  const handleSetPlayerPhoneStatus = (playerId, hasNoPhone) => {
+    socket.emit('setPlayerPhoneStatus', { roomId: room.id, playerId, hasNoPhone });
+  };
+
+  // The GM may revoke a player's lent Spotify connection at any time (e.g.
+  // the donor had to leave) - server/index.js's revokeSpotifyFromRoom allows
+  // this for any verified GM regardless of clientId.
+  const handleRevokeSpotifyDelegate = () => {
+    socket.emit('revokeSpotifyFromRoom', { roomId: room.id, clientId: null });
+  };
+
   const isCoupleFullyPhoneless = (couple) => couple.playerIds.every(id => {
     const player = room.players.find(p => p.id === id);
     return player && player.hasNoPhone;
@@ -880,7 +967,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
       newCouples.push({
         name: `${l.name} & ${f.name}`,
-        playerIds: [l.id, f.id]
+        playerIds: [l.id, f.id],
+        isManual: false, // came from "randomize" - eligible for the site owner's hidden pairing override (see gameStore.applyPairOverrides)
       });
     }
 
@@ -928,7 +1016,17 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       setAlertState({ message: t('gm.phonelessWarning', { count: phonelessCouples.length, names: phonelessCouples.map(c => maskName(c.name)).join(', ') }) });
     }
 
-    setPendingCouples(newCouples);
+    // Run the freshly-randomized couples past the server before showing them
+    // as "pending" - the site owner's hidden pairing override (see
+    // gameStore.applyPairOverrides) only ever gets applied server-side, so
+    // without this round-trip the pending-couples preview shown here would
+    // never reflect it (only the final "Release Pairs" commit would), even
+    // though nothing in this preview step is final yet. Falls back to the
+    // raw, uncorrected couples if the round-trip fails for any reason, same
+    // as if the override simply didn't exist.
+    socket.emit('previewPairing', { roomId: room.id, generatedCouples: newCouples }, (response) => {
+      setPendingCouples(response?.success ? response.couples : newCouples);
+    });
 
     spectatorsToUpdate.forEach(p => {
       socket.emit('updatePlayerRole', { roomId: room.id, clientId: p.id, newRole: 'spectator' });
@@ -997,56 +1095,61 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         baseCouplesCount,
         leads,
         follows,
-        selectedToKick: []
+        playerActions: {}
       });
     }
   };
 
+  // Applies a switch/spectator choice for one player in the unbalanced-roles
+  // popup right away (real socket update, not just staged local state) - the
+  // GM sees the player's role actually change immediately, and can change
+  // their mind via the row's undo button (action 'none'), which reverts the
+  // same way instead of leaving it queued behind a separate confirm step.
   const handlePlayerActionChange = (playerId, action) => {
-    setRandomizerFlow({
-      ...randomizerFlow,
-      playerActions: { ...randomizerFlow.playerActions, [playerId]: action }
+    const missingRole = randomizerFlow.excessType === 'lead' ? 'follow' : 'lead';
+    const newRole = action === 'switch' ? missingRole : action === 'spectator' ? 'spectator' : randomizerFlow.excessType;
+    socket.emit('updatePlayerRole', { roomId: room.id, clientId: playerId, newRole });
+    setRandomizerFlow(prev => {
+      const playerActions = { ...prev.playerActions };
+      if (action === 'none') delete playerActions[playerId];
+      else playerActions[playerId] = action;
+      return { ...prev, playerActions };
     });
   };
 
+  // Closing the popup without finishing pairing shouldn't leave behind the
+  // role changes it already applied live - revert everyone touched in this
+  // flow back to their original (excess) role before actually closing it.
+  const handleCancelRandomizerFlow = () => {
+    Object.keys(randomizerFlow.playerActions || {}).forEach(playerId => {
+      socket.emit('updatePlayerRole', { roomId: room.id, clientId: playerId, newRole: randomizerFlow.excessType });
+    });
+    setRandomizerFlow(null);
+  };
+
   const executeMixedSelection = () => {
-    let leads = [...randomizerFlow.leads];
-    let follows = [...randomizerFlow.follows];
-
     const actions = randomizerFlow.playerActions || {};
-    const selectedSwitch = Object.keys(actions).filter(id => actions[id] === 'switch');
-    const selectedSpectator = Object.keys(actions).filter(id => actions[id] === 'spectator');
+    const missingRole = randomizerFlow.excessType === 'lead' ? 'follow' : 'lead';
+    const excessGroup = randomizerFlow.excessType === 'lead' ? randomizerFlow.leads : randomizerFlow.follows;
+    const missingGroupOriginal = randomizerFlow.excessType === 'lead' ? randomizerFlow.follows : randomizerFlow.leads;
 
-    const effectiveExcess = randomizerFlow.excessCount - (2 * selectedSwitch.length) - selectedSpectator.length;
-    const effectiveBase = randomizerFlow.baseCouplesCount + selectedSwitch.length;
+    // Role changes were already applied live as each choice was made
+    // (handlePlayerActionChange) - just derive the final groups for
+    // pairing, no more socket emits needed here.
+    const stillExcess = excessGroup.filter(p => !actions[p.id]);
+    const switchedIn = excessGroup.filter(p => actions[p.id] === 'switch').map(p => ({ ...p, danceRole: missingRole }));
+    const missingGroup = [...missingGroupOriginal, ...switchedIn];
 
-    const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
-
-    if (currentMinSwitchNeeded > 0) {
+    const effectiveExcess = Math.abs(stillExcess.length - missingGroup.length);
+    const effectiveBase = Math.min(stillExcess.length, missingGroup.length);
+    const stillNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
+    if (stillNeeded > 0) {
       setAlertState({ message: t('gm.randNotEnough') });
       return;
     }
 
-    const targetRole = randomizerFlow.excessType === 'lead' ? 'follow' : 'lead';
-
-    selectedSwitch.forEach(id => {
-      socket.emit('updatePlayerRole', { roomId: room.id, clientId: id, newRole: targetRole });
-    });
-    selectedSpectator.forEach(id => {
-      socket.emit('updatePlayerRole', { roomId: room.id, clientId: id, newRole: 'spectator' });
-    });
-
-    if (randomizerFlow.excessType === 'lead') {
-      const switched = leads.filter(p => selectedSwitch.includes(p.id));
-      leads = leads.filter(p => !selectedSwitch.includes(p.id) && !selectedSpectator.includes(p.id));
-      switched.forEach(p => p.danceRole = 'follow');
-      follows.push(...switched);
-    } else {
-      const switched = follows.filter(p => selectedSwitch.includes(p.id));
-      follows = follows.filter(p => !selectedSwitch.includes(p.id) && !selectedSpectator.includes(p.id));
-      switched.forEach(p => p.danceRole = 'lead');
-      leads.push(...switched);
-    }
+    const leads = randomizerFlow.excessType === 'lead' ? stillExcess : missingGroup;
+    const follows = randomizerFlow.excessType === 'lead' ? missingGroup : stillExcess;
 
     setRandomizerFlow(null);
     executePairing(leads, follows, true);
@@ -1084,7 +1187,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     const names = currentGroup.map(id => room.players.find(p => p.id === id)?.name).join(' & ');
     setPendingCouples([
       ...pendingCouples,
-      { name: names, playerIds: currentGroup }
+      { name: names, playerIds: currentGroup, isManual: true } // GM's explicit choice - never touched by the site owner's hidden pairing override
     ]);
     setCurrentGroup([]);
   };
@@ -1099,6 +1202,11 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
   const handleReleasePairs = () => {
     if (pendingCouples.length === 0) {
       setAlertState({ message: t('gm.noCouplesToRelease') });
+      return;
+    }
+
+    if (getUnpairedPlayers().some(p => p.danceRole !== 'spectator')) {
+      setAlertState({ message: t('gm.unpairedPlayersRemain') });
       return;
     }
 
@@ -1179,25 +1287,105 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
     </div>
   );
 
+  // The queue list itself (upcoming picks, with reorder/play/remove) - used
+  // both inline (wherever renderSpotifyControls is shown) and in the
+  // "change track" modal, so it's always the same list regardless of where
+  // the GM is managing it from.
+  const renderSongQueue = (showNowPlaying = true) => (
+    <div style={{ marginTop: '15px' }}>
+      <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>{t('gm.songQueue')}</h4>
+
+      {showNowPlaying && room.nowPlaying && (
+        <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)', marginBottom: '8px' }}>
+          <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: '0.75rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.nowPlaying')}</div>
+            <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{room.nowPlaying.name} — {room.nowPlaying.artist}</div>
+            {room.nowPlaying.suggestedBy && (
+              <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{t('gm.suggestedBy', { name: maskName(room.nowPlaying.suggestedBy.name) })}</div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {room.songQueue.length === 0 ? (
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic' }}>{t('gm.queueEmpty')}</p>
+      ) : (
+        <div className="couple-list" style={{ marginTop: 0 }}>
+          {room.songQueue.map((entry, idx) => (
+            <div key={entry.id} className="list-item">
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {entry.type === 'text' ? (
+                  <>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'white', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      <MessageCircle size={14} className="icon-inline" style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                      {entry.text}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--neon-purple)' }}>{t('gm.queueNeedsRealTrack')}</div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{entry.name}</div>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{entry.artist}</div>
+                  </>
+                )}
+                {entry.suggestedBy && (
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{t('gm.suggestedBy', { name: maskName(entry.suggestedBy.name) })}</div>
+                )}
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '2px', flexShrink: 0 }}>
+                <button className="icon-btn" onClick={() => handleMoveQueueEntry(entry.id, -1)} disabled={idx === 0} title={t('gm.queueMoveUp')} style={{ opacity: idx === 0 ? 0.3 : 1 }}>
+                  <ChevronUp size={16} />
+                </button>
+                <button className="icon-btn" onClick={() => handleMoveQueueEntry(entry.id, 1)} disabled={idx === room.songQueue.length - 1} title={t('gm.queueMoveDown')} style={{ opacity: idx === room.songQueue.length - 1 ? 0.3 : 1 }}>
+                  <ChevronDown size={16} />
+                </button>
+                {entry.type === 'spotify' ? (
+                  <button className="icon-btn" onClick={() => handlePlayQueueEntry(entry)} title={t('gm.queuePlay')} style={{ color: 'var(--neon-green)' }}>
+                    <Play size={16} />
+                  </button>
+                ) : useSpotify && (
+                  <button
+                    className="icon-btn"
+                    onClick={() => setResolvingQueueEntryId(prev => prev === entry.id ? null : entry.id)}
+                    title={t('gm.queueResolve')}
+                    style={{ color: resolvingQueueEntryId === entry.id ? 'var(--neon-purple)' : 'var(--neon-blue)' }}
+                  >
+                    <Search size={16} />
+                  </button>
+                )}
+                <button className="icon-btn" onClick={() => handleRemoveQueueEntry(entry.id)} title={t('gm.queueRemove')}>
+                  <X size={16} style={{ color: 'var(--neon-red)' }} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {resolvingQueueEntryId && (
+        <p style={{ color: 'var(--neon-purple)', fontSize: '0.85rem', marginTop: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+          <Search size={14} className="icon-inline" /> {t('gm.queueResolvingHint')}
+        </p>
+      )}
+    </div>
+  );
+
   const renderSpotifyControls = (hideIfConnected = false, isModal = false) => {
     if (!useSpotify) {
-      // Own-audio mode never shows Spotify search/connect UI, but a track
-      // adopted from a player's suggestion (handleConfirmSuggestion) still
-      // needs to be visible somewhere - otherwise the GM has no way to know
-      // what to go play manually on their own device.
-      if (!selectedTrack) return null;
+      // Own-audio mode never shows Spotify search UI, but confirmed
+      // suggestions still land in the queue (see confirmSongSuggestion) and
+      // the GM needs to see them to know what to go play manually - so the
+      // queue itself still renders (its "play" button just marks an entry
+      // as nowPlaying for reference here, with no real SDK playback).
+      if (!room.nowPlaying && room.songQueue.length === 0) return null;
       return (
-        <div className="panel panel--success" style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.selectedTrack')}</div>
-          <div style={{ color: 'white' }}>{selectedTrack.name} — {selectedTrack.artists?.map(a => a.name).join(', ') || ''}</div>
-          <button className="icon-btn" onClick={() => setSelectedTrack(null)} style={{ marginTop: '8px' }}>
-            <X size={18} />
-          </button>
+        <div className="panel panel--success">
+          {renderSongQueue()}
         </div>
       );
     }
     if (hideIfConnected && spotifyToken) return null;
-    if (!isModal && (selectedTrack || activePlaylist)) return null;
 
     return (
       <div className="panel panel--success">
@@ -1209,7 +1397,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         </h3>
 
         {!spotifyToken ? (
-          <button className="cyber-button" style={{ background: 'var(--neon-green)', color: 'black' }} onClick={loginWithSpotify}>
+          <button className="cyber-button" style={{ background: 'var(--neon-green)', color: 'black' }} onClick={() => (currentUser ? loginWithSpotifyForAccountLink() : loginWithSpotify())}>
             {t('spotify.connect')}
           </button>
         ) : (
@@ -1221,7 +1409,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   <button
                     className="cyber-button"
                     style={{ padding: '4px 8px', fontSize: '0.7rem', background: 'var(--neon-green)', color: 'black', minWidth: 'auto', margin: 0 }}
-                    onClick={loginWithSpotify}
+                    onClick={() => (currentUser ? loginWithSpotifyForAccountLink() : loginWithSpotify())}
                   >
                     {t('spotify.retryAuth')}
                   </button>
@@ -1230,131 +1418,82 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
               {t('spotify.selectHint')}
             </div>
 
-            {!activePlaylist && (
-              <>
-                <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
-                  <input
-                    type="text"
-                    className="cyber-input"
-                    style={{ marginBottom: 0, flex: 1 }}
-                    placeholder={t('spotify.searchPlaceholder')}
-                    value={searchQuery}
-                    onChange={(e) => { setSearchQuery(e.target.value); setSearchDone(false); }}
-                  />
-                  <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Search size={16} className="icon-inline" /> {t('spotify.search')}
-                  </button>
-                </form>
+            <form onSubmit={handleSearch} style={{ display: 'flex', gap: '10px', marginBottom: '15px' }}>
+              <input
+                type="text"
+                className="cyber-input"
+                style={{ marginBottom: 0, flex: 1 }}
+                placeholder={resolvingQueueEntryId ? t('gm.queueResolveSearchPlaceholder') : t('spotify.searchPlaceholder')}
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setSearchDone(false); }}
+              />
+              <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <Search size={16} className="icon-inline" /> {t('spotify.search')}
+              </button>
+            </form>
 
-                {searchDone && searchResults.length === 0 && (
-                  <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '15px', fontSize: '0.9rem' }}>{t('spotify.noResults')}</p>
-                )}
+            {searchDone && searchResults.length === 0 && (
+              <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '15px', fontSize: '0.9rem' }}>{t('spotify.noResults')}</p>
+            )}
 
-                {searchResults.length > 0 && (
-                  <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
-                    {searchResults.map(track => (
-                      <div key={track.id}
-                        onClick={() => {
-                          setSelectedTrack(track);
-                          setActivePlaylist(null);
-                          setSearchResults([]);
-                          setSearchQuery('');
-                          setSearchDone(false);
-                          if (room.status === 'dancing' && spotifyPlayerId) {
-                            playTrack(track.uri, spotifyPlayerId)
-                              .then(() => reportTrackPlayed(track))
-                              .catch(e => handleSpotifyPlaybackError(e, 'Failed to play selected track'));
-                          }
-                        }}
+            {searchResults.length > 0 && (
+              <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
+                {searchResults.map(track => (
+                  <div key={track.id}
+                    onClick={() => handleSearchResultClick(track)}
+                    className="list-item list-item--purple"
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
+                      <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artists.map(a => a.name).join(', ')}</div>
+                    </div>
+                    <Plus size={16} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {gmPlaylists.length > 0 && (
+              <div style={{ marginTop: '15px' }}>
+                <div style={{ margin: '15px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
+                  {t('home.or')}
+                  <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
+                </div>
+                <button
+                  onClick={() => setShowPlaylistPicker(v => !v)}
+                  className="cyber-button"
+                  style={{ background: 'transparent', border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
+                >
+                  <Music2 size={16} className="icon-inline" />
+                  {t('gm.usePlaylistForDance')}
+                </button>
+                {showPlaylistPicker && (
+                  <div className="couple-list" style={{ marginTop: '10px' }}>
+                    {gmPlaylists.map(pl => (
+                      <div
+                        key={pl.id}
+                        onClick={() => handleAddPlaylistToQueue(pl)}
                         className="list-item list-item--purple"
                         style={{ cursor: 'pointer' }}
                       >
-                        <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                        <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
-                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artists.map(a => a.name).join(', ')}</div>
+                          <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>
+                            {pl.name}{pl.source === 'local' && <span style={{ color: 'var(--text-muted)' }}> ({t('playlists.spotifySource')})</span>}
+                          </div>
+                          <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
-
-                {selectedTrack && (
-                  <div className="list-item panel--success" style={{ borderColor: 'var(--neon-green)', background: 'rgba(29,185,84,0.2)' }}>
-                    <img src={selectedTrack.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('spotify.selectedTrack')}</div>
-                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{selectedTrack.name}</div>
-                    </div>
-                    <button
-                      className="icon-btn"
-                      onClick={() => setSelectedTrack(null)}
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                )}
-              </>
-            )}
-
-            {!selectedTrack && gmPlaylists.length > 0 && (
-              <div style={{ marginTop: '15px' }}>
-                {!activePlaylist ? (
-                  <>
-                    <div style={{ margin: '15px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                      <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
-                      {t('home.or')}
-                      <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
-                    </div>
-                    <button
-                      onClick={() => setShowPlaylistPicker(v => !v)}
-                      className="cyber-button"
-                      style={{ background: 'transparent', border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}
-                    >
-                      <Music2 size={16} className="icon-inline" />
-                      {t('gm.usePlaylistForDance')}
-                    </button>
-                    {showPlaylistPicker && (
-                      <div className="couple-list" style={{ marginTop: '10px' }}>
-                        {gmPlaylists.map(pl => (
-                          <div
-                            key={pl.id}
-                            onClick={() => handleSelectPlaylist(pl)}
-                            className="list-item list-item--purple"
-                            style={{ cursor: 'pointer' }}
-                          >
-                            <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>
-                                {pl.name}{pl.source === 'local' && <span style={{ color: 'var(--text-muted)' }}> ({t('playlists.spotifySource')})</span>}
-                              </div>
-                              <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="list-item panel--success" style={{ borderColor: 'var(--neon-purple)', background: 'rgba(181,43,255,0.15)' }}>
-                    <Music2 size={24} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--neon-purple)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('gm.playlistForDance')}</div>
-                      <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{activePlaylist.name}</div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-                        {t('gm.playlistTrackProgress', { current: (queueIndex % activePlaylist.tracks.length) + 1, total: activePlaylist.tracks.length })}
-                      </div>
-                    </div>
-                    <button
-                      className="icon-btn"
-                      onClick={() => { setActivePlaylist(null); setQueueIndex(0); }}
-                    >
-                      <X size={18} />
-                    </button>
-                  </div>
-                )}
               </div>
             )}
+
+            {renderSongQueue()}
           </div>
         )}
       </div>
@@ -1376,6 +1515,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         <div style={{ flex: 1, minWidth: 0, position: 'relative', zIndex: 2 }}>
           <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white', fontWeight: 'bold' }}>{nowPlayingTrack.name}</div>
           <div style={{ fontSize: '0.8rem', color: '#1db954' }}>{t('spotify.nowPlaying')}</div>
+          {nowPlayingTrack.suggestedBy && (
+            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t('gm.suggestedBy', { name: maskName(nowPlayingTrack.suggestedBy.name) })}</div>
+          )}
         </div>
         <button
           disabled={!spotifyPlayer}
@@ -1440,7 +1582,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           {/* 3-Dot Menu Container */}
           <div style={{ position: 'relative', zIndex: 100 }} ref={menuRef}>
             <div style={{ display: 'flex', gap: '10px' }}>
-              {(selectedTrack || activePlaylist) && room.status !== 'dancing' && (
+              {room.nowPlaying && room.status !== 'dancing' && (
                 <button
                   className="kebab-menu-btn pulse-animation"
                   onClick={() => setShowSpotifyModal(true)}
@@ -1593,6 +1735,18 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             )}
           </div>
 
+          {room.spotifyDelegate && (
+            <div className="panel panel--success" style={{ marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '8px', color: 'white', fontSize: '0.9rem' }}>
+                <Music2 size={16} className="icon-inline" style={{ color: 'var(--neon-green)' }} />
+                {t('gm.spotifyDelegateActive', { name: maskName(room.spotifyDelegate.name) })}
+              </span>
+              <button className="cyber-button" style={{ width: 'auto', padding: '6px 12px', fontSize: '0.8rem', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={handleRevokeSpotifyDelegate}>
+                {t('gm.spotifyDelegateRevoke')}
+              </button>
+            </div>
+          )}
+
           {renderSpotifyControls(true)}
 
           <div style={{ textAlign: 'center', marginBottom: '20px' }}>
@@ -1640,10 +1794,20 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           </div>
 
           <div className="btn-row" style={{ marginBottom: '20px' }}>
-            <button className="cyber-button pulse-animation" onClick={handleRandomPairsClick} style={{ flex: 1 }}>
+            <button
+              className={getUnpairedPlayers().length < 2 ? "cyber-button disabled" : "cyber-button pulse-animation"}
+              onClick={handleRandomPairsClick}
+              disabled={getUnpairedPlayers().length < 2}
+              style={{ flex: 1, opacity: getUnpairedPlayers().length < 2 ? 0.5 : 1, cursor: getUnpairedPlayers().length < 2 ? 'not-allowed' : 'pointer' }}
+            >
               {t('gm.randomPairs')}
             </button>
-            <button className="cyber-button" onClick={handleClearPairs} style={{ flex: 1 }}>
+            <button
+              className={(pendingCouples.length === 0 && room.players.length === 0) ? "cyber-button disabled" : "cyber-button"}
+              onClick={handleClearPairs}
+              disabled={pendingCouples.length === 0 && room.players.length === 0}
+              style={{ flex: 1, opacity: (pendingCouples.length === 0 && room.players.length === 0) ? 0.5 : 1, cursor: (pendingCouples.length === 0 && room.players.length === 0) ? 'not-allowed' : 'pointer' }}
+            >
               {t('gm.clearPairs')}
             </button>
           </div>
@@ -1658,113 +1822,89 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
                 {randomizerFlow.step === 'mixed_selection' && (() => {
                   const actions = randomizerFlow.playerActions || {};
-                  const selectedSwitchCount = Object.keys(actions).filter(id => actions[id] === 'switch').length;
-                  const selectedSpectatorCount = Object.keys(actions).filter(id => actions[id] === 'spectator').length;
-
-                  const effectiveExcess = randomizerFlow.excessCount - (2 * selectedSwitchCount) - selectedSpectatorCount;
-                  const effectiveBase = randomizerFlow.baseCouplesCount + selectedSwitchCount;
-
-                  const currentMinSwitchNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
-                  const originalMinSwitchNeeded = Math.max(0, Math.ceil((randomizerFlow.excessCount - randomizerFlow.baseCouplesCount) / 3));
-
-                  const isSelectionValid = currentMinSwitchNeeded === 0;
-
+                  const excessGroup = randomizerFlow.excessType === 'lead' ? randomizerFlow.leads : randomizerFlow.follows;
                   const excessRoleName = randomizerFlow.excessType === 'lead' ? t('gm.leads') : t('gm.follows');
                   const missingRoleName = randomizerFlow.excessType === 'lead' ? t('gm.follows') : t('gm.leads');
 
-                  const renderSkipAllowedText = () => {
-                    if (randomizerFlow.excessCount === 1) {
-                      return (
-                        <p style={{ margin: 0, color: 'white' }}>
-                          {t('gm.rand1Excess', { role: excessRoleName })}
-                        </p>
-                      );
-                    } else if (randomizerFlow.excessCount % 2 === 0) {
-                      return (
-                        <p style={{ margin: 0, color: 'white' }}>
-                          {t('gm.randEvenExcess', { count: randomizerFlow.excessCount, role: excessRoleName, half: randomizerFlow.excessCount / 2 })}<br />
-                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>{t('gm.randEvenExcessAlt')}</span>
-                        </p>
-                      );
-                    } else {
-                      return (
-                        <div style={{ margin: 0, color: 'white' }}>
-                          {t('gm.randOddExcess', { count: randomizerFlow.excessCount, role: excessRoleName })}<br />
-                          <span style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginTop: '10px', display: 'block' }}>{t('gm.randOptions')}</span>
-                          <ul style={{ margin: '5px 0 0 20px', padding: 0, color: 'var(--text-muted)', fontSize: '0.9rem' }}>
-                            <li><strong>{t('gm.randOptAssignLabel')}</strong> {t('gm.randOptAssignText', { count: randomizerFlow.excessCount })}</li>
-                            <li><strong>{t('gm.randOptMixLabel')}</strong> {t('gm.randOptMixText')}</li>
-                            <li><strong>{t('gm.randOptSpectateLabel')}</strong> {t('gm.randOptSpectateText')}</li>
-                          </ul>
-                        </div>
-                      );
-                    }
-                  };
+                  const switchedCount = excessGroup.filter(p => actions[p.id] === 'switch').length;
+                  const spectatorCount = excessGroup.filter(p => actions[p.id] === 'spectator').length;
+
+                  // Recomputed live from the frozen original numbers plus
+                  // whatever's already been applied in this popup, so the
+                  // status panel and the continue button always reflect the
+                  // GM's actual, already-live choices - not just what they
+                  // will be once some later "confirm" step runs.
+                  const effectiveExcess = randomizerFlow.excessCount - (2 * switchedCount) - spectatorCount;
+                  const effectiveBase = randomizerFlow.baseCouplesCount + switchedCount;
+                  const stillNeeded = Math.max(0, Math.ceil((effectiveExcess - effectiveBase) / 3));
+                  const isResolved = stillNeeded === 0;
 
                   return (
                     <div>
-                      {originalMinSwitchNeeded > 0 ? (
-                        <div className="panel panel--danger">
-                          <p style={{ margin: 0, color: 'white', fontSize: '1.1rem' }}>
-                            <strong>{t('gm.randTooManyStrong', { count: randomizerFlow.excessCount, role: excessRoleName })}</strong> {t('gm.randTooManyRest')}
-                          </p>
-                          <p style={{ margin: '15px 0 10px 0', color: 'white' }}>
-                            {t('gm.randMustBalance')}
-                          </p>
-                          <ul style={{ margin: '0 0 15px 20px', padding: 0, color: 'var(--text-muted)' }}>
-                            <li style={{ marginBottom: '5px' }}><strong style={{ color: 'var(--neon-blue)' }}>{t('gm.randSwitchOptionLabel')}</strong> {t('gm.randSwitchOptionText')}</li>
-                            <li><strong style={{ color: 'var(--neon-purple)' }}>{t('gm.randSpectateOptionLabel')}</strong> {t('gm.randSpectateOptionText')}</li>
-                          </ul>
-                          <p style={{ margin: 0, color: 'var(--neon-red)', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            <ChevronRight size={16} className="icon-inline" /> {t('gm.randChooseBelow')}
-                          </p>
-                          <div style={{ marginTop: '15px', padding: '10px', background: 'rgba(255,255,255,0.1)', borderRadius: '5px', fontSize: '0.9rem', color: 'var(--text-muted)', display: 'flex', gap: '8px' }}>
-                            <Lightbulb size={16} className="icon-inline" style={{ flexShrink: 0, marginTop: '2px' }} />
-                            <span><strong>{t('gm.randProTipLabel')}</strong> {t(randomizerFlow.excessCount % 2 !== 0 ? 'gm.randProTipOdd' : 'gm.randProTipEven', { count: Math.floor(randomizerFlow.excessCount / 2) })}</span>
-                          </div>
-                        </div>
-                      ) : (
-                        <div className="panel panel--info">
-                          {renderSkipAllowedText()}
-                        </div>
-                      )}
+                      <div className={`panel ${stillNeeded > 0 ? 'panel--danger' : effectiveExcess > 0 ? 'panel--info' : 'panel--success'}`}>
+                        {stillNeeded > 0 ? (
+                          <p style={{ margin: 0, color: 'white' }}>{t('gm.randStatusMandatory', { count: effectiveExcess, role: excessRoleName, needed: stillNeeded })}</p>
+                        ) : effectiveExcess > 0 ? (
+                          <p style={{ margin: 0, color: 'white' }}>{t('gm.randStatusOptional', { count: effectiveExcess, role: excessRoleName })}</p>
+                        ) : (
+                          <p style={{ margin: 0, color: 'white' }}>{t('gm.randStatusResolved')}</p>
+                        )}
+                      </div>
 
-                      <div className="couple-list" style={{ marginBottom: '15px' }}>
-                        {(randomizerFlow.excessType === 'lead' ? randomizerFlow.leads : randomizerFlow.follows).map(p => {
-                          const currentAction = actions[p.id] || 'none';
+                      <div className="couple-list" style={{ margin: '15px 0' }}>
+                        {excessGroup.map(p => {
+                          const action = actions[p.id];
                           return (
-                            <div key={p.id} className={`list-item ${currentAction !== 'none' ? 'list-item--active' : ''}`}>
-                              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, fontWeight: currentAction !== 'none' ? 'bold' : 'normal' }}>
+                            <div key={p.id} className={`list-item ${action ? 'list-item--active' : ''}`}>
+                              <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, fontWeight: action ? 'bold' : 'normal' }}>
                                 {maskName(p.name)}
                               </span>
-                              <select
-                                className="cyber-select"
-                                value={currentAction}
-                                onChange={(e) => handlePlayerActionChange(p.id, e.target.value)}
-                              >
-                                <option value="none">{t('gm.randAction3rd')}</option>
-                                <option value="switch">{t('gm.randActionSwitch', { role: missingRoleName })}</option>
-                                <option value="spectator">{t('gm.randActionSpectate')}</option>
-                              </select>
+                              {!action ? (
+                                <div style={{ display: 'flex', gap: '6px', flexShrink: 0 }}>
+                                  <button
+                                    className="cyber-button"
+                                    style={{ width: 'auto', padding: '6px 10px', fontSize: '0.8rem', border: '1px solid var(--neon-blue)', color: 'var(--neon-blue)', background: 'transparent' }}
+                                    onClick={() => handlePlayerActionChange(p.id, 'switch')}
+                                  >
+                                    {t('gm.randSwitchTo', { role: missingRoleName })}
+                                  </button>
+                                  <button
+                                    className="cyber-button"
+                                    style={{ width: 'auto', padding: '6px 10px', fontSize: '0.8rem', border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)', background: 'transparent' }}
+                                    onClick={() => handlePlayerActionChange(p.id, 'spectator')}
+                                  >
+                                    {t('gm.randSitOut')}
+                                  </button>
+                                </div>
+                              ) : (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                  <span style={{ fontSize: '0.8rem', color: action === 'switch' ? 'var(--neon-blue)' : 'var(--neon-purple)' }}>
+                                    {action === 'switch' ? t('gm.randStatusSwitched', { role: missingRoleName }) : t('gm.randStatusSpectating')}
+                                  </span>
+                                  <button className="icon-btn" title={t('gm.randUndo')} onClick={() => handlePlayerActionChange(p.id, 'none')}>
+                                    <RotateCcw size={16} />
+                                  </button>
+                                </div>
+                              )}
                             </div>
                           )
                         })}
                       </div>
                       <div style={{ display: 'flex', gap: '10px', flexDirection: 'column' }}>
                         <button
-                          className={isSelectionValid ? "cyber-button pulse-animation" : "cyber-button disabled"}
+                          className={isResolved ? "cyber-button pulse-animation" : "cyber-button disabled"}
                           onClick={() => executeMixedSelection()}
                           style={{
                             width: '100%',
-                            opacity: isSelectionValid ? 1 : 0.5,
-                            cursor: isSelectionValid ? 'pointer' : 'not-allowed',
-                            ...(isSelectionValid ? { background: 'rgba(29, 185, 84, 0.2)', border: '1px solid var(--neon-green)', color: 'var(--neon-green)' } : { border: '1px solid var(--text-muted)' })
+                            opacity: isResolved ? 1 : 0.5,
+                            cursor: isResolved ? 'pointer' : 'not-allowed',
+                            ...(isResolved ? { background: 'rgba(29, 185, 84, 0.2)', border: '1px solid var(--neon-green)', color: 'var(--neon-green)' } : { border: '1px solid var(--text-muted)' })
                           }}
-                          disabled={!isSelectionValid}
+                          disabled={!isResolved}
                         >
-                          {t('gm.randConfirm')}
+                          {t('gm.randContinue')}
                         </button>
-                        <button className="cyber-button danger" onClick={() => setRandomizerFlow(null)} style={{ width: '100%' }}>{t('common.cancel')}</button>
+                        <button className="cyber-button danger" onClick={handleCancelRandomizerFlow} style={{ width: '100%' }}>{t('common.cancel')}</button>
                       </div>
                     </div>
                   );
@@ -1777,6 +1917,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '20px', marginBottom: '20px' }}>
             <div style={{ flex: '1 1 260px', minWidth: 0, opacity: randomizerFlow ? 0.3 : 1, pointerEvents: randomizerFlow ? 'none' : 'auto' }}>
               <h4 style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>{t('gm.unpaired')}</h4>
+              {room.players.length === 0 && (
+                <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', textAlign: 'center', padding: '10px 0' }}>{t('gm.nobodyJoinedYet')}</p>
+              )}
               <div className="couple-list">
                 {getUnpairedPlayers().map(p => (
                   <div key={p.id} className={`list-item ${currentGroup.includes(p.id) ? 'list-item--purple' : ''}`} style={{ flexWrap: 'wrap' }}>
@@ -1895,16 +2038,6 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             </div>
           </div>
 
-          <div className="panel">
-            <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
-              <span style={{ color: 'var(--text-muted)' }}>{t('gm.votingRight')}</span>
-              <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole}>
-                <option value="lead">{t('gm.leadsOnly')}</option>
-                <option value="follow">{t('gm.followsOnly')}</option>
-              </select>
-            </label>
-          </div>
-
           <button className="cyber-button pulse-animation" onClick={handleReleasePairs} disabled={pendingCouples.length === 0 || randomizerFlow} style={{ width: '100%' }}>
             {t('gm.releasePairs')}
           </button>
@@ -1979,6 +2112,14 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                   {killMode === 'silent' ? t('gm.killModeSilentDesc') : t('gm.killModeClassicDesc')}
                 </p>
               </div>
+              <div style={{ marginTop: '15px' }}>
+                <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
+                <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
+                  <option value="random">{t('gm.votingRandom')}</option>
+                  <option value="lead">{t('gm.leadsOnly')}</option>
+                  <option value="follow">{t('gm.followsOnly')}</option>
+                </select>
+              </div>
             </div>
 
             <button
@@ -2014,7 +2155,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
             return player && player.hasViewedRole;
           })
         );
-        const isSpotifyReady = !useSpotify || ((selectedTrack || activePlaylist) && spotifyPlayer);
+        const isSpotifyReady = !useSpotify || (hasMusicReady && spotifyPlayer);
         const canProceedSong = isSpotifyReady || bypassSongReady;
         const canStart = (allCouplesViewedRole || bypassRoleView) && canProceedSong;
 
@@ -2029,7 +2170,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                 <div className="panel panel--danger">
                   <strong style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}><AlertTriangle size={16} className="icon-inline" /> {t('gm.musicNotReady')}</strong><br />
                   <span style={{ color: 'white' }}>
-                    {!selectedTrack && !activePlaylist ? t('gm.selectSongFirst') : t('gm.playerInitializing')}
+                    {!hasMusicReady ? t('gm.selectSongFirst') : t('gm.playerInitializing')}
                   </span>
                   {!bypassSongReady && (
                     <div>
@@ -2143,6 +2284,9 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ fontSize: '0.8rem', color: 'var(--neon-green)', textTransform: 'uppercase', fontWeight: 'bold' }}>{t('gm.currentSong')}</div>
                         <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{nowPlayingTrack.name}</div>
+                        {nowPlayingTrack.suggestedBy && (
+                          <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{t('gm.suggestedBy', { name: maskName(nowPlayingTrack.suggestedBy.name) })}</div>
+                        )}
                       </div>
                       <button
                         disabled={!spotifyPlayer}
@@ -2224,6 +2368,28 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
 
               <p style={{ textAlign: 'center', color: 'white', margin: 0 }}>{t('gm.everyoneDancing')}</p>
             </div>
+
+            {useSpotify && (
+              spotifyToken ? (
+                <div className="panel panel--success">
+                  {renderSongQueue(false)}
+                </div>
+              ) : (
+                // Previously this whole block just vanished with nothing to
+                // click whenever spotifyToken hadn't (re)loaded yet - most
+                // visibly right after a GM reload during dancing, since
+                // spotifyToken always starts back at null on a fresh mount
+                // and getPlaybackToken() failing here (e.g. the account-
+                // linked connection actually died) has no other way to
+                // surface itself mid-dancing. Always show a way to
+                // (re)connect instead of silently showing nothing.
+                <div className="panel panel--success" style={{ textAlign: 'center' }}>
+                  <button className="cyber-button" style={{ background: 'var(--neon-green)', color: 'black' }} onClick={() => (currentUser ? loginWithSpotifyForAccountLink() : loginWithSpotify())}>
+                    {t('spotify.connect')}
+                  </button>
+                </div>
+              )
+            )}
 
             {room.killMode === 'silent' ? (
               <div className="panel panel--purple">
@@ -2504,6 +2670,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         return (
           <div className="phase-enter" style={{ marginBottom: '20px', textAlign: 'center' }}>
             {renderSpotifyControls()}
+            {renderPlayedSongs()}
             <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.killRevealed')}</h3>
             {victimCouples.length > 0 ? (
               <>
@@ -2560,6 +2727,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       {room.status === 'discussion' && (
         <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
+          {renderPlayedSongs()}
           <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px', display: 'flex', alignItems: 'center', gap: '10px' }}><MessageCircle size={20} className="icon-inline" /> {t('gm.discussionPhase')}</h3>
           <p style={{ color: 'var(--text-muted)', marginBottom: '30px' }}>{t('gm.discussionBody')}</p>
           <button className="cyber-button pulse-animation" onClick={handleProceedToVoting} style={{ width: '100%', fontSize: '1.2rem', padding: '15px' }}>
@@ -2574,6 +2742,7 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
         return (
         <div className="phase-enter" style={{ marginBottom: '20px' }}>
           {renderSpotifyControls()}
+          {renderPlayedSongs()}
           <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.votingPhase')}</h3>
           {room.votingEndTime && (
             <p style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
@@ -2769,6 +2938,21 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
                         </select>
                       </div>
                     )}
+                    {members.some(m => !isManualPlayer(m)) && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                        {members.filter(m => !isManualPlayer(m)).map(m => (
+                          <button
+                            key={m.id}
+                            className="cyber-button"
+                            style={{ width: 'auto', padding: '6px 10px', fontSize: '0.75rem', background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '4px' }}
+                            onClick={() => handleSetPlayerPhoneStatus(m.id, !m.hasNoPhone)}
+                          >
+                            <PhoneOff size={12} className="icon-inline" />
+                            {m.hasNoPhone ? t('gm.restorePhone', { name: maskName(m.name) }) : t('gm.markPhoneDead', { name: maskName(m.name) })}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -2909,6 +3093,8 @@ function GMDashboard({ room, onLeave, myGmName, gmChatMessages, onSendGMChatMess
       <AlertModal
         isOpen={!!alertState}
         message={alertState?.message}
+        actionLabel={alertState?.actionLabel}
+        onAction={alertState?.onAction}
         onClose={() => setAlertState(null)}
       />
 

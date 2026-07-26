@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Music2, Plus, Trash2, Download, LogIn, Search, X, Link2, Unlink } from 'lucide-react';
+import { Music2, Plus, Trash2, Download, LogIn, Search, X, Link2, Unlink, RotateCcw } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
 import { loginWithSpotifyForAccountLink } from '../spotify.js';
 import {
   fetchSpotifyStatus, disconnectSpotify, fetchSpotifyPlaylists, searchSpotifyTracks,
   fetchMyPlaylists, fetchPlaylist, createPlaylist, deletePlaylist,
   addTrackToPlaylist, removeTrackFromPlaylist, importSpotifyPlaylist, confirmPendingTrack,
+  undoDeleteTrack, linkPlaylistToSpotify,
 } from '../spotifyPlaylists.js';
 
 // Maps server error codes to a specific, translated explanation instead of
@@ -23,9 +24,12 @@ const PLAYLIST_ERROR_KEYS = {
   not_a_linked_playlist: 'playlists.error.notLinked',
   spotify_push_failed: 'auth.error.spotify_request_failed',
   not_authenticated: 'playlists.error.notAuthenticated',
+  spotify_rate_limited: 'playlists.error.spotifyRateLimited',
+  track_already_in_playlist: 'playlists.error.trackAlreadyInPlaylist',
+  already_linked: 'playlists.error.alreadyLinked',
 };
 
-function Playlists({ currentUser, onLoginClick }) {
+function Playlists({ currentUser, authLoading, onLoginClick }) {
   const { t } = useLanguage();
   const [loading, setLoading] = useState(true);
   const [spotifyStatus, setSpotifyStatus] = useState({ connected: false, displayName: null });
@@ -79,6 +83,19 @@ function Playlists({ currentUser, onLoginClick }) {
     setErrorMessage(translateError(code));
     if (code === 'spotify_not_connected') setSpotifyStatus(s => ({ ...s, connected: false }));
   };
+
+  // Don't know yet whether this visitor is logged in (fetchMe() is still in
+  // flight) - show nothing decisive rather than flashing "please log in" at
+  // an already-logged-in user for a moment.
+  if (authLoading) {
+    return (
+      <div className="app-container" style={{ padding: '20px' }}>
+        <div className="cyber-card" style={{ maxWidth: '500px', margin: '0 auto', textAlign: 'center' }}>
+          <p style={{ color: 'var(--text-muted)' }}>{t('common.loading')}</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (
@@ -139,7 +156,14 @@ function Playlists({ currentUser, onLoginClick }) {
   const openPicker = async () => {
     setPickerOpen(true);
     setPickerLoading(true);
+    setErrorMessage('');
     const result = await fetchSpotifyPlaylists();
+    if (result.error) {
+      reportError(result.error);
+      setPickerOpen(false);
+      setPickerLoading(false);
+      return;
+    }
     setSpotifyPlaylists(result.playlists || []);
     setPickerLoading(false);
   };
@@ -172,6 +196,12 @@ function Playlists({ currentUser, onLoginClick }) {
     const result = await addTrackToPlaylist(expanded.id, track);
     if (result.error) {
       reportError(result.error);
+      return;
+    }
+    if (result.reactivated) {
+      // Was already in the playlist, staged for deletion - re-adding it just
+      // cancelled that deletion (see server/playlists.js), not a new track.
+      setExpanded(prev => ({ ...prev, tracks: prev.tracks.map(t => t.id === result.track.id ? result.track : t) }));
       return;
     }
     setExpanded(prev => ({ ...prev, tracks: [...prev.tracks, result.track] }));
@@ -213,6 +243,33 @@ function Playlists({ currentUser, onLoginClick }) {
     } else {
       setExpanded(prev => ({ ...prev, tracks: prev.tracks.map(t => t.id === trackId ? { ...t, syncStatus: 'synced' } : t) }));
     }
+  };
+
+  // Cancels a staged deletion before it's pushed to Spotify - the track just
+  // goes back to looking exactly as it did before the delete was requested.
+  const handleUndoDeleteTrack = async (trackId) => {
+    setErrorMessage('');
+    const result = await undoDeleteTrack(expanded.id, trackId);
+    if (result.error) {
+      reportError(result.error);
+      return;
+    }
+    setExpanded(prev => ({ ...prev, tracks: prev.tracks.map(t => t.id === trackId ? { ...t, syncStatus: 'synced' } : t) }));
+  };
+
+  // Creates a brand-new playlist on the user's real Spotify account from an
+  // app-only playlist and pushes every track it already has - from then on
+  // it's linked and reconciled exactly like an imported one.
+  const handleSyncToSpotify = async (id) => {
+    setErrorMessage('');
+    const result = await linkPlaylistToSpotify(id);
+    if (result.error) {
+      reportError(result.error);
+      return;
+    }
+    setPlaylists(prev => prev.map(p => p.id === id ? { ...p, spotifyPlaylistId: result.playlist.spotifyPlaylistId } : p));
+    if (expanded?.id === id) setExpanded(prev => ({ ...prev, spotifyPlaylistId: result.playlist.spotifyPlaylistId }));
+    setStatusMessage(t('playlists.syncedToSpotify', { name: result.playlist.name }));
   };
 
   return (
@@ -338,6 +395,11 @@ function Playlists({ currentUser, onLoginClick }) {
                         {p.spotifyPlaylistId && <Link2 size={12} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} title={t('playlists.linkedTooltip')} />}
                       </button>
                       <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>{t('playlists.trackCount', { count: p.trackCount })}</span>
+                      {!p.spotifyPlaylistId && spotifyStatus.connected && (
+                        <button onClick={() => handleSyncToSpotify(p.id)} className="icon-btn" title={t('playlists.syncToSpotify')}>
+                          <Link2 size={16} style={{ color: 'var(--neon-green)' }} />
+                        </button>
+                      )}
                       <button onClick={() => handleDelete(p.id)} className="icon-btn" title={t('playlists.delete')}>
                         <Trash2 size={16} style={{ color: 'var(--neon-red)' }} />
                       </button>
@@ -370,6 +432,16 @@ function Playlists({ currentUser, onLoginClick }) {
                                       style={{ color: 'var(--neon-green)', flexShrink: 0 }}
                                     >
                                       <Link2 size={14} />
+                                    </button>
+                                  )}
+                                  {isPendingDelete && (
+                                    <button
+                                      onClick={() => handleUndoDeleteTrack(track.id)}
+                                      className="icon-btn"
+                                      title={t('playlists.undoDelete')}
+                                      style={{ color: 'var(--neon-blue)', flexShrink: 0 }}
+                                    >
+                                      <RotateCcw size={14} />
                                     </button>
                                   )}
                                   {!isPendingDelete && (

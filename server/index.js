@@ -11,8 +11,10 @@ import gameStore, { sanitizeRoomForGM, sanitizeRoomForPlayer } from './gameStore
 import { getUserIdFromSocket } from './authToken.js';
 import authRouter from './auth.js';
 import statsRouter, { recordGameConclusion } from './stats.js';
-import spotifyRouter from './spotify.js';
+import spotifyRouter, { getValidAccessToken, searchTracksWithToken } from './spotify.js';
 import playlistsRouter from './playlists.js';
+import adminRouter from './admin.js';
+import { getPool } from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,6 +27,67 @@ app.use('/api/auth', authRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/spotify', spotifyRouter);
 app.use('/api/playlists', playlistsRouter);
+app.use('/api/admin', adminRouter);
+
+// Public, no Deathstep login required - lets any player suggest a real
+// Spotify track without connecting their own account, by running the search
+// through whichever GM/co-GM in the room already has a working Spotify
+// connection (search itself is public catalog data, so it needs no
+// per-caller identity - only playback/personal-playlist access does).
+// See client/src/spotifyPlaylists.js's searchTracksInRoom, used by
+// PlayerScreen.jsx's suggestion flow.
+app.get('/api/rooms/:roomId/spotify-search', async (req, res) => {
+  const room = gameStore.getRoom(req.params.roomId);
+  if (!room) return res.status(404).json({ error: 'room_not_found' });
+
+  const q = (req.query.q || '').trim();
+  if (!q) return res.json({ tracks: [] });
+
+  const pool = await getPool();
+  if (!pool) return res.status(409).json({ error: 'gm_spotify_not_connected' });
+
+  const candidateUserIds = [room.gmUserId, ...(room.coGms || []).map(g => g.userId)].filter(Boolean);
+  for (const userId of candidateUserIds) {
+    const token = await getValidAccessToken(pool, userId);
+    if (!token) continue;
+    try {
+      const tracks = await searchTracksWithToken(token.accessToken, q);
+      return res.json({ tracks });
+    } catch (err) {
+      console.error('Room-scoped Spotify search failed:', err.message);
+      if (err.spotifyRateLimited) return res.status(429).json({ error: 'spotify_rate_limited', retryAfterSeconds: err.retryAfterSeconds });
+      return res.status(502).json({ error: 'spotify_request_failed' });
+    }
+  }
+  return res.status(409).json({ error: 'gm_spotify_not_connected' });
+});
+
+// Public, no Deathstep login required (same room-code trust boundary as
+// spotify-search above) - mints a short-lived access token for the GM's
+// browser from whichever player has currently lent their account-linked
+// Spotify connection to this room (see gameStore.setSpotifyDelegate /
+// socket events grantSpotifyToRoom/revokeSpotifyFromRoom). Only ever used
+// for search/playback (GMDashboard.jsx's getPlaybackToken) - the app has no
+// UI that would use a borrowed token to modify the donor's real playlists.
+app.get('/api/rooms/:roomId/spotify-token', async (req, res) => {
+  const room = gameStore.getRoom(req.params.roomId);
+  if (!room) return res.status(404).json({ error: 'room_not_found' });
+  if (!room.spotifyDelegate) return res.status(409).json({ error: 'spotify_not_connected' });
+
+  const pool = await getPool();
+  if (!pool) return res.status(409).json({ error: 'spotify_not_connected' });
+
+  const token = await getValidAccessToken(pool, room.spotifyDelegate.userId);
+  if (!token) {
+    // The donor's connection died (revoked, expired refresh token) - clear
+    // the now-useless grant instead of leaving a dead delegate sitting on
+    // the room indefinitely.
+    room.spotifyDelegate = null;
+    broadcastRoom(room);
+    return res.status(409).json({ error: 'spotify_not_connected' });
+  }
+  res.json({ accessToken: token.accessToken, expiresIn: Math.floor((token.expiresAt - Date.now()) / 1000), name: room.spotifyDelegate.name });
+});
 
 // Serve the built React static files
 app.use(express.static(path.join(__dirname, '../client/dist')));
@@ -203,8 +266,12 @@ io.on('connection', (socket) => {
       // GM's tab closing mid-game (rather than clicking "end game") shouldn't
       // lose the hosting record - but it's not a real conclusion either, so
       // only the GM's session counts (aborted:true skips player win/loss
-      // records entirely, see stats.js recordGameConclusion).
+      // records entirely, see stats.js recordGameConclusion). Routed through
+      // gameStore.endGame() (rather than recording straight off the live
+      // room) so any in-progress round still gets archived into
+      // room.roundHistory first, same as a manual "End Game" click.
       if (room.status !== 'lobby' && room.status !== 'ended') {
+        gameStore.endGame(roomId);
         recordGameConclusion(room, { aborted: true });
       }
       gameStore.destroyRoom(roomId);
@@ -300,6 +367,43 @@ io.on('connection', (socket) => {
     callback?.({ success: true });
   });
 
+  // A logged-in player with their own account-linked Spotify connection
+  // (made once on the Playlists page) lends it to the room for playback -
+  // e.g. the GM has no Spotify of their own. Verified server-side
+  // (authenticatedUserId from the login cookie, not anything the client
+  // claims) that this really is a live Spotify connection before it's
+  // recorded on the room - see gameStore.setSpotifyDelegate and the public
+  // /api/rooms/:roomId/spotify-token route the GM's browser reads it back
+  // through.
+  socket.on('grantSpotifyToRoom', async ({ roomId, clientId }, callback) => {
+    if (!authenticatedUserId) return callback?.({ success: false, messageKey: 'notAuthenticated' });
+    const room = gameStore.getRoom(roomId);
+    if (!room) return callback?.({ success: false, messageKey: 'roomNotFound' });
+    const player = room.players.find(p => p.id === clientId);
+    if (!player) return callback?.({ success: false, messageKey: 'playerNotFound' });
+
+    const pool = await getPool();
+    const token = pool ? await getValidAccessToken(pool, authenticatedUserId) : null;
+    if (!token) return callback?.({ success: false, messageKey: 'spotifyNotConnected' });
+
+    const updatedRoom = gameStore.setSpotifyDelegate(roomId, clientId, authenticatedUserId, player.name);
+    broadcastRoom(updatedRoom);
+    callback?.({ success: true });
+  });
+
+  // The donor themselves, or the room's GM (e.g. the donor went silent/left
+  // without their socket cleanly leaving), may revoke.
+  socket.on('revokeSpotifyFromRoom', ({ roomId, clientId }, callback) => {
+    const room = gameStore.getRoom(roomId);
+    if (!room?.spotifyDelegate) return callback?.({ success: true });
+    const isDonor = room.spotifyDelegate.playerId === clientId;
+    if (!isDonor && !isRoomGM(room, socket)) return callback?.({ success: false, messageKey: 'notAuthorized' });
+
+    const updatedRoom = gameStore.clearSpotifyDelegate(roomId);
+    broadcastRoom(updatedRoom);
+    callback?.({ success: true });
+  });
+
   // Takes a callback so a losing GM (two co-GMs racing to handle the same
   // suggestion) gets told it's already gone, instead of silently doing nothing.
   socket.on('confirmSongSuggestion', ({ roomId, suggestionId }, callback) => {
@@ -328,6 +432,43 @@ io.on('connection', (socket) => {
     }
     broadcastRoom(result.room);
     callback?.({ success: true });
+  });
+
+  // Song queue - all GM-only (a co-GM may manage it same as the main GM).
+  socket.on('addToSongQueue', ({ roomId, track }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.addToSongQueue(roomId, track);
+    if (room) broadcastRoom(room);
+  });
+
+  socket.on('addPlaylistToSongQueue', ({ roomId, tracks }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.addPlaylistToSongQueue(roomId, tracks);
+    if (room) broadcastRoom(room);
+  });
+
+  socket.on('removeFromSongQueue', ({ roomId, entryId }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.removeFromSongQueue(roomId, entryId);
+    if (room) broadcastRoom(room);
+  });
+
+  socket.on('reorderSongQueue', ({ roomId, entryIds }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.reorderSongQueue(roomId, entryIds);
+    if (room) broadcastRoom(room);
+  });
+
+  socket.on('resolveQueueTextEntry', ({ roomId, entryId, track }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.resolveQueueTextEntry(roomId, entryId, track);
+    if (room) broadcastRoom(room);
+  });
+
+  socket.on('playQueueEntry', ({ roomId, entryId }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.playQueueEntry(roomId, entryId);
+    if (room) broadcastRoom(room);
   });
 
   // GM-only: reports a track actually starting playback (Spotify Web
@@ -452,6 +593,36 @@ io.on('connection', (socket) => {
     if (room) {
       broadcastRoom(room);
     }
+  });
+
+  // GM-only: marks a player's phone as dead/unusable mid-game (or undoes
+  // that) - see gameStore.setPlayerPhoneStatus for how this reuses the
+  // existing no-phone fallback machinery.
+  socket.on('setPlayerPhoneStatus', ({ roomId, playerId, hasNoPhone }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.setPlayerPhoneStatus(roomId, playerId, hasNoPhone);
+    if (room) broadcastRoom(room);
+  });
+
+  // GM-only: broadcasts the lobby's "own audio"/"Spotify" choice onto the
+  // room so players can tell whether Spotify-track suggestions are usable.
+  socket.on('setUseSpotify', ({ roomId, useSpotify }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.setUseSpotify(roomId, useSpotify);
+    if (room) broadcastRoom(room);
+  });
+
+  // Lets the GM's own "pending couples" preview (before they've committed
+  // anything via releasePairs) already reflect the site owner's hidden
+  // pairing override, instead of only the final release - see
+  // gameStore.applyPairOverrides, which this calls directly without touching
+  // room.pairOverrides/room.couples (a preview commits nothing). Answered via
+  // callback (this GM's own request) rather than a room-wide broadcast.
+  socket.on('previewPairing', ({ roomId, generatedCouples }, callback) => {
+    const room = gameStore.getRoom(roomId);
+    if (!isRoomGM(room, socket)) return callback?.({ success: false });
+    const couples = gameStore.applyPairOverrides(room, generatedCouples.map(c => ({ ...c, playerIds: [...c.playerIds] })));
+    callback?.({ success: true, couples });
   });
 
   socket.on('releasePairs', ({ roomId, generatedCouples }) => {

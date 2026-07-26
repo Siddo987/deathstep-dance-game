@@ -27,6 +27,27 @@ async function migrate(activePool) {
   await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS default_dance_role ENUM('lead','follow') NULL`);
   await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS default_is_flexible TINYINT(1) NOT NULL DEFAULT 0`);
   await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS leaderboard_opt_in TINYINT(1) NOT NULL DEFAULT 0`);
+  // Set once, at registration time, from the ?ref=<userId> query param of
+  // whatever invite link was used (see server/auth.js's register/google
+  // routes) - null for anyone who signed up without one. No FK constraint
+  // (consistent with the other optional columns here) since a dangling id
+  // from a since-changed account is harmless: it just never matches anyone's
+  // own "how many people I invited" count.
+  await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_user_id INT NULL`);
+  // Grants access to the hidden in-game admin menu item (see server/admin.js,
+  // client/src/components/GMDashboard.jsx's kebab menu) - never set through
+  // any UI, deliberately: the site owner inserts a row for their own account
+  // (and nobody else's) directly in the DB, consistent with this app's
+  // existing "trusted small deployment" posture elsewhere (plaintext Spotify
+  // refresh tokens, etc.). A dedicated table rather than a users column so
+  // the permission is a plain, explicit list of user ids.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS admin_users (
+      user_id INT PRIMARY KEY,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
   await activePool.query(`
     CREATE TABLE IF NOT EXISTS game_participations (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -60,6 +81,18 @@ async function migrate(activePool) {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     )
   `);
+  // A Spotify account may only ever be linked to one Deathstep account
+  // (server/spotify.js's /connect route also checks this explicitly, for a
+  // translatable error instead of a raw DB error on the rare case both
+  // requests race) - wrapped in try/catch since any pre-existing duplicate
+  // from before this constraint existed would otherwise fail migration for
+  // every route, not just Spotify's. NULL is exempt from MySQL's uniqueness
+  // check, so this can't break rows where spotify_user_id hasn't been set.
+  try {
+    await activePool.query(`ALTER TABLE spotify_accounts ADD UNIQUE INDEX IF NOT EXISTS idx_spotify_user_id (spotify_user_id)`);
+  } catch (err) {
+    console.error('Could not add spotify_accounts.spotify_user_id unique index (likely pre-existing duplicates):', err.message);
+  }
   await activePool.query(`
     CREATE TABLE IF NOT EXISTS playlists (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -105,6 +138,130 @@ async function migrate(activePool) {
   // safe to re-run identically on every boot.
   await activePool.query(`ALTER TABLE playlist_tracks ADD COLUMN IF NOT EXISTS sync_status ENUM('synced','pending_add','pending_delete','removed_on_spotify') NOT NULL DEFAULT 'synced'`);
   await activePool.query(`ALTER TABLE playlist_tracks MODIFY COLUMN sync_status ENUM('synced','pending_add','pending_delete','removed_on_spotify') NOT NULL DEFAULT 'synced'`);
+  // A track may only appear once per playlist - the /tracks route (see
+  // server/playlists.js) already checks this before inserting; this is the
+  // DB-level backstop against a race between two concurrent adds. Wrapped in
+  // try/catch like the spotify_user_id index above, since existing
+  // duplicates from before this constraint existed would otherwise fail
+  // migration on every boot.
+  try {
+    await activePool.query(`ALTER TABLE playlist_tracks ADD UNIQUE INDEX IF NOT EXISTS idx_playlist_uri (playlist_id, track_uri)`);
+  } catch (err) {
+    console.error('Could not add playlist_tracks unique index (likely pre-existing duplicates):', err.message);
+  }
+
+  // Full game history - every round, who was in which couple, who was
+  // killer/dancer, who voted for whom, who claimed which kill (silent mode),
+  // and what was played, with a Spotify link. Fully normalized (not JSON
+  // blobs) so any of it is directly queryable later once a frontend exists
+  // to browse it - this migration only ever writes it, see
+  // recordGameConclusion() in server/stats.js for the one place that does.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS games (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      room_id VARCHAR(10) NOT NULL,
+      gm_user_id INT NULL,
+      kill_mode ENUM('classic','silent') NOT NULL,
+      started_at DATETIME NOT NULL,
+      ended_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      aborted TINYINT(1) NOT NULL DEFAULT 0,
+      killers_won TINYINT(1) NULL,
+      FOREIGN KEY (gm_user_id) REFERENCES users(id) ON DELETE SET NULL,
+      INDEX idx_games_room_id (room_id)
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_couples (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_id INT NOT NULL,
+      couple_key VARCHAR(50) NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      role ENUM('dancer','killer') NOT NULL,
+      final_status ENUM('alive','eliminated') NOT NULL,
+      FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_couple_members (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_couple_id INT NOT NULL,
+      player_name VARCHAR(100) NOT NULL,
+      user_id INT NULL,
+      dance_role ENUM('lead','follow','spectator') NOT NULL,
+      FOREIGN KEY (game_couple_id) REFERENCES game_couples(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_rounds (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_id INT NOT NULL,
+      round_number INT NOT NULL,
+      completed TINYINT(1) NOT NULL DEFAULT 1,
+      eliminated_by_vote_couple_id INT NULL,
+      FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE,
+      FOREIGN KEY (eliminated_by_vote_couple_id) REFERENCES game_couples(id) ON DELETE SET NULL
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_round_kills (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_round_id INT NOT NULL,
+      killed_couple_id INT NOT NULL,
+      FOREIGN KEY (game_round_id) REFERENCES game_rounds(id) ON DELETE CASCADE,
+      FOREIGN KEY (killed_couple_id) REFERENCES game_couples(id) ON DELETE CASCADE
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_round_votes (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_round_id INT NOT NULL,
+      voter_couple_id INT NOT NULL,
+      voting_player_name VARCHAR(100) NULL,
+      suspect_couple_id INT NULL,
+      FOREIGN KEY (game_round_id) REFERENCES game_rounds(id) ON DELETE CASCADE,
+      FOREIGN KEY (voter_couple_id) REFERENCES game_couples(id) ON DELETE CASCADE,
+      FOREIGN KEY (suspect_couple_id) REFERENCES game_couples(id) ON DELETE SET NULL
+    )
+  `);
+  // Silent kill-mode only - stays empty for classic-mode games.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_round_kill_claims (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_round_id INT NOT NULL,
+      killer_couple_id INT NOT NULL,
+      victim_couple_id INT NULL,
+      FOREIGN KEY (game_round_id) REFERENCES game_rounds(id) ON DELETE CASCADE,
+      FOREIGN KEY (killer_couple_id) REFERENCES game_couples(id) ON DELETE CASCADE,
+      FOREIGN KEY (victim_couple_id) REFERENCES game_couples(id) ON DELETE SET NULL
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_round_victim_reports (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_round_id INT NOT NULL,
+      couple_id INT NOT NULL,
+      felt_killed TINYINT(1) NOT NULL,
+      suspect_couple_id INT NULL,
+      FOREIGN KEY (game_round_id) REFERENCES game_rounds(id) ON DELETE CASCADE,
+      FOREIGN KEY (couple_id) REFERENCES game_couples(id) ON DELETE CASCADE,
+      FOREIGN KEY (suspect_couple_id) REFERENCES game_couples(id) ON DELETE SET NULL
+    )
+  `);
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS game_played_songs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      game_id INT NOT NULL,
+      round_number INT NULL,
+      track_uri VARCHAR(255) NOT NULL,
+      spotify_url VARCHAR(255) NULL,
+      track_name VARCHAR(255) NOT NULL,
+      artist_name VARCHAR(255) NOT NULL,
+      played_at DATETIME NOT NULL,
+      FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
+    )
+  `);
+
 }
 
 // Lazily creates the pool and runs migrations at most once. Safe to call

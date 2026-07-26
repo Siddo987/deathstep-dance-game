@@ -25,6 +25,12 @@ const serverAlert = (payload, fallbackKey) => ({
   params: payload?.messageParams,
 });
 
+// Guards the Spotify OAuth callback effect below against handling the same
+// ?code= more than once - see the comment at its usage site. Module-level
+// (not component state) so it persists across a remount within the same
+// page load, not just across re-renders of one mount.
+let handledOAuthCode = null;
+
 function App() {
   const { t } = useLanguage();
   const [alertMessage, setAlertMessage] = useState(null); // { key, params, success }
@@ -36,6 +42,11 @@ function App() {
   const [rejoinPrompt, setRejoinPrompt] = useState(null); // { roomId, playerName }
   const [gmChatMessages, setGmChatMessages] = useState([]);
   const [currentUser, setCurrentUser] = useState(null);
+  // fetchMe() is async, so currentUser reads as null for a moment even for an
+  // already-logged-in visitor - without this flag, every login-gated page
+  // (Stats/Settings/Playlists below) would render its "please log in" state
+  // first and then flash to the real content once the check resolves.
+  const [authChecked, setAuthChecked] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [clientId, setClientId] = useState(() => {
     let id = localStorage.getItem('deathstep_client_id');
@@ -49,7 +60,20 @@ function App() {
   const isLeavingRef = useRef(false);
 
   useEffect(() => {
-    fetchMe().then(setCurrentUser);
+    fetchMe().then((user) => {
+      setCurrentUser(user);
+      setAuthChecked(true);
+    });
+  }, []);
+
+  // Captures an invite link's ?ref=<userId> (see Stats.jsx, where a logged-in
+  // user gets their own shareable link) so it survives navigating to "Login/
+  // Register" and filling out the form - Auth.jsx reads it back out at
+  // register time and clears it on success. Never overwrites an already-
+  // stored code with a later, unrelated page load that has none.
+  useEffect(() => {
+    const ref = new URLSearchParams(window.location.search).get('ref');
+    if (ref) localStorage.setItem('deathstep_ref_code', ref);
   }, []);
 
   // The server derives which account a socket belongs to from the login
@@ -220,15 +244,31 @@ function App() {
     const code = urlParams.get('code');
     if (!code) return;
 
+    // Spotify's authorization codes are single-use - if this effect ever ran
+    // twice for the same code (e.g. a remount before the first run's
+    // history.replaceState had cleared ?code= from the URL), a second
+    // exchange attempt would race the first and get "invalid_grant" from
+    // Spotify no matter how correct its own request was, since the code was
+    // already redeemed by whichever attempt won. Marking the code as handled
+    // synchronously, before the dynamic import below even starts, closes
+    // that window - handledOAuthCode is module-level (not component state)
+    // so it survives across remounts within the same page load.
+    if (handledOAuthCode === code) return;
+    handledOAuthCode = code;
+
     import('./spotify.js').then(({ isSpotifyLinkMode, clearSpotifyLinkMode, getTokenForAccountLink, getToken }) => {
       if (isSpotifyLinkMode()) {
         // Account-level link (Settings/Playlists) - result is persisted
         // server-side, not this browser's localStorage. Distinguished from
         // the GM local-playback flow below via a flag set before the redirect.
         clearSpotifyLinkMode();
-        getTokenForAccountLink(code).then(({ connected }) => {
+        getTokenForAccountLink(code).then(({ connected, error }) => {
           window.history.replaceState({}, document.title, window.location.pathname);
-          setAlertMessage({ key: connected ? 'alert.spotifyConnected' : 'alert.spotifyFailed', success: connected });
+          const key = connected
+            ? 'alert.spotifyConnected'
+            : (error === 'spotify_already_linked' ? 'alert.spotifyAlreadyLinked'
+              : (error === 'spotify_rate_limited' ? 'alert.spotifyRateLimited' : 'alert.spotifyFailed'));
+          setAlertMessage({ key, success: connected });
         });
         return;
       }
@@ -357,7 +397,7 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Stats currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Stats currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
         <CookieBanner />
       </div>
@@ -370,7 +410,7 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Settings currentUser={currentUser} onUserUpdated={setCurrentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Settings currentUser={currentUser} authLoading={!authChecked} onUserUpdated={setCurrentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
         <CookieBanner />
       </div>
@@ -396,7 +436,7 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Playlists currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Playlists currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
         <CookieBanner />
       </div>
@@ -421,6 +461,7 @@ function App() {
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
           currentUser={currentUser}
+          authLoading={!authChecked}
           onLoginClick={() => setIsAuthModalOpen(true)}
           onLogout={handleLogout}
         />

@@ -35,7 +35,7 @@ function LanguageSwitcher() {
   );
 }
 
-function AccountBar({ currentUser, onLoginClick, onLogout }) {
+function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
   const { t } = useLanguage();
   const [stats, setStats] = useState(null);
 
@@ -45,6 +45,10 @@ function AccountBar({ currentUser, onLoginClick, onLogout }) {
     fetchMyStats().then((s) => { if (!cancelled) setStats(s); });
     return () => { cancelled = true; };
   }, [currentUser?.id]);
+
+  // fetchMe() is still in flight - stay blank rather than flashing "Login /
+  // Register" at an already-logged-in visitor for a moment.
+  if (authLoading) return null;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', marginBottom: '15px' }}>
@@ -107,7 +111,7 @@ function AccountBar({ currentUser, onLoginClick, onLogout }) {
   );
 }
 
-function Home({ onCreateRoom, onJoinRoom, currentUser, onLoginClick, onLogout }) {
+function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick, onLogout }) {
   const { t } = useLanguage();
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
@@ -137,7 +141,7 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, onLoginClick, onLogout })
   if (view === 'main') {
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center' }}>
-        <AccountBar currentUser={currentUser} onLoginClick={onLoginClick} onLogout={onLogout} />
+        <AccountBar currentUser={currentUser} authLoading={authLoading} onLoginClick={onLoginClick} onLogout={onLogout} />
         <LanguageSwitcher />
         <h2 style={{ marginBottom: '8px', color: 'var(--neon-blue)' }}>{t('home.title')}</h2>
         <p style={{ color: 'var(--text-muted)', marginBottom: '30px', fontSize: '0.95rem' }}>

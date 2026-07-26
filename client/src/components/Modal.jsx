@@ -35,7 +35,10 @@ export function ConfirmModal({ isOpen, message, onConfirm, onCancel }) {
   );
 }
 
-export function AlertModal({ isOpen, message, onClose, isSuccess = false }) {
+// actionLabel/onAction optionally add a second button (e.g. "Reconnect now")
+// next to the default OK button, for alerts the user can fix in one click
+// instead of just acknowledging.
+export function AlertModal({ isOpen, message, onClose, isSuccess = false, actionLabel, onAction }) {
   const { t } = useLanguage();
   useEscapeKey(isOpen, onClose || (() => {}));
   if (!isOpen) return null;
@@ -54,7 +57,14 @@ export function AlertModal({ isOpen, message, onClose, isSuccess = false }) {
       >
         <Icon size={36} style={{ color: accentColor, marginBottom: '15px' }} />
         <h3 style={{ color: 'var(--text-main)', marginBottom: '30px', fontSize: '1.2rem', lineHeight: '1.5' }}>{message}</h3>
-        <button className={btnClass} onClick={onClose} style={btnStyle}>{t('common.ok')}</button>
+        {actionLabel && onAction ? (
+          <div className="btn-row">
+            <button className="cyber-button" style={{ flex: 1, padding: '10px' }} onClick={() => { onAction(); onClose(); }}>{actionLabel}</button>
+            <button className={btnClass} onClick={onClose} style={{ flex: 1, padding: '10px', ...(isSuccess ? { background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' } : {}) }}>{t('common.ok')}</button>
+          </div>
+        ) : (
+          <button className={btnClass} onClick={onClose} style={btnStyle}>{t('common.ok')}</button>
+        )}
       </div>
     </div>,
     document.body

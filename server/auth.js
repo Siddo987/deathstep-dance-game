@@ -24,7 +24,7 @@ function setAuthCookie(res, user) {
   res.cookie(COOKIE_NAME, signToken(user.id), { ...cookieOptions(), maxAge: COOKIE_MAX_AGE });
 }
 
-function sanitizeUser(row) {
+function sanitizeUser(row, isSuperAdmin = false) {
   return {
     id: row.id,
     email: row.email,
@@ -32,7 +32,29 @@ function sanitizeUser(row) {
     defaultDanceRole: row.default_dance_role ?? null,
     defaultIsFlexible: !!row.default_is_flexible,
     leaderboardOptIn: !!row.leaderboard_opt_in,
+    isSuperAdmin,
   };
+}
+
+// Membership in admin_users (see server/db.js) - a plain list of user ids the
+// site owner inserts by hand, never through any route. A brand-new account
+// (register/google-signup) can never already be in it, so callers creating a
+// user don't need to check; every other sanitizeUser call site does.
+async function isSuperAdmin(db, userId) {
+  const [rows] = await db.query('SELECT 1 FROM admin_users WHERE user_id = ?', [userId]);
+  return rows.length > 0;
+}
+
+// Resolves a client-supplied ?ref=<userId> invite code (see client/src/App.jsx
+// capturing it and Auth.jsx passing it along) into a verified referrer id, or
+// null if it's missing/malformed/doesn't match a real account - never trusted
+// as-is, since a bogus or self-referential value should just be silently
+// dropped rather than stored.
+async function resolveReferrer(db, ref) {
+  const refUserId = Number(ref);
+  if (!Number.isInteger(refUserId) || refUserId <= 0) return null;
+  const [rows] = await db.query('SELECT id FROM users WHERE id = ?', [refUserId]);
+  return rows[0] ? refUserId : null;
 }
 
 const router = Router();
@@ -50,10 +72,11 @@ router.post('/register', asyncRoute(async (req, res) => {
   const [existing] = await req.db.query('SELECT id FROM users WHERE email = ?', [email]);
   if (existing.length > 0) return res.status(409).json({ error: 'email_taken' });
 
+  const referredBy = await resolveReferrer(req.db, req.body?.ref);
   const passwordHash = await bcrypt.hash(password, 10);
   const [result] = await req.db.query(
-    'INSERT INTO users (email, password_hash, display_name) VALUES (?, ?, ?)',
-    [email, passwordHash, displayName]
+    'INSERT INTO users (email, password_hash, display_name, referred_by_user_id) VALUES (?, ?, ?, ?)',
+    [email, passwordHash, displayName, referredBy]
   );
   const user = { id: result.insertId, email, display_name: displayName };
   setAuthCookie(res, user);
@@ -72,7 +95,7 @@ router.post('/login', asyncRoute(async (req, res) => {
   if (!ok) return res.status(401).json({ error: 'invalid_credentials' });
 
   setAuthCookie(res, user);
-  res.json({ user: sanitizeUser(user) });
+  res.json({ user: sanitizeUser(user, await isSuperAdmin(req.db, user.id)) });
 }));
 
 router.post('/google', asyncRoute(async (req, res) => {
@@ -94,6 +117,7 @@ router.post('/google', asyncRoute(async (req, res) => {
 
   const [byGoogleId] = await req.db.query('SELECT * FROM users WHERE google_id = ?', [googleId]);
   let user = byGoogleId[0];
+  let admin = false; // brand-new account below can never already be in admin_users
 
   if (!user) {
     // Refuse to silently merge into an existing password account just
@@ -111,15 +135,18 @@ router.post('/google', asyncRoute(async (req, res) => {
     }
 
     const displayName = payload.name || (email ? email.split('@')[0] : 'Player');
+    const referredBy = await resolveReferrer(req.db, req.body?.ref);
     const [result] = await req.db.query(
-      'INSERT INTO users (email, google_id, display_name) VALUES (?, ?, ?)',
-      [email || null, googleId, displayName]
+      'INSERT INTO users (email, google_id, display_name, referred_by_user_id) VALUES (?, ?, ?, ?)',
+      [email || null, googleId, displayName, referredBy]
     );
     user = { id: result.insertId, email: email || null, google_id: googleId, display_name: displayName };
+  } else {
+    admin = await isSuperAdmin(req.db, user.id);
   }
 
   setAuthCookie(res, user);
-  res.json({ user: sanitizeUser(user) });
+  res.json({ user: sanitizeUser(user, admin) });
 }));
 
 router.post('/logout', (req, res) => {
@@ -133,7 +160,7 @@ router.get('/me', asyncRoute(async (req, res) => {
 
   const [rows] = await req.db.query('SELECT * FROM users WHERE id = ?', [userId]);
   if (!rows[0]) return res.json({ user: null });
-  res.json({ user: sanitizeUser(rows[0]) });
+  res.json({ user: sanitizeUser(rows[0], await isSuperAdmin(req.db, userId)) });
 }));
 
 router.put('/me', asyncRoute(async (req, res) => {
@@ -171,7 +198,7 @@ router.put('/me', asyncRoute(async (req, res) => {
   );
 
   const [rows] = await req.db.query('SELECT * FROM users WHERE id = ?', [userId]);
-  res.json({ user: sanitizeUser(rows[0]) });
+  res.json({ user: sanitizeUser(rows[0], await isSuperAdmin(req.db, userId)) });
 }));
 
 export default router;

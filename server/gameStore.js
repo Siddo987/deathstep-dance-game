@@ -1,11 +1,17 @@
 // The GM needs the full, unredacted room (all roles, all silent-mode claims/reports,
 // all votes) to run the game. Nothing in there is secret from the GM, so this only
 // strips server-internal routing fields (socketId) that the client never uses.
+// pairOverrides/killerOverridePlayerIds are the site owner's hidden, in-
+// progress manipulation for this room's next round (see server/admin.js) -
+// stripped here so even the room's own GM never receives them over the
+// socket. The admin's own REST view (server/admin.js's GET /rooms/:roomId)
+// reads them straight off the room object instead of through this function.
 export function sanitizeRoomForGM(room) {
+  const { pairOverrides, killerOverridePlayerIds, ...rest } = room;
   return {
-    ...room,
-    players: room.players.map(({ socketId, ...rest }) => rest),
-    coGms: room.coGms.map(({ socketId, ...rest }) => rest),
+    ...rest,
+    players: room.players.map(({ socketId, ...r }) => r),
+    coGms: room.coGms.map(({ socketId, ...r }) => r),
   };
 }
 
@@ -31,10 +37,11 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     return { [myCouple.id]: record[myCouple.id] };
   };
 
+  const { pairOverrides, killerOverridePlayerIds, ...rest } = room;
   return {
-    ...room,
-    players: room.players.map(({ socketId, ...rest }) => rest),
-    coGms: room.coGms.map(({ socketId, ...rest }) => rest),
+    ...rest,
+    players: room.players.map(({ socketId, ...r }) => r),
+    coGms: room.coGms.map(({ socketId, ...r }) => r),
     couples,
     killClaims: pickOwn(room.killClaims),
     victimReports: pickOwn(room.victimReports),
@@ -90,7 +97,7 @@ class GameStore {
       round: 0,
       players: [], // { id, socketId, name, danceRole: 'lead'|'follow'|'spectator', isConfirmed: false }
       couples: [], // { id, name, playerIds: [], role: 'dancer'|'killer', status: 'alive' }
-      votingRole: 'follow', // lead or follow
+      votingRole: 'random', // 'lead', 'follow', or 'random' (default) - see assignVotingPlayers
       votes: {}, // { voterId: suspectCoupleId }
       victimIds: [], // couple ids eliminated this round (one kill per killer couple)
       pendingVictimIds: [], // secretly marked before reveal
@@ -101,7 +108,21 @@ class GameStore {
       victimReports: {}, // silent mode: { coupleId: { feltKilled: boolean, suspectCoupleId: string | null } }
       silentReportsResolved: false, // silent mode: whether this round's reports have been matched into pendingVictimIds yet
       songSuggestions: [], // { id, playerId, playerName, track, createdAt } - track is a raw Spotify track object, players can suggest any time
-      playedSongs: [], // { uri, name, artist, playedAt } - reported by the GM's client whenever it actually starts a track; own-audio mode never reports anything since the app has no visibility into what plays on an external device/speaker
+      playedSongs: [], // { uri, name, artist, playedAt, round } - reported by the GM's client whenever it actually starts a track; own-audio mode never reports anything since the app has no visibility into what plays on an external device/speaker
+      songQueue: [], // { id, type: 'spotify'|'text', uri, name, artist, text } - ordered, GM-managed upcoming picks (see addToSongQueue etc.). Persists across rounds AND across games in this room - only destroyRoom() clears it, resetRoom() deliberately leaves it alone.
+      nowPlaying: null, // { uri, name, artist } | null - the current pick, set by playQueueEntry. Broadcast as room state (not client-local) so a GM reload never loses it.
+      startedAt: null, // set on startGame() - for the persisted games.started_at, see recordGameConclusion in server/stats.js
+      roundHistory: [], // one entry per concluded round (see pushRoundRecord below) - the only place round-by-round detail survives past the live in-memory room, until recordGameConclusion persists it
+      useSpotify: null, // null (not chosen yet) | true | false - mirrors the GM's lobby "Own Audio System"/"Use Spotify" choice (GMDashboard.jsx's local useSpotify state) so players can tell whether Spotify-track suggestions are actually usable this game (see setUseSpotify).
+      spotifyDelegate: null, // { userId, playerId, name } | null - a player's account-linked Spotify connection, temporarily lent to the room for playback (see setSpotifyDelegate/clearSpotifyDelegate)
+      // Site-owner-only, one-shot manipulation set live from the hidden
+      // /admin screen (server/admin.js) - re-set by hand before every round,
+      // never persisted, and stripped out in sanitizeRoomForGM/ForPlayer
+      // below so neither the room's GM nor any player ever sees these exist.
+      // Consumed and cleared the moment they're applied (releasePairs /
+      // startGame), so nothing lingers into a later, unrelated round.
+      pairOverrides: [], // { playerIdA, playerIdB } - forces these two players into the same couple next time the GM randomizes pairing (never applied to a couple the GM built manually)
+      killerOverridePlayerIds: [], // player ids, in priority order - whichever of their couples are present become killer(s) first, before the normal random draw fills any remaining slots
     };
     
     this.rooms.set(code, newRoom);
@@ -169,11 +190,19 @@ class GameStore {
     return room;
   }
 
+  // A departing player's lent Spotify connection (see setSpotifyDelegate)
+  // shouldn't keep powering the room's music after they've left - they're no
+  // longer around to revoke it themselves or notice it's still active.
+  clearSpotifyDelegateIfPlayer(room, playerId) {
+    if (room.spotifyDelegate?.playerId === playerId) room.spotifyDelegate = null;
+  }
+
   removePlayer(roomId, clientId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     room.players = room.players.filter(p => p.id !== clientId);
     room.pendingRejoinRequests = room.pendingRejoinRequests.filter(r => r.targetPlayerId !== clientId);
+    this.clearSpotifyDelegateIfPlayer(room, clientId);
     return room;
   }
 
@@ -192,6 +221,7 @@ class GameStore {
     room.players = room.players.filter(p => !memberIds.includes(p.id));
     room.couples = room.couples.filter(c => c.id !== coupleId);
     room.pendingRejoinRequests = room.pendingRejoinRequests.filter(r => !memberIds.includes(r.targetPlayerId));
+    memberIds.forEach(id => this.clearSpotifyDelegateIfPlayer(room, id));
 
     if (room.status !== 'lobby' && room.status !== 'paired') {
       this.checkEndCondition(room);
@@ -218,6 +248,7 @@ class GameStore {
 
     room.players = room.players.filter(p => p.id !== leavingClientId);
     room.pendingRejoinRequests = room.pendingRejoinRequests.filter(r => r.targetPlayerId !== leavingClientId);
+    this.clearSpotifyDelegateIfPlayer(room, leavingClientId);
 
     const remainingIds = couple.playerIds.filter(id => id !== leavingClientId);
     const dissolved = remainingIds.length < 2;
@@ -397,6 +428,15 @@ class GameStore {
     return { room, suggestion };
   }
 
+  makeQueueEntryId() {
+    return `queue_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+  }
+
+  // A confirmed suggestion always lands in the queue rather than immediately
+  // hijacking playback - the GM decides when to actually play it, same as
+  // everything else queued (see playQueueEntry). A text-type suggestion
+  // becomes a placeholder the GM must resolve with a real track before it
+  // can be played (see resolveQueueTextEntry) - it no longer just vanishes.
   confirmSongSuggestion(roomId, suggestionId) {
     const room = this.rooms.get(roomId);
     if (!room) return { error: 'roomNotFound' };
@@ -404,6 +444,25 @@ class GameStore {
     const idx = room.songSuggestions.findIndex(s => s.id === suggestionId);
     if (idx === -1) return { error: 'suggestionNotFound' };
     const [suggestion] = room.songSuggestions.splice(idx, 1);
+    // Carried onto the queue entry (and from there onto nowPlaying/playedSongs -
+    // see playQueueEntry/addPlayedSong) so the GM can still see who asked for a
+    // track after it's been confirmed, not just while it's a pending suggestion.
+    const suggestedBy = { id: suggestion.playerId, name: suggestion.playerName };
+
+    if (suggestion.type === 'text') {
+      room.songQueue.push({ id: this.makeQueueEntryId(), type: 'text', text: suggestion.text, suggestedBy });
+    } else {
+      const track = suggestion.track;
+      room.songQueue.push({
+        id: this.makeQueueEntryId(),
+        type: 'spotify',
+        uri: track.uri,
+        name: track.name,
+        artist: (track.artists || []).map(a => a.name).join(', ') || track.artist || '',
+        suggestedBy,
+      });
+    }
+
     return { room, suggestion };
   }
 
@@ -415,6 +474,90 @@ class GameStore {
     if (idx === -1) return { error: 'suggestionNotFound' };
     const [suggestion] = room.songSuggestions.splice(idx, 1);
     return { room, suggestion };
+  }
+
+  // Appends one real track to the queue - from search, or "add to queue" on
+  // an already-known track.
+  addToSongQueue(roomId, entry) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (!entry?.uri || !entry?.name) return room;
+    room.songQueue.push({ id: this.makeQueueEntryId(), type: 'spotify', uri: entry.uri, name: entry.name, artist: entry.artist || '' });
+    return room;
+  }
+
+  // Bulk-appends every track of a chosen playlist - replaces the old
+  // client-local "use this playlist for the dance" cycling mechanism, which
+  // never survived a GM reload (see the plan's item-10 root cause).
+  // Shuffled (Fisher-Yates) before appending so the track that ends up
+  // playing first is random instead of always the playlist's actual first
+  // track every time it's picked.
+  addPlaylistToSongQueue(roomId, tracks) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const valid = (tracks || []).filter(t => t?.uri && t?.name);
+    for (let i = valid.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [valid[i], valid[j]] = [valid[j], valid[i]];
+    }
+    valid.forEach(t => {
+      room.songQueue.push({ id: this.makeQueueEntryId(), type: 'spotify', uri: t.uri, name: t.name, artist: t.artist || '' });
+    });
+    return room;
+  }
+
+  removeFromSongQueue(roomId, entryId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.songQueue = room.songQueue.filter(e => e.id !== entryId);
+    return room;
+  }
+
+  // Replaces the queue order with the given id order. Any id not currently
+  // in the queue is ignored, and any current entry missing from entryIds is
+  // kept (appended, in its prior relative order) instead of dropped - guards
+  // against a stale reorder call (e.g. a co-GM added an entry between this
+  // client reading the list and submitting the reorder) silently losing it.
+  reorderSongQueue(roomId, entryIds) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const byId = new Map(room.songQueue.map(e => [e.id, e]));
+    const reordered = (entryIds || []).map(id => byId.get(id)).filter(Boolean);
+    const mentioned = new Set(reordered.map(e => e.id));
+    const missing = room.songQueue.filter(e => !mentioned.has(e.id));
+    room.songQueue = [...reordered, ...missing];
+    return room;
+  }
+
+  // Converts a text-type placeholder into a real spotify-type entry in
+  // place (same id, same position) once the GM finds a matching track.
+  resolveQueueTextEntry(roomId, entryId, track) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const entry = room.songQueue.find(e => e.id === entryId);
+    if (!entry || entry.type !== 'text') return room;
+    if (!track?.uri || !track?.name) return room;
+    entry.type = 'spotify';
+    entry.uri = track.uri;
+    entry.name = track.name;
+    entry.artist = track.artist || '';
+    delete entry.text;
+    return room;
+  }
+
+  // Removes a queued entry and makes it the current pick. By entry id
+  // (rather than always the front of the queue) so the GM can jump to any
+  // queued track, not just the next one in line. A text-type entry must be
+  // resolved first - this is a no-op for one, since there's no real track to play yet.
+  playQueueEntry(roomId, entryId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const idx = room.songQueue.findIndex(e => e.id === entryId);
+    if (idx === -1) return room;
+    if (room.songQueue[idx].type !== 'spotify') return room;
+    const [entry] = room.songQueue.splice(idx, 1);
+    room.nowPlaying = { uri: entry.uri, name: entry.name, artist: entry.artist || '', suggestedBy: entry.suggestedBy || null };
+    return room;
   }
 
   // Reported by the GM's client the moment it actually starts a track through
@@ -430,7 +573,7 @@ class GameStore {
     const last = room.playedSongs[room.playedSongs.length - 1];
     if (last && last.uri === track.uri) return room;
 
-    room.playedSongs.push({ uri: track.uri, name: track.name, artist: track.artist || '', playedAt: Date.now() });
+    room.playedSongs.push({ uri: track.uri, name: track.name, artist: track.artist || '', playedAt: Date.now(), round: room.round, suggestedBy: track.suggestedBy || null });
     return room;
   }
 
@@ -444,43 +587,159 @@ class GameStore {
     return room;
   }
 
+  // Picks who casts a couple's vote under a given votingRole setting:
+  // prefers a member matching that role, falling back to any other
+  // phone-carrying member of the couple. For 'random', no player's
+  // danceRole is ever 'random', so the role-match filter is always empty
+  // and this always falls through to picking randomly among every
+  // phone-carrying member - i.e. 'random' needs no separate branch here.
+  // Ties (e.g. a 3-person group with two members of the matching role) are
+  // also broken randomly.
+  pickVotingPlayerId(members, votingRole) {
+    const votingRoleMembers = members.filter(p => p.danceRole === votingRole);
+    let candidates = votingRoleMembers.filter(p => !p.hasNoPhone);
+    if (candidates.length === 0) {
+      candidates = members.filter(p => !p.hasNoPhone);
+    }
+    return candidates.length > 0
+      ? candidates[Math.floor(Math.random() * candidates.length)].id
+      : null;
+  }
+
+  // Re-assigns every couple's votingPlayerId under the room's current
+  // votingRole - called once when pairs are released, and again whenever the
+  // GM changes the setting afterward (setVotingRole), since that selector
+  // lives in the paired-phase Game Settings panel, i.e. after couples
+  // already exist.
+  assignVotingPlayers(room) {
+    room.couples.forEach(couple => {
+      const members = couple.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+      couple.votingPlayerId = this.pickVotingPlayerId(members, room.votingRole);
+    });
+  }
+
+  // GM marks a player's phone as unusable mid-game (dead battery, lost
+  // device, etc.) - or reverses that if it was a misclick. Reuses the exact
+  // same hasNoPhone flag a manually-added phoneless player starts with, so
+  // every existing fallback (partner speaks for the couple via
+  // votingPlayerId, or the GM enters it directly if the whole couple is now
+  // phoneless - see isCoupleFullyPhoneless in GMDashboard.jsx) applies here
+  // too without any separate code path.
+  setPlayerPhoneStatus(roomId, playerId, hasNoPhone) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const player = room.players.find(p => p.id === playerId);
+    if (!player) return null;
+    player.hasNoPhone = !!hasNoPhone;
+
+    const couple = room.couples.find(c => c.playerIds.includes(playerId));
+    if (couple) {
+      const members = couple.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+      couple.votingPlayerId = this.pickVotingPlayerId(members, room.votingRole);
+    }
+    return room;
+  }
+
   setVotingRole(roomId, role) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     room.votingRole = role;
+    if (room.couples.length > 0) this.assignVotingPlayers(room);
     return room;
+  }
+
+  // Mirrors the GM's lobby "own audio system" / "use Spotify" choice onto the
+  // room so players know whether Spotify-track suggestions are actually
+  // usable this game (see PlayerScreen.jsx) - the choice itself still lives
+  // client-side in GMDashboard.jsx, this is just a broadcastable copy of it.
+  setUseSpotify(roomId, useSpotify) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.useSpotify = !!useSpotify;
+    return room;
+  }
+
+  // A player with their own account-linked Spotify connection (server/
+  // spotify.js's spotify_accounts, made once from the Playlists page) lends
+  // it to the room for playback - e.g. the GM has no Spotify Premium/account
+  // connected but a player does. index.js verifies the connection is
+  // actually live (getValidAccessToken) before calling this; only one
+  // delegate can be active at a time, granting again just replaces it.
+  setSpotifyDelegate(roomId, playerId, userId, name) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.spotifyDelegate = { userId, playerId, name };
+    return room;
+  }
+
+  // Only the player who granted it (or the GM, e.g. if that player leaves
+  // unexpectedly) may revoke - checked by the caller (index.js) via
+  // room.spotifyDelegate.playerId, this just does the clearing.
+  clearSpotifyDelegate(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.spotifyDelegate = null;
+    return room;
+  }
+
+  // Site owner's hidden per-round pairing intent (see room.pairOverrides,
+  // set live from /admin during this specific room's lobby phase - never a
+  // persistent per-account rule, so it can't repeat suspiciously across
+  // different games). Silently rearranges the GM's freshly-generated couples
+  // so any pair of currently-joined players the owner picked end up in the
+  // same couple - invisible to the GM, who only ever sees the final result.
+  // Skips any couple the GM built by hand (isManual, see GMDashboard.jsx's
+  // handleCreateManualCouple) - only couples that came from "randomize" are
+  // ever touched, so a GM's explicit manual pairing is never overridden.
+  // Swaps one other member between the two couples rather than just moving
+  // the target player, so neither couple's size changes.
+  applyPairOverrides(room, couples) {
+    const overrides = room.pairOverrides;
+    if (!overrides?.length) return couples;
+    const usedPlayerIds = new Set();
+
+    for (const { playerIdA, playerIdB } of overrides) {
+      if (!playerIdA || !playerIdB || usedPlayerIds.has(playerIdA) || usedPlayerIds.has(playerIdB)) continue;
+
+      const coupleA = couples.find(c => c.playerIds.includes(playerIdA));
+      const coupleB = couples.find(c => c.playerIds.includes(playerIdB));
+      if (!coupleA || !coupleB || coupleA === coupleB) continue;
+      if (coupleA.isManual || coupleB.isManual) continue;
+
+      const partnerOfA = coupleA.playerIds.find(id => id !== playerIdA);
+      if (!partnerOfA) continue;
+
+      coupleA.playerIds = coupleA.playerIds.filter(id => id !== partnerOfA).concat(playerIdB);
+      coupleB.playerIds = coupleB.playerIds.filter(id => id !== playerIdB).concat(partnerOfA);
+      [coupleA, coupleB].forEach(c => {
+        c.name = c.playerIds.map(id => room.players.find(p => p.id === id)?.name).filter(Boolean).join(' & ');
+      });
+
+      usedPlayerIds.add(playerIdA);
+      usedPlayerIds.add(playerIdB);
+    }
+    return couples;
   }
 
   releasePairs(roomId, generatedCouples) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
 
-    room.couples = generatedCouples.map((c, index) => {
-      const members = c.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
+    const couples = this.applyPairOverrides(
+      room,
+      generatedCouples.map(c => ({ ...c, playerIds: [...c.playerIds] }))
+    );
+    room.pairOverrides = []; // one-shot - the owner sets this fresh before every round
 
-      // Default who votes for this couple: prefer someone with the assigned
-      // voting role, but if that role has no phone in this couple, fall back
-      // to whoever else in the couple does have one. If several people are
-      // equally eligible (e.g. a 3-person group with two of the voting role),
-      // pick randomly between them - they can still switch later.
-      const votingRoleMembers = members.filter(p => p.danceRole === room.votingRole);
-      let candidates = votingRoleMembers.filter(p => !p.hasNoPhone);
-      if (candidates.length === 0) {
-        candidates = members.filter(p => !p.hasNoPhone);
-      }
-      const votingPlayerId = candidates.length > 0
-        ? candidates[Math.floor(Math.random() * candidates.length)].id
-        : null;
-
-      return {
-        id: `couple_${index}`,
-        name: c.name,
-        playerIds: c.playerIds,
-        role: 'dancer',
-        status: 'alive',
-        votingPlayerId,
-      };
-    });
+    room.couples = couples.map((c, index) => ({
+      id: `couple_${index}`,
+      name: c.name,
+      playerIds: c.playerIds,
+      role: 'dancer',
+      status: 'alive',
+      votingPlayerId: null, // assigned below by assignVotingPlayers
+    }));
+    this.assignVotingPlayers(room);
 
     room.players.forEach(p => {
       const couple = room.couples.find(c => c.playerIds.includes(p.id));
@@ -499,6 +758,45 @@ class GameStore {
     });
     room.status = 'paired';
     return room;
+  }
+
+  // --- Site-owner overrides (hidden /admin screen, server/admin.js) ---
+  // All four below act on a live room's in-memory state only - nothing here
+  // is ever persisted, so it can't outlive the room or leak into a later game.
+
+  addPairOverride(roomId, playerIdA, playerIdB) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (!playerIdA || !playerIdB || playerIdA === playerIdB) return { error: 'invalid_players' };
+    if (!room.players.some(p => p.id === playerIdA) || !room.players.some(p => p.id === playerIdB)) {
+      return { error: 'player_not_found' };
+    }
+    const alreadyUsed = room.pairOverrides.some(o => [o.playerIdA, o.playerIdB].includes(playerIdA) || [o.playerIdA, o.playerIdB].includes(playerIdB));
+    if (alreadyUsed) return { error: 'already_paired' };
+    room.pairOverrides.push({ playerIdA, playerIdB });
+    return { pairOverrides: room.pairOverrides };
+  }
+
+  removePairOverride(roomId, index) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.pairOverrides.splice(index, 1);
+    return { pairOverrides: room.pairOverrides };
+  }
+
+  addKillerOverride(roomId, playerId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (!playerId || !room.players.some(p => p.id === playerId)) return { error: 'player_not_found' };
+    if (!room.killerOverridePlayerIds.includes(playerId)) room.killerOverridePlayerIds.push(playerId);
+    return { killerOverridePlayerIds: room.killerOverridePlayerIds };
+  }
+
+  removeKillerOverride(roomId, playerId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.killerOverridePlayerIds = room.killerOverridePlayerIds.filter(id => id !== playerId);
+    return { killerOverridePlayerIds: room.killerOverridePlayerIds };
   }
 
   confirmPartner(roomId, clientId) {
@@ -566,17 +864,70 @@ class GameStore {
       // Always leave at least one dancer couple, even if the client-side cap is bypassed.
       const maxKillers = Math.max(1, activeCouples.length - 1);
       const killersToAssign = Math.min(killerCount, maxKillers);
-      const shuffledIndices = Array.from({length: activeCouples.length}, (_, i) => i).sort(() => 0.5 - Math.random());
-      for (let i = 0; i < killersToAssign; i++) {
-         activeCouples[shuffledIndices[i]].role = 'killer';
+
+      // Site-owner override (room.killerOverridePlayerIds, set live from
+      // /admin during this room's paired phase): whichever couple contains
+      // one of these players becomes a killer first, in priority order,
+      // before any remaining slots are filled by the normal random draw
+      // below - invisible to the GM either way, who only ever sees who the
+      // final killer(s) turned out to be. Killer selection has no manual GM
+      // path to respect (always this random draw), unlike pairing.
+      const forcedCoupleIds = new Set();
+      for (const playerId of room.killerOverridePlayerIds) {
+        if (forcedCoupleIds.size >= killersToAssign) break;
+        const couple = activeCouples.find(c => c.playerIds.includes(playerId));
+        if (couple) forcedCoupleIds.add(couple.id);
+      }
+      forcedCoupleIds.forEach(id => {
+        activeCouples.find(c => c.id === id).role = 'killer';
+      });
+
+      const remainingSlots = killersToAssign - forcedCoupleIds.size;
+      if (remainingSlots > 0) {
+        const remainingCouples = activeCouples.filter(c => !forcedCoupleIds.has(c.id));
+        const shuffledIndices = Array.from({length: remainingCouples.length}, (_, i) => i).sort(() => 0.5 - Math.random());
+        for (let i = 0; i < remainingSlots; i++) {
+          remainingCouples[shuffledIndices[i]].role = 'killer';
+        }
       }
     }
+    room.killerOverridePlayerIds = []; // one-shot - the owner sets this fresh before every round
 
     room.players.forEach(p => p.hasViewedRole = false);
     room.status = 'role_reveal';
     room.round = 1;
     room.endReason = null;
+    room.startedAt = Date.now();
+    room.roundHistory = [];
     return room;
+  }
+
+  // Snapshots one concluded round's outcome for later persistence (see
+  // recordGameConclusion in server/stats.js) - called from revealKill (when a
+  // round ends without a vote), executeVote (every completed round), and
+  // endGame (a round cut short by an abort). Resolves each couple's vote to
+  // the specific player who cast it via votingPlayerId, since that's the
+  // detail that would otherwise only ever exist transiently in room.votes.
+  pushRoundRecord(room, { votedOutCoupleId, completed }) {
+    const votingPlayerName = (coupleId) => {
+      const couple = room.couples.find(c => c.id === coupleId);
+      const player = couple && room.players.find(p => p.id === couple.votingPlayerId);
+      return player ? player.name : null;
+    };
+
+    room.roundHistory.push({
+      roundNumber: room.round,
+      killedCoupleIds: [...room.victimIds],
+      votedOutCoupleId: votedOutCoupleId || null,
+      votes: Object.entries(room.votes).map(([voterCoupleId, suspectCoupleId]) => ({
+        voterCoupleId,
+        suspectCoupleId,
+        votingPlayerName: votingPlayerName(voterCoupleId),
+      })),
+      killClaims: room.killMode === 'silent' ? { ...room.killClaims } : null,
+      victimReports: room.killMode === 'silent' ? { ...room.victimReports } : null,
+      completed,
+    });
   }
 
   markRoleViewed(roomId, clientId) {
@@ -742,7 +1093,11 @@ class GameStore {
       if (couple) couple.status = 'eliminated';
     });
 
-    if (!this.checkEndCondition(room)) {
+    if (this.checkEndCondition(room)) {
+      // Game ends right after the kill phase - this round never reaches a
+      // vote, so it has to be archived here instead of executeVote.
+      this.pushRoundRecord(room, { votedOutCoupleId: null, completed: true });
+    } else {
       room.status = 'kill_reveal';
     }
     return room;
@@ -816,7 +1171,13 @@ class GameStore {
       if (couple) couple.status = 'eliminated';
     }
 
-    if (!this.checkEndCondition(room)) {
+    const gameEnded = this.checkEndCondition(room);
+    // Archive this round before the reset below wipes victimIds/votes/etc. -
+    // whether the game continues or ends here, this round genuinely
+    // completed (reached a vote), unlike the abort case in endGame().
+    this.pushRoundRecord(room, { votedOutCoupleId: suspectCoupleId || null, completed: true });
+
+    if (!gameEnded) {
       room.status = 'dancing';
       room.round += 1;
       room.victimIds = [];
@@ -833,10 +1194,21 @@ class GameStore {
   endGame(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
-    
+
+    // A round already archived by revealKill/executeVote (game aborted right
+    // after a normal conclusion, or endGame called again on an already-ended
+    // room) shouldn't be recorded twice. Otherwise, if this round had any
+    // real activity, archive it as cut short rather than losing it entirely.
+    const lastRound = room.roundHistory[room.roundHistory.length - 1];
+    const currentRoundAlreadyArchived = lastRound?.roundNumber === room.round;
+    const hasUncommittedActivity = room.victimIds.length > 0 || Object.keys(room.votes).length > 0 || Object.keys(room.killClaims).length > 0;
+    if (!currentRoundAlreadyArchived && hasUncommittedActivity) {
+      this.pushRoundRecord(room, { votedOutCoupleId: null, completed: false });
+    }
+
     const killers = room.couples.filter(c => c.role === 'killer');
     killers.forEach(k => k.status = 'eliminated');
-    
+
     room.status = 'ended';
     room.endReason = 'aborted';
     return room;
@@ -869,6 +1241,9 @@ class GameStore {
     room.endReason = null;
     room.songSuggestions = [];
     room.playedSongs = [];
+    room.startedAt = null;
+    room.roundHistory = [];
+    room.spotifyDelegate = null; // a new game should re-ask for consent rather than silently keep using a previous grant
     room.couples = []; // Reset couples completely for a new pairing
     room.players.forEach(p => {
       p.isConfirmed = false;

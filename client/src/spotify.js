@@ -1,7 +1,11 @@
+import { fetchSpotifyAccessToken } from './spotifyPlaylists.js';
+
 const CLIENT_ID = import.meta.env.VITE_SPOTIFY_CLIENT_ID;
-// playlist-read-* lets this local, browser-only session (no Deathstep
+// playlist-read-* lets this local, browser-only connection (no Deathstep
 // account needed) browse the connected Spotify account's own playlists
-// directly - see fetchMySpotifyPlaylists/fetchSpotifyPlaylistTracks below -
+// directly - see fetchMySpotifyPlaylists/fetchSpotifyPlaylistTracks below,
+// which actually prefer the Deathstep-account-linked connection when one is
+// available (getBestAvailableToken) and only fall back to this local one -
 // as a lighter alternative to the DB-backed, account-linked playlists
 // feature (server/playlists.js), which still requires a Deathstep account
 // since it persists/syncs tracks server-side.
@@ -36,7 +40,22 @@ function base64encode(input) {
     .replace(/\//g, '_');
 }
 
+// Guards both login functions below against a double-invocation race: each
+// stores its code_verifier in localStorage synchronously, then awaits
+// sha256() before finally navigating away. If either function ran again
+// before that navigation happened (e.g. a double-click - neither Connect
+// button disables itself while this runs), the second call would overwrite
+// the first's stored code_verifier before its redirect actually fired,
+// leaving a code_verifier in localStorage that no longer matches the
+// code_challenge Spotify actually received - Spotify then rejects the
+// eventual token exchange with "invalid_grant: Invalid authorization code".
+// Not reset on completion: by the time either function returns, the page is
+// already navigating away to Spotify, so there's nothing left to guard.
+let loginRedirectInFlight = false;
+
 export const loginWithSpotify = async () => {
+  if (loginRedirectInFlight) return;
+  loginRedirectInFlight = true;
   const codeVerifier = generateRandomString(64);
   window.localStorage.setItem('spotify_code_verifier', codeVerifier);
   const hashed = await sha256(codeVerifier);
@@ -61,20 +80,26 @@ export const loginWithSpotify = async () => {
 // is for linking the Deathstep account (server-side, cross-device) rather
 // than the GM's local, browser-only playback session.
 export const loginWithSpotifyForAccountLink = async () => {
+  if (loginRedirectInFlight) return;
+  loginRedirectInFlight = true;
   localStorage.setItem(LINK_MODE_KEY, 'true');
   const codeVerifier = generateRandomString(64);
   window.localStorage.setItem('spotify_code_verifier', codeVerifier);
+  window.localStorage.setItem('spotify_code_verifier_canary', codeVerifier); // DEBUG: never touched anywhere else, so a mismatch at read-time proves something overwrote the real key in between
   const hashed = await sha256(codeVerifier);
   const codeChallenge = base64encode(hashed);
 
   const authUrl = new URL("https://accounts.spotify.com/authorize")
+  const redirectUri = getRedirectUri();
+  window.localStorage.setItem('spotify_redirect_uri_debug', redirectUri); // DEBUG
+  console.log('DEBUG authorize request:', { client_id: CLIENT_ID, redirect_uri: redirectUri });
   const params = {
     response_type: 'code',
     client_id: CLIENT_ID,
     scope: LINK_SCOPES,
     code_challenge_method: 'S256',
     code_challenge: codeChallenge,
-    redirect_uri: getRedirectUri(),
+    redirect_uri: redirectUri,
   }
 
   authUrl.search = new URLSearchParams(params).toString();
@@ -89,6 +114,12 @@ export const clearSpotifyLinkMode = () => localStorage.removeItem(LINK_MODE_KEY)
 // Deathstep account instead of keeping it in this browser's localStorage.
 export const getTokenForAccountLink = async (code) => {
   const codeVerifier = localStorage.getItem('spotify_code_verifier');
+  const canary = localStorage.getItem('spotify_code_verifier_canary');
+  const redirectUriAtAuthorize = localStorage.getItem('spotify_redirect_uri_debug');
+  const redirectUriNow = getRedirectUri();
+  console.log('DEBUG code_verifier check:', { live: codeVerifier?.slice(0, 12), canary: canary?.slice(0, 12), match: codeVerifier === canary });
+  console.log('DEBUG redirect_uri check:', { atAuthorize: redirectUriAtAuthorize, now: redirectUriNow, match: redirectUriAtAuthorize === redirectUriNow });
+  console.log('DEBUG token exchange request:', { client_id: CLIENT_ID, code: code?.slice(0, 12), codeLen: code?.length, redirect_uri: redirectUriNow });
   const response = await fetch("https://accounts.spotify.com/api/token", {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -96,7 +127,7 @@ export const getTokenForAccountLink = async (code) => {
       client_id: CLIENT_ID,
       grant_type: 'authorization_code',
       code: code,
-      redirect_uri: getRedirectUri(),
+      redirect_uri: redirectUriNow,
       code_verifier: codeVerifier,
     }),
   });
@@ -109,8 +140,9 @@ export const getTokenForAccountLink = async (code) => {
     credentials: 'include',
     body: JSON.stringify({ refreshToken: data.refresh_token }),
   });
-  if (!connectResponse.ok) return { connected: false };
-  return connectResponse.json(); // { connected: true, displayName }
+  const connectData = await connectResponse.json().catch(() => ({}));
+  if (!connectResponse.ok) return { connected: false, error: connectData.error };
+  return connectData; // { connected: true, displayName }
 }
 
 export const getToken = async (code) => {
@@ -219,8 +251,49 @@ export const getValidToken = async () => {
   return token;
 }
 
+// Deathstep-account-linked playback token (server/spotify.js's /token route,
+// backed by the refresh_token stored in spotify_accounts) - lets the GM
+// dashboard use the same Spotify connection made once on the Playlists page
+// for playback, instead of a separate, disconnected local login. Callers
+// fall back to the local getToken()/getValidToken() flow above when there's
+// no Deathstep account logged in at all; this never throws, it just returns
+// null so that fallback kicks in (no Deathstep account, no Spotify linked to
+// it, or the request failed).
+let accountTokenCache = null; // { accessToken, expiresAt }
+export const getValidAccountLinkedToken = async () => {
+  if (accountTokenCache && Date.now() < accountTokenCache.expiresAt - 60000) {
+    return accountTokenCache.accessToken;
+  }
+  const hadToken = !!accountTokenCache;
+  const result = await fetchSpotifyAccessToken();
+  if (result.error || !result.accessToken) {
+    accountTokenCache = null;
+    // Only announce "session expired" if this was previously connected in
+    // this browser session - someone who simply never linked Spotify
+    // shouldn't see an "expired" message the first time this is checked.
+    if (hadToken) window.dispatchEvent(new Event(SPOTIFY_SESSION_EXPIRED_EVENT));
+    return null;
+  }
+  accountTokenCache = { accessToken: result.accessToken, expiresAt: Date.now() + result.expiresIn * 1000 };
+  return result.accessToken;
+};
+
+// Prefers the Deathstep-account-linked Spotify connection (works on any
+// device the moment you're logged into Deathstep - see
+// getValidAccountLinkedToken) over this browser's own local, non-account
+// PKCE connection (getValidToken), so a player/GM who already linked
+// Spotify once doesn't need to redo a separate per-browser connect. Falls
+// through silently to the local token (or null) when there's no Deathstep
+// account logged in, or it has no Spotify linked - both are expected, not
+// errors.
+export const getBestAvailableToken = async () => {
+  const accountToken = await getValidAccountLinkedToken();
+  if (accountToken) return accountToken;
+  return getValidToken();
+};
+
 export const searchTracks = async (query) => {
-  const token = await getValidToken();
+  const token = await getBestAvailableToken();
   if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
 
   const response = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(query)}&type=track&limit=5`, {
@@ -240,7 +313,7 @@ export const searchTracks = async (query) => {
 // anywhere; it just lists what's already on the connected Spotify account
 // so a track from it can be picked, same as a search result.
 export const fetchMySpotifyPlaylists = async () => {
-  const token = await getValidToken();
+  const token = await getBestAvailableToken();
   if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
 
   const playlists = [];
@@ -252,7 +325,10 @@ export const fetchMySpotifyPlaylists = async () => {
     playlists.push(...(data.items || []).filter(Boolean).map(p => ({
       id: p.id,
       name: p.name,
-      trackCount: p.tracks?.total ?? 0,
+      // Spotify renamed the playlist's track-count field from "tracks" to
+      // "items" in their Feb 2026 Web API changes; "tracks" is deprecated but
+      // still sent for now, so fall back to it too.
+      trackCount: p.items?.total ?? p.tracks?.total ?? 0,
     })));
     url = data.next || null;
   }
@@ -260,22 +336,26 @@ export const fetchMySpotifyPlaylists = async () => {
 }
 
 export const fetchSpotifyPlaylistTracks = async (playlistId) => {
-  const token = await getValidToken();
+  const token = await getBestAvailableToken();
   if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
 
   const tracks = [];
-  let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100&fields=next,items(track(uri,name,artists(name),album(images)))`;
+  // Spotify renamed this endpoint from /tracks to /items in their Feb 2026
+  // Web API changes, and each entry's "track" field to "item" ("track" is
+  // deprecated but still sent for now) - request and accept both.
+  let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=100&fields=next,items(item(uri,name,artists(name),album(images)),track(uri,name,artists(name),album(images)))`;
   while (url && tracks.length < 500) {
     const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
     if (!response.ok) throw new Error('FAILED');
     const data = await response.json();
-    for (const item of data.items || []) {
-      if (!item.track || !item.track.uri) continue; // skip local/unavailable tracks
+    for (const entry of data.items || []) {
+      const track = entry.item || entry.track;
+      if (!track || !track.uri) continue; // skip local/unavailable tracks
       tracks.push({
-        uri: item.track.uri,
-        name: item.track.name,
-        artists: item.track.artists || [],
-        album: item.track.album || { images: [] },
+        uri: track.uri,
+        name: track.name,
+        artists: track.artists || [],
+        album: track.album || { images: [] },
       });
     }
     url = data.next || null;
@@ -284,7 +364,7 @@ export const fetchSpotifyPlaylistTracks = async (playlistId) => {
 }
 
 export const playTrack = async (trackUri, deviceId = null, positionMs = 0) => {
-  const token = await getValidToken();
+  const token = await getBestAvailableToken();
   if (!token) throw new Error('SPOTIFY_NOT_CONNECTED');
 
   const url = deviceId 
@@ -315,7 +395,7 @@ export const playTrack = async (trackUri, deviceId = null, positionMs = 0) => {
 }
 
 export const pausePlayback = async () => {
-  const token = await getValidToken();
+  const token = await getBestAvailableToken();
   if (!token) return;
 
   await fetch('https://api.spotify.com/v1/me/player/pause', {

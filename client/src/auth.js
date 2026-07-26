@@ -16,11 +16,11 @@ async function request(path, body, method = 'POST') {
   return data;
 }
 
-export const register = (email, password, displayName) => request('register', { email, password, displayName });
+export const register = (email, password, displayName, ref) => request('register', { email, password, displayName, ref });
 
 export const login = (email, password) => request('login', { email, password });
 
-export const loginWithGoogle = (credential) => request('google', { credential });
+export const loginWithGoogle = (credential, ref) => request('google', { credential, ref });
 
 export const logout = () => request('logout', {});
 

@@ -3,7 +3,7 @@ import { LogIn, Repeat, Save, Trophy } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
 import { updateSettings } from '../auth.js';
 
-function Settings({ currentUser, onUserUpdated, onLoginClick }) {
+function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
   const { t } = useLanguage();
   const [displayName, setDisplayName] = useState('');
   const [defaultDanceRole, setDefaultDanceRole] = useState(null); // 'lead' | 'follow' | null
@@ -19,6 +19,19 @@ function Settings({ currentUser, onUserUpdated, onLoginClick }) {
     setDefaultIsFlexible(!!currentUser.defaultIsFlexible);
     setLeaderboardOptIn(!!currentUser.leaderboardOptIn);
   }, [currentUser?.id]);
+
+  // Don't know yet whether this visitor is logged in (fetchMe() is still in
+  // flight) - show nothing decisive rather than flashing "please log in" at
+  // an already-logged-in user for a moment.
+  if (authLoading) {
+    return (
+      <div className="app-container" style={{ padding: '20px' }}>
+        <div className="cyber-card" style={{ maxWidth: '500px', margin: '0 auto', textAlign: 'center' }}>
+          <p style={{ color: 'var(--text-muted)' }}>{t('common.loading')}</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!currentUser) {
     return (

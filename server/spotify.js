@@ -14,7 +14,12 @@ function asyncRoute(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(err => {
       console.error('Spotify route error:', err.message);
-      if (!res.headersSent) res.status(502).json({ error: 'spotify_request_failed' });
+      if (res.headersSent) return;
+      if (err.spotifyRateLimited) {
+        res.status(429).json({ error: 'spotify_rate_limited', retryAfterSeconds: err.retryAfterSeconds });
+      } else {
+        res.status(502).json({ error: 'spotify_request_failed' });
+      }
     });
   };
 }
@@ -57,17 +62,17 @@ const accessTokenCache = new Map();
 // linked playlist, on top of any foreground search/playlist-browse call).
 const refreshPromises = new Map();
 
-// Looks up the account-linked refresh_token and returns a valid access
-// token, refreshing (and persisting the rotated refresh_token) only when
-// the cached one is missing or near expiry. If Spotify reports the refresh
-// token itself as dead (invalid_grant - revoked, or rotated away by a
+// Looks up the account-linked refresh_token and returns a valid { accessToken,
+// expiresAt }, refreshing (and persisting the rotated refresh_token) only
+// when the cached one is missing or near expiry. If Spotify reports the
+// refresh token itself as dead (invalid_grant - revoked, or rotated away by a
 // request that won a race against an earlier call before this caching
 // existed), the stored connection can never work again without the user
 // reconnecting, so it's deleted here rather than left silently broken.
 export async function getValidAccessToken(pool, userId) {
   const cached = accessTokenCache.get(userId);
   if (cached && Date.now() < cached.expiresAt - 60000) {
-    return cached.accessToken;
+    return cached;
   }
 
   if (refreshPromises.has(userId)) {
@@ -91,8 +96,9 @@ export async function getValidAccessToken(pool, userId) {
       if (data.refresh_token && data.refresh_token !== rows[0].refresh_token) {
         await pool.query('UPDATE spotify_accounts SET refresh_token = ? WHERE user_id = ?', [data.refresh_token, userId]);
       }
-      accessTokenCache.set(userId, { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 });
-      return data.access_token;
+      const entry = { accessToken: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };
+      accessTokenCache.set(userId, entry);
+      return entry;
     } finally {
       refreshPromises.delete(userId);
     }
@@ -109,7 +115,35 @@ export function invalidateAccessTokenCache(userId) {
   accessTokenCache.delete(userId);
 }
 
+// Spotify enforces an undisclosed global rate limit and answers 429 (with a
+// Retry-After header, in seconds) once hit. Every caller here - the 30s
+// background sync loop across every linked playlist, and every foreground
+// request - funnels through this one function, so a single shared cooldown
+// stops ALL of them the moment Spotify says to back off, instead of each
+// caller independently retrying on its own schedule and re-triggering the
+// same block before it ever has a chance to lapse (which is what was
+// happening: constant 429s, some calls only succeeding once a request
+// happened to land in a gap between blocks).
+let rateLimitedUntil = 0;
+
+// Marks an error as "we're rate-limited" (vs. a genuinely broken token/
+// connection) so callers can tell the two apart instead of collapsing both
+// into the same generic failure - see e.g. the /connect route below, which
+// used to report every /me-fetch failure as "invalid_spotify_token" even
+// when the real reason was this rate-limit skip, misleading the user into
+// thinking their Spotify link itself was broken when it just needed to wait.
+function rateLimitError(path) {
+  const retryAfterSeconds = Math.ceil((rateLimitedUntil - Date.now()) / 1000);
+  const err = new Error(`Spotify API ${path} skipped: rate-limited for another ${retryAfterSeconds}s`);
+  err.spotifyRateLimited = true;
+  err.retryAfterSeconds = retryAfterSeconds;
+  return err;
+}
+
 export async function spotifyFetch(accessToken, path, options = {}) {
+  if (Date.now() < rateLimitedUntil) {
+    throw rateLimitError(path);
+  }
   const response = await fetch(`https://api.spotify.com/v1${path}`, {
     method: options.method || 'GET',
     headers: {
@@ -118,6 +152,12 @@ export async function spotifyFetch(accessToken, path, options = {}) {
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+  if (response.status === 429) {
+    const retryAfterSeconds = Number(response.headers.get('retry-after')) || 30;
+    rateLimitedUntil = Date.now() + retryAfterSeconds * 1000;
+    console.error(`Spotify rate limit hit on ${path} - pausing all Spotify calls for ${retryAfterSeconds}s`);
+    throw rateLimitError(path);
+  }
   if (!response.ok) throw new Error(`Spotify API ${path} failed: ${response.status}`);
   if (response.status === 204) return null;
   return response.json();
@@ -135,16 +175,37 @@ router.post('/connect', requireAuth, asyncRoute(async (req, res) => {
   if (!refreshToken) return res.status(400).json({ error: 'missing_refresh_token' });
 
   const tokenData = await refreshAccessToken(refreshToken);
-  if (!tokenData.access_token) return res.status(400).json({ error: 'invalid_spotify_token' });
+  if (!tokenData.access_token) {
+    console.error('/connect: refreshAccessToken failed:', JSON.stringify(tokenData));
+    return res.status(400).json({ error: 'invalid_spotify_token' });
+  }
 
   let profile;
   try {
     profile = await spotifyFetch(tokenData.access_token, '/me');
   } catch (err) {
+    // Distinguish "we're rate-limited right now" from an actually broken
+    // token/connection - collapsing both into invalid_spotify_token would
+    // tell the user their Spotify link itself is bad when really they just
+    // need to wait, which sends them off trying to reconnect for nothing.
+    if (err.spotifyRateLimited) {
+      return res.status(429).json({ error: 'spotify_rate_limited', retryAfterSeconds: err.retryAfterSeconds });
+    }
+    console.error('/connect: /me fetch failed:', err.message);
     return res.status(400).json({ error: 'invalid_spotify_token' });
   }
 
   const finalRefreshToken = tokenData.refresh_token || refreshToken;
+
+  // A Spotify account may only ever be linked to one Deathstep account -
+  // reject instead of silently reassigning it out from under whoever
+  // connected it first (the DB's unique index on spotify_user_id, see
+  // server/db.js, is the last-resort backstop for this same rule).
+  const [existing] = await req.db.query(
+    'SELECT user_id FROM spotify_accounts WHERE spotify_user_id = ? AND user_id != ?',
+    [profile.id, req.userId]
+  );
+  if (existing[0]) return res.status(409).json({ error: 'spotify_already_linked' });
 
   await req.db.query(
     `INSERT INTO spotify_accounts (user_id, spotify_user_id, display_name, refresh_token)
@@ -165,21 +226,40 @@ router.post('/disconnect', requireAuth, asyncRoute(async (req, res) => {
 
 router.get('/status', requireAuth, asyncRoute(async (req, res) => {
   const [rows] = await req.db.query('SELECT display_name FROM spotify_accounts WHERE user_id = ?', [req.userId]);
-  res.json({ connected: !!rows[0], displayName: rows[0]?.display_name || null });
+  if (!rows[0]) return res.json({ connected: false, displayName: null });
+
+  // A row existing here only means a connection was made at some point - it
+  // says nothing about whether the refresh token still works (e.g. the user
+  // revoked access on Spotify's side, or hasn't opened the app in long enough
+  // that Spotify silently invalidated it). Actually exercise it via
+  // getValidAccessToken (which deletes the row on a confirmed invalid_grant)
+  // so the banner reflects reality on page load, instead of only catching up
+  // the next time the user tries an action that touches Spotify.
+  const token = await getValidAccessToken(req.db, req.userId);
+  res.json({ connected: !!token, displayName: token ? rows[0].display_name : null });
 }));
 
 router.get('/playlists', requireAuth, asyncRoute(async (req, res) => {
-  const accessToken = await getValidAccessToken(req.db, req.userId);
-  if (!accessToken) return res.status(409).json({ error: 'spotify_not_connected' });
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
 
   const playlists = [];
   let path = '/me/playlists?limit=50';
   while (path && playlists.length < 200) {
-    const data = await spotifyFetch(accessToken, path);
-    playlists.push(...(data.items || []).map(p => ({
+    const data = await spotifyFetch(token.accessToken, path);
+    if (data.items?.[0]) console.log('DEBUG /me/playlists raw item:', JSON.stringify(data.items[0]));
+    // Spotify's API can return null entries here (e.g. a formerly-
+    // collaborative playlist the user lost access to) - skip them instead of
+    // throwing inside .map, which would otherwise turn one bad entry into a
+    // 502 for the whole list (see the matching .filter(Boolean) in
+    // client/src/spotify.js's fetchMySpotifyPlaylists).
+    playlists.push(...(data.items || []).filter(Boolean).map(p => ({
       id: p.id,
       name: p.name,
-      trackCount: p.tracks?.total ?? 0,
+      // Spotify renamed the playlist's track-count field from "tracks" to
+      // "items" in their Feb 2026 Web API changes; "tracks" is deprecated but
+      // still sent for now, so fall back to it too.
+      trackCount: p.items?.total ?? p.tracks?.total ?? 0,
       imageUrl: p.images?.[0]?.url || null,
     })));
     path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
@@ -187,21 +267,39 @@ router.get('/playlists', requireAuth, asyncRoute(async (req, res) => {
   res.json({ playlists });
 }));
 
+// Shared by GET /search below (a Deathstep account's own connection) and
+// server/index.js's public room-scoped search route (which resolves a token
+// from whichever GM/co-GM in the room has one connected instead) - track
+// search itself is public catalog data, needs no per-caller identity.
+export async function searchTracksWithToken(accessToken, query) {
+  const data = await spotifyFetch(accessToken, `/search?q=${encodeURIComponent(query)}&type=track&limit=10`);
+  return (data.tracks?.items || []).map(t => ({
+    uri: t.uri,
+    name: t.name,
+    artist: t.artists.map(a => a.name).join(', '),
+  }));
+}
+
 router.get('/search', requireAuth, asyncRoute(async (req, res) => {
-  const accessToken = await getValidAccessToken(req.db, req.userId);
-  if (!accessToken) return res.status(409).json({ error: 'spotify_not_connected' });
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
 
   const q = (req.query.q || '').trim();
   if (!q) return res.json({ tracks: [] });
 
-  const data = await spotifyFetch(accessToken, `/search?q=${encodeURIComponent(q)}&type=track&limit=10`);
-  res.json({
-    tracks: (data.tracks?.items || []).map(t => ({
-      uri: t.uri,
-      name: t.name,
-      artist: t.artists.map(a => a.name).join(', '),
-    })),
-  });
+  const tracks = await searchTracksWithToken(token.accessToken, q);
+  res.json({ tracks });
+}));
+
+// Mints a short-lived access token for the browser to use directly (e.g. the
+// GM dashboard's Web Playback SDK, which needs a raw token in the browser to
+// open a playback device) from this account's server-side connection -
+// lets a Deathstep account's Spotify link (made once, from the Playlists
+// page) also drive playback without a separate, disconnected local login.
+router.get('/token', requireAuth, asyncRoute(async (req, res) => {
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
+  res.json({ accessToken: token.accessToken, expiresIn: Math.floor((token.expiresAt - Date.now()) / 1000) });
 }));
 
 export default router;

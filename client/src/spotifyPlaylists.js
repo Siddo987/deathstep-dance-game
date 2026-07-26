@@ -23,7 +23,22 @@ export const disconnectSpotify = () => request('/api/spotify/disconnect', { meth
 
 export const fetchSpotifyPlaylists = () => request('/api/spotify/playlists');
 
+// Short-lived playback access token minted from this account's server-side
+// connection - see client/src/spotify.js's getValidAccountLinkedToken.
+export const fetchSpotifyAccessToken = () => request('/api/spotify/token');
+
 export const searchSpotifyTracks = (query) => request(`/api/spotify/search?q=${encodeURIComponent(query)}`);
+
+// Public (no login needed) search that runs through whichever GM/co-GM in
+// the room has a working Spotify connection - see server/index.js. Lets
+// players suggest real tracks without connecting their own Spotify account.
+export const searchTracksInRoom = (roomId, query) => request(`/api/rooms/${roomId}/spotify-search?q=${encodeURIComponent(query)}`);
+
+// Public (no login needed, same room-code trust boundary as searchTracksInRoom)
+// playback token minted from whichever player has currently lent their
+// account-linked Spotify connection to this room - see gameStore.js's
+// spotifyDelegate and GMDashboard.jsx's getPlaybackToken.
+export const fetchRoomSpotifyToken = (roomId) => request(`/api/rooms/${roomId}/spotify-token`);
 
 // --- Own (in-app) playlists ---
 
@@ -41,5 +56,9 @@ export const removeTrackFromPlaylist = (id, trackId) => request(`/api/playlists/
 
 export const confirmPendingTrack = (id, trackId) => request(`/api/playlists/${id}/tracks/${trackId}/confirm`, { method: 'POST', body: '{}' });
 
+export const undoDeleteTrack = (id, trackId) => request(`/api/playlists/${id}/tracks/${trackId}/undo-delete`, { method: 'POST', body: '{}' });
+
 export const importSpotifyPlaylist = (spotifyPlaylistId, name) =>
   request('/api/playlists/import', { method: 'POST', body: JSON.stringify({ spotifyPlaylistId, name }) });
+
+export const linkPlaylistToSpotify = (id) => request(`/api/playlists/${id}/link-to-spotify`, { method: 'POST', body: '{}' });

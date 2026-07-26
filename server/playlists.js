@@ -7,7 +7,12 @@ function asyncRoute(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(err => {
       console.error('Playlists route error:', err.message);
-      if (!res.headersSent) res.status(500).json({ error: 'playlist_request_failed' });
+      if (res.headersSent) return;
+      if (err.spotifyRateLimited) {
+        res.status(429).json({ error: 'spotify_rate_limited', retryAfterSeconds: err.retryAfterSeconds });
+      } else {
+        res.status(500).json({ error: 'playlist_request_failed' });
+      }
     });
   };
 }
@@ -36,10 +41,12 @@ async function nextTrackPosition(pool, playlistId) {
 // (token expired, Spotify unreachable, playlist deleted on Spotify's side,
 // ...) just report back false - the local row is left untouched either way.
 async function pushTrackAddToSpotify(pool, userId, spotifyPlaylistId, uri) {
-  const accessToken = await getValidAccessToken(pool, userId);
-  if (!accessToken) return false;
+  const token = await getValidAccessToken(pool, userId);
+  if (!token) return false;
   try {
-    await spotifyFetch(accessToken, `/playlists/${spotifyPlaylistId}/tracks`, { method: 'POST', body: { uris: [uri] } });
+    // Spotify renamed this endpoint from /tracks to /items in their Feb 2026
+    // Web API changes (/tracks is deprecated) - same request body shape.
+    await spotifyFetch(token.accessToken, `/playlists/${spotifyPlaylistId}/items`, { method: 'POST', body: { uris: [uri] } });
     return true;
   } catch (err) {
     console.error('Failed to push track add to Spotify playlist:', err.message);
@@ -49,10 +56,11 @@ async function pushTrackAddToSpotify(pool, userId, spotifyPlaylistId, uri) {
 
 // Push a locally-staged removal to the real Spotify playlist.
 async function pushTrackRemoveToSpotify(pool, userId, spotifyPlaylistId, uri) {
-  const accessToken = await getValidAccessToken(pool, userId);
-  if (!accessToken) return false;
+  const token = await getValidAccessToken(pool, userId);
+  if (!token) return false;
   try {
-    await spotifyFetch(accessToken, `/playlists/${spotifyPlaylistId}/tracks`, { method: 'DELETE', body: { tracks: [{ uri }] } });
+    // The request body key was renamed from "tracks" to "items" along with the endpoint.
+    await spotifyFetch(token.accessToken, `/playlists/${spotifyPlaylistId}/items`, { method: 'DELETE', body: { items: [{ uri }] } });
     return true;
   } catch (err) {
     console.error('Failed to push track removal to Spotify playlist:', err.message);
@@ -91,20 +99,24 @@ async function pullTracksFromSpotify(pool, userId, playlist) {
   if (Date.now() - last < PULL_SYNC_THROTTLE_MS) return;
   lastPullSyncedAt.set(playlist.id, Date.now());
 
-  const accessToken = await getValidAccessToken(pool, userId);
-  if (!accessToken) return;
+  const token = await getValidAccessToken(pool, userId);
+  if (!token) return;
 
   const [localRows] = await pool.query('SELECT id, track_uri, sync_status FROM playlist_tracks WHERE playlist_id = ?', [playlist.id]);
   const localUris = new Set(localRows.map(r => r.track_uri));
 
   const remoteTracks = [];
   try {
-    let path = `/playlists/${playlist.spotify_playlist_id}/tracks?limit=100&fields=next,items(track(uri,name,artists(name)))`;
+    // "track" was renamed to "item" per entry too (Feb 2026), but Spotify
+    // still sends the deprecated "track" field alongside it for now - request
+    // and accept either so this keeps working through the transition.
+    let path = `/playlists/${playlist.spotify_playlist_id}/items?limit=100&fields=next,items(item(uri,name,artists(name)),track(uri,name,artists(name)))`;
     while (path && remoteTracks.length < 500) {
-      const data = await spotifyFetch(accessToken, path);
-      for (const item of data.items || []) {
-        if (!item.track || !item.track.uri) continue;
-        remoteTracks.push({ uri: item.track.uri, name: item.track.name, artist: (item.track.artists || []).map(a => a.name).join(', ') });
+      const data = await spotifyFetch(token.accessToken, path);
+      for (const entry of data.items || []) {
+        const track = entry.item || entry.track;
+        if (!track || !track.uri) continue;
+        remoteTracks.push({ uri: track.uri, name: track.name, artist: (track.artists || []).map(a => a.name).join(', ') });
       }
       path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
     }
@@ -218,6 +230,26 @@ router.post('/:id/tracks', asyncRoute(async (req, res) => {
   const { uri, name, artist } = req.body || {};
   if (!uri || !name) return res.status(400).json({ error: 'missing_track_fields' });
 
+  // A track may only appear once per playlist. If it's already there but
+  // staged for deletion, re-adding it just cancels that deletion (same
+  // effect as the explicit undo-delete route below) instead of erroring -
+  // that's the more useful interpretation of "add this track again".
+  // Anything else already present is a real duplicate and gets rejected.
+  const [existingRows] = await req.db.query(
+    'SELECT id, sync_status FROM playlist_tracks WHERE playlist_id = ? AND track_uri = ?',
+    [playlist.id, uri]
+  );
+  const existing = existingRows[0];
+  if (existing) {
+    if (existing.sync_status !== 'pending_delete') {
+      return res.status(409).json({ error: 'track_already_in_playlist' });
+    }
+    await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE id = ?', [existing.id]);
+    // reactivated (not a new row) - the caller should update the existing
+    // track in place rather than append a duplicate/bump the track count.
+    return res.json({ track: { id: existing.id, uri, name, artist: artist || '', syncStatus: 'synced' }, reactivated: true });
+  }
+
   // On a linked playlist, a new track is staged rather than pushed right
   // away - it only actually reaches Spotify once the user adds it there
   // themselves (picked up by the next pull-sync) or explicitly confirms it
@@ -231,6 +263,22 @@ router.post('/:id/tracks', asyncRoute(async (req, res) => {
   );
 
   res.json({ track: { id: result.insertId, uri, name, artist: artist || '', syncStatus } });
+}));
+
+// Cancels a staged deletion before it's pushed to Spotify - the only
+// resolution path 'pending_delete' was previously missing (it could only be
+// confirmed, never undone).
+router.post('/:id/tracks/:trackId/undo-delete', asyncRoute(async (req, res) => {
+  const playlist = await getOwnedPlaylist(req.db, req.params.id, req.userId);
+  if (!playlist) return res.status(404).json({ error: 'playlist_not_found' });
+
+  const [rows] = await req.db.query('SELECT sync_status FROM playlist_tracks WHERE id = ? AND playlist_id = ?', [req.params.trackId, playlist.id]);
+  const track = rows[0];
+  if (!track) return res.status(404).json({ error: 'track_not_found' });
+  if (track.sync_status !== 'pending_delete') return res.status(409).json({ error: 'track_not_pending' });
+
+  await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE id = ?', [req.params.trackId]);
+  res.json({ success: true, syncStatus: 'synced' });
 }));
 
 // Manually pushes a staged change to the real Spotify playlist right now,
@@ -295,6 +343,48 @@ router.delete('/:id/tracks/:trackId', asyncRoute(async (req, res) => {
   res.json({ success: true });
 }));
 
+// Turns an app-only playlist (never imported, no spotify_playlist_id) into a
+// live-linked one: creates a brand-new playlist on the user's real Spotify
+// account, bulk-pushes every track already in it, then links it exactly like
+// an imported playlist - from this point on it's reconciled the same way, by
+// pullTracksFromSpotify and the background sync loop.
+router.post('/:id/link-to-spotify', asyncRoute(async (req, res) => {
+  const playlist = await getOwnedPlaylist(req.db, req.params.id, req.userId);
+  if (!playlist) return res.status(404).json({ error: 'playlist_not_found' });
+  if (playlist.spotify_playlist_id) return res.status(409).json({ error: 'already_linked' });
+
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
+
+  const [accountRows] = await req.db.query('SELECT spotify_user_id FROM spotify_accounts WHERE user_id = ?', [req.userId]);
+  const spotifyUserId = accountRows[0]?.spotify_user_id;
+  if (!spotifyUserId) return res.status(409).json({ error: 'spotify_not_connected' });
+
+  const [tracks] = await req.db.query('SELECT track_uri FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC', [playlist.id]);
+
+  let created;
+  try {
+    created = await spotifyFetch(token.accessToken, `/users/${spotifyUserId}/playlists`, {
+      method: 'POST',
+      body: { name: playlist.name, public: false },
+    });
+    // Spotify caps a single add-items call at 100 URIs.
+    for (let i = 0; i < tracks.length; i += 100) {
+      const batch = tracks.slice(i, i + 100).map(t => t.track_uri);
+      await spotifyFetch(token.accessToken, `/playlists/${created.id}/items`, { method: 'POST', body: { uris: batch } });
+    }
+  } catch (err) {
+    console.error('Failed to create/populate Spotify playlist:', err.message);
+    return res.status(502).json({ error: 'spotify_push_failed' });
+  }
+
+  await req.db.query('UPDATE playlists SET spotify_playlist_id = ? WHERE id = ?', [created.id, playlist.id]);
+  await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE playlist_id = ?', [playlist.id]);
+  lastPullSyncedAt.set(playlist.id, Date.now()); // just pushed everything ourselves, skip an immediate redundant pull-sync
+
+  res.json({ playlist: { id: playlist.id, name: playlist.name, spotifyPlaylistId: created.id, trackCount: tracks.length } });
+}));
+
 // Imports a Spotify playlist as a new, live-linked app playlist in one step
 // (rather than create-then-import) so a rejected duplicate import never
 // leaves an orphaned empty playlist behind. Linked playlists stay reconciled
@@ -311,19 +401,20 @@ router.post('/import', asyncRoute(async (req, res) => {
   );
   if (existing[0]) return res.status(409).json({ error: 'already_imported' });
 
-  const accessToken = await getValidAccessToken(req.db, req.userId);
-  if (!accessToken) return res.status(409).json({ error: 'spotify_not_connected' });
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
 
   const tracks = [];
-  let path = `/playlists/${spotifyPlaylistId}/tracks?limit=100&fields=next,items(track(uri,name,artists(name)))`;
+  let path = `/playlists/${spotifyPlaylistId}/items?limit=100&fields=next,items(item(uri,name,artists(name)),track(uri,name,artists(name)))`;
   while (path && tracks.length < 500) {
-    const data = await spotifyFetch(accessToken, path);
-    for (const item of data.items || []) {
-      if (!item.track || !item.track.uri) continue; // skip local/unavailable tracks
+    const data = await spotifyFetch(token.accessToken, path);
+    for (const entry of data.items || []) {
+      const track = entry.item || entry.track;
+      if (!track || !track.uri) continue; // skip local/unavailable tracks
       tracks.push({
-        uri: item.track.uri,
-        name: item.track.name,
-        artist: (item.track.artists || []).map(a => a.name).join(', '),
+        uri: track.uri,
+        name: track.name,
+        artist: (track.artists || []).map(a => a.name).join(', '),
       });
     }
     path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
