@@ -30,6 +30,17 @@
   padding: 0;
 }
 
+/* Always reserves the vertical scrollbar's width, whether or not the page
+   actually needs to scroll right now - without this, content whose height
+   crosses the viewport threshold (e.g. expanding one of the collapse-toggle
+   lists above, or just a longer lobby player list) makes a scrollbar appear
+   and every fixed-width/centered element on the page visibly shifts
+   sideways by the scrollbar's width, then shifts back once it's short
+   enough to disappear again. */
+html {
+  scrollbar-gutter: stable;
+}
+
 body {
   background-color: var(--bg-dark);
   color: var(--text-main);
@@ -42,6 +53,31 @@ body {
 
 input, select, textarea {
   font-size: 16px;
+}
+
+/* Scrollbars - matches the neon-on-dark theme instead of the browser default */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--neon-purple) var(--bg-panel);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--bg-panel);
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgba(181, 43, 255, 0.5);
+  border-radius: var(--radius-sm);
+  border: 2px solid var(--bg-panel);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--neon-purple);
 }
 
 h1, h2, h3, .glitch-text {
@@ -57,6 +93,14 @@ h1, h2, h3, .glitch-text {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+}
+
+/* Suspense fallback for lazy-loaded routes (see App.jsx) - the chunk is
+   small and loads fast on a real connection, so this deliberately has no
+   spinner/animation; it just reserves a little space to avoid a layout
+   jump while the chunk downloads. */
+.route-loading {
+  min-height: 40vh;
 }
 
 /* UI Elements */
@@ -517,6 +561,27 @@ a:focus-visible {
 .badge--green { color: var(--neon-green); background: rgba(29, 185, 84, 0.12); }
 .badge--muted { color: var(--text-muted); background: rgba(136, 146, 176, 0.12); }
 
+/* Collapse/expand toggle for "N already confirmed/viewed - tap to show/hide"
+   rows (GMDashboard.jsx) - a small pill button instead of a bare underlined
+   text link, so it reads as an actual (phone-friendly) tap target and not
+   body copy, while staying visually secondary to the primary actions around
+   it. Same rounded/tinted vocabulary as .badge above, just interactive. */
+.collapse-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 240, 255, 0.08);
+  border: 1px solid rgba(0, 240, 255, 0.35);
+  border-radius: 999px;
+  padding: 7px 14px;
+  color: var(--neon-blue);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.collapse-toggle:hover { background: rgba(0, 240, 255, 0.16); border-color: var(--neon-blue); }
+
 /* Modals — shared overlay/card so every dialog animates & sizes consistently */
 .modal-overlay {
   position: fixed;
@@ -599,18 +664,28 @@ a:focus-visible {
 .segmented-option.accent-purple.is-active { border-color: var(--neon-purple); color: var(--neon-purple); background: rgba(181, 43, 255, 0.15); box-shadow: 0 0 12px rgba(181, 43, 255, 0.25); }
 .segmented-option.accent-green.is-active { border-color: var(--neon-green); color: var(--neon-green); background: rgba(29, 185, 84, 0.15); box-shadow: 0 0 12px rgba(29, 185, 84, 0.25); }
 
-/* Styled native selects */
+/* Styled native selects - appearance: none strips the browser's own dropdown
+   arrow (which varies in size/position by OS/browser and never actually
+   lines up neatly inside a custom-bordered box) in favor of one drawn here,
+   sized and positioned to sit flush inside the box on every platform. */
 .cyber-select {
-  background: rgba(0, 0, 0, 0.6);
+  background-color: rgba(0, 0, 0, 0.6);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%238892b0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 16px;
   color: var(--text-main);
   border: 1px solid var(--neon-purple);
   border-radius: var(--radius-sm);
-  padding: 10px 12px;
+  padding: 10px 34px 10px 12px;
   min-height: 44px;
   font-size: 0.95rem;
   font-family: var(--font-inter);
   outline: none;
   cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
@@ -646,6 +721,90 @@ a:focus-visible {
   font-size: 1.3rem;
   color: var(--neon-blue);
   font-weight: 700;
+}
+
+/* GM dashboard header - ballroom code pill + grouped action toolbar */
+.gm-code-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  background: rgba(0, 240, 255, 0.1);
+  border: 1px solid var(--neon-blue);
+  padding: 6px 14px;
+  border-radius: 999px;
+}
+.gm-code-chip span {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.gm-code-chip strong {
+  color: var(--neon-blue);
+  font-size: 0.8rem;
+  letter-spacing: 2px;
+}
+
+.icon-toolbar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: fit-content;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(136, 146, 176, 0.25);
+  border-radius: 999px;
+}
+.icon-toolbar-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 6px 3px;
+  background: rgba(136, 146, 176, 0.3);
+  flex-shrink: 0;
+}
+@media (max-width: 480px) {
+  .icon-toolbar {
+    width: 100%;
+    justify-content: space-around;
+  }
+}
+
+/* Small muted info note (icon + text), e.g. next to a gated action */
+.info-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  margin-top: 8px;
+}
+.info-note svg { flex-shrink: 0; margin-top: 1px; }
+
+/* Small icon+label nav pills - account bar / footer link rows. Each pill
+   wraps as one whole unit (never breaking the icon away from its label) and
+   never wraps its own text mid-word, unlike a plain inline link in a
+   nowrap-less flex row. */
+.nav-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(136, 146, 176, 0.3);
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+  transition: border-color 0.2s ease, color 0.2s ease, background 0.2s ease;
+}
+.nav-pill:hover {
+  border-color: var(--neon-blue);
+  color: var(--text-main);
+  background: rgba(0, 240, 255, 0.08);
 }
 
 /* Chat bubbles (GM team chat) */
