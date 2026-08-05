@@ -59,9 +59,13 @@ function AdminOverridesModal({ room, onClose }) {
     if (!result.error) setPairOverrides(result.pairOverrides);
   };
 
-  const handleMakeKiller = async (playerId) => {
+  // Server only ever needs one member's id to identify the whole couple (see
+  // gameStore.startGame's activeCouples.find(c => c.playerIds.includes(...))),
+  // so one button per couple - the first playerId stands in for the couple -
+  // is enough; there's no need to expose a separate button per person.
+  const handleMakeKillerCouple = async (couple) => {
     setActionError('');
-    const result = await addKillerOverride(room.id, playerId);
+    const result = await addKillerOverride(room.id, couple.playerIds[0]);
     if (result.error) { setActionError(translateError(result.error)); return; }
     setKillerOverridePlayerIds(result.killerOverridePlayerIds);
   };
@@ -72,6 +76,7 @@ function AdminOverridesModal({ room, onClose }) {
   };
 
   const playerName = (id) => room.players.find(p => p.id === id)?.name || '?';
+  const coupleForPlayerId = (id) => room.couples.find(c => c.playerIds.includes(id));
 
   return createPortal(
     <div className="modal-overlay" onClick={onClose}>
@@ -146,7 +151,7 @@ function AdminOverridesModal({ room, onClose }) {
               {killerOverridePlayerIds.map((id, i) => (
                 <div key={id} className="list-item">
                   <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginRight: '8px' }}>#{i + 1}</span>
-                  <span style={{ flex: 1, color: 'white' }}>{playerName(id)}</span>
+                  <span style={{ flex: 1, color: 'white' }}>{coupleForPlayerId(id)?.name || playerName(id)}</span>
                   <button className="icon-btn" title={t('admin.remove')} onClick={() => handleRemoveKiller(id)}>
                     <Trash2 size={16} />
                   </button>
@@ -155,24 +160,22 @@ function AdminOverridesModal({ room, onClose }) {
             </div>
 
             <div className="couple-list">
-              {room.couples.map(c => (
-                <div key={c.id} className="list-item">
-                  <span style={{ flex: 1, color: 'white' }}>{c.name}</span>
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {c.playerIds.map(id => (
-                      <button
-                        key={id}
-                        className="cyber-button"
-                        disabled={killerOverridePlayerIds.includes(id)}
-                        onClick={() => handleMakeKiller(id)}
-                        style={{ width: 'auto', padding: '6px 10px', fontSize: '0.8rem', border: '1px solid var(--neon-red)', color: 'var(--neon-red)', background: 'transparent', opacity: killerOverridePlayerIds.includes(id) ? 0.4 : 1 }}
-                      >
-                        {t('admin.makeKiller', { name: playerName(id) })}
-                      </button>
-                    ))}
+              {room.couples.map(c => {
+                const isForced = c.playerIds.some(id => killerOverridePlayerIds.includes(id));
+                return (
+                  <div key={c.id} className="list-item">
+                    <span style={{ flex: 1, color: 'white' }}>{c.name}</span>
+                    <button
+                      className="cyber-button"
+                      disabled={isForced}
+                      onClick={() => handleMakeKillerCouple(c)}
+                      style={{ width: 'auto', padding: '6px 10px', fontSize: '0.8rem', border: '1px solid var(--neon-red)', color: 'var(--neon-red)', background: 'transparent', opacity: isForced ? 0.4 : 1 }}
+                    >
+                      {t('admin.makeKillerCouple')}
+                    </button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </>
         )}

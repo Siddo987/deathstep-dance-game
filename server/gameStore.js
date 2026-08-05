@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 // The GM needs the full, unredacted room (all roles, all silent-mode claims/reports,
 // all votes) to run the game. Nothing in there is secret from the GM, so this only
 // strips server-internal routing fields (socketId) that the client never uses.
@@ -7,11 +9,23 @@
 // socket. The admin's own REST view (server/admin.js's GET /rooms/:roomId)
 // reads them straight off the room object instead of through this function.
 export function sanitizeRoomForGM(room) {
-  const { pairOverrides, killerOverridePlayerIds, ...rest } = room;
+  // gmId (live socket.id) and gmClientId (persistent device id) are used
+  // only for server-side reconnect verification (see index.js's
+  // reconnectToRoom) - the client never reads either. gmClientId in
+  // particular must never reach any socket: reconnectToRoom trusts a
+  // client-supplied clientId that matches it to hand over full GM control,
+  // so broadcasting the real value would let anyone who saw it hijack the
+  // room. Stripped here (not just from the player view) since the GM's own
+  // client doesn't need it either. gmSessionSecret is the actual bearer
+  // credential checked alongside gmClientId in reconnectToRoom - stripped
+  // for the same reason: gmClientId itself IS broadcast to co-GMs (see its
+  // own comment further down), so leaking this too would hand every co-GM
+  // everything needed to impersonate the primary GM.
+  const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, ...rest } = room;
   return {
     ...rest,
-    players: room.players.map(({ socketId, ...r }) => r),
-    coGms: room.coGms.map(({ socketId, ...r }) => r),
+    players: room.players.map(({ socketId, sessionSecret, ...r }) => r),
+    coGms: room.coGms.map(({ socketId, sessionSecret, ...r }) => r),
   };
 }
 
@@ -37,17 +51,39 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     return { [myCouple.id]: record[myCouple.id] };
   };
 
-  const { pairOverrides, killerOverridePlayerIds, ...rest } = room;
+  // gmId/gmClientId/gmUserId: see sanitizeRoomForGM's comment - gmClientId
+  // especially must never reach a player socket, since reconnectToRoom
+  // trusts a client-supplied clientId matching it to grant full GM control.
+  // pendingRejoinRequests is a GM-only moderation queue (approve/deny another
+  // player's rejoin) - never read by PlayerScreen.jsx, and would otherwise
+  // hand every player in the room a live feed of who else is trying to
+  // reconnect and their internal ids.
+  const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, pendingRejoinRequests, ...rest } = room;
   return {
     ...rest,
-    players: room.players.map(({ socketId, ...r }) => r),
-    coGms: room.coGms.map(({ socketId, ...r }) => r),
+    players: room.players.map(({ socketId, sessionSecret, ...r }) => r),
+    coGms: room.coGms.map(({ socketId, sessionSecret, ...r }) => r),
     couples,
     killClaims: pickOwn(room.killClaims),
     victimReports: pickOwn(room.victimReports),
     votes: pickOwn(room.votes),
     pendingVictimIds: [], // GM's in-progress kill marking is not public until revealKill
   };
+}
+
+// Same winner predicate as GameStore's own checkEndCondition() below, but
+// reusable after the room has already flipped to 'ended' (checkEndCondition
+// itself mutates room.status as a side effect, so it can't just be called
+// again). Shared by server/stats.js (win/loss participation records) and
+// server/achievements.js (the 'first_win' achievement) so both agree on
+// what "killers won" means.
+export function didKillersWin(room) {
+  const aliveCouples = room.couples.filter(c => c.status === 'alive');
+  const killersAlive = aliveCouples.some(c => c.role === 'killer');
+  if (!killersAlive) return false;
+  const aliveKillers = aliveCouples.filter(c => c.role === 'killer').length;
+  const aliveDancers = aliveCouples.length - aliveKillers;
+  return aliveKillers >= aliveDancers;
 }
 
 class GameStore {
@@ -92,13 +128,21 @@ class GameStore {
       id: code,
       gmId: socketId,
       gmClientId, // persistent device id of the room's creator - lets reconnectToRoom verify a claimed GM reconnect actually belongs to them
+      // Real bearer credential for the primary-GM reconnect check, checked
+      // alongside gmClientId - unlike gmClientId (which handoverGM openly
+      // reassigns to a promoted co-GM's already-public id), this is always a
+      // freshly minted, never-broadcast value, so knowing a co-GM's id alone
+      // is never enough to reconnect as the primary GM after a handover. See
+      // reconnectToRoom (server/index.js) and handoverGM below.
+      gmSessionSecret: randomUUID(),
       gmUserId: userId, // logged-in account of the main GM, for gm_sessions stats - null if anonymous
-      status: 'lobby', // lobby, paired, role_reveal, dancing, silent_report (silent kill mode only), kill_reveal, discussion, voting, ended
+      status: 'lobby', // lobby, paired, role_reveal, dancing, silent_report (silent kill mode only), kill_reveal, voting, vote_reveal, ended
       round: 0,
       players: [], // { id, socketId, name, danceRole: 'lead'|'follow'|'spectator', isConfirmed: false }
       couples: [], // { id, name, playerIds: [], role: 'dancer'|'killer', status: 'alive' }
       votingRole: 'random', // 'lead', 'follow', or 'random' (default) - see assignVotingPlayers
       votes: {}, // { voterId: suspectCoupleId }
+      voteResult: null, // { votedOutCoupleId: string|null } | null - set by executeVote on entering 'vote_reveal', cleared by proceedFromVoteReveal
       victimIds: [], // couple ids eliminated this round (one kill per killer couple)
       pendingVictimIds: [], // secretly marked before reveal
       pendingRejoinRequests: [], // { id, playerName, targetPlayerId, requestingClientId, requestingSocketId }
@@ -115,6 +159,8 @@ class GameStore {
       roundHistory: [], // one entry per concluded round (see pushRoundRecord below) - the only place round-by-round detail survives past the live in-memory room, until recordGameConclusion persists it
       useSpotify: null, // null (not chosen yet) | true | false - mirrors the GM's lobby "Own Audio System"/"Use Spotify" choice (GMDashboard.jsx's local useSpotify state) so players can tell whether Spotify-track suggestions are actually usable this game (see setUseSpotify).
       spotifyDelegate: null, // { userId, playerId, name } | null - a player's account-linked Spotify connection, temporarily lent to the room for playback (see setSpotifyDelegate/clearSpotifyDelegate)
+      gmSpotifyConnected: false, // mirrors whether the GM has their OWN (non-delegated) Spotify connection ready - see setGmSpotifyConnected. Lets players tell a share would be redundant before even asking.
+      pendingSpotifyShareRequest: null, // { playerId, userId, name } | null - a player's offer to lend their Spotify, awaiting the GM's explicit accept/deny (see requestSpotifyShare/resolveSpotifyShareRequest)
       // Site-owner-only, one-shot manipulation set live from the hidden
       // /admin screen (server/admin.js) - re-set by hand before every round,
       // never persisted, and stripped out in sanitizeRoomForGM/ForPlayer
@@ -150,6 +196,18 @@ class GameStore {
       hasViewedRole: false,
       hasNoPhone: false,
       userId: userId, // logged-in account, for game_participations stats - null if anonymous
+      // Server-generated, unguessable - proves a reconnectToRoom/joinRoom
+      // call claiming this clientId is really this player's own session, not
+      // just someone who saw the id (every player's own id is visible to
+      // everyone else in the room, e.g. for couples/kick-target references -
+      // see index.js's joinRoom/reconnectToRoom, which reads this back off
+      // the returned room to send in the join callback). Never included in
+      // sanitizeRoomForGM/ForPlayer. Players added before this existed have
+      // null here - reconnect falls back to id-only for those (see
+      // index.js), so an in-progress game isn't forced to kick everyone the
+      // moment this ships; they're upgraded to a real secret the next time
+      // they successfully reconnect.
+      sessionSecret: randomUUID(),
     };
 
     room.players.push(newPlayer);
@@ -195,6 +253,7 @@ class GameStore {
   // longer around to revoke it themselves or notice it's still active.
   clearSpotifyDelegateIfPlayer(room, playerId) {
     if (room.spotifyDelegate?.playerId === playerId) room.spotifyDelegate = null;
+    if (room.pendingSpotifyShareRequest?.playerId === playerId) room.pendingSpotifyShareRequest = null;
   }
 
   removePlayer(roomId, clientId) {
@@ -284,7 +343,13 @@ class GameStore {
     if (!player) return null;
     if (player.hasNoPhone) return null; // Can't hand GM control to someone without a device
 
-    const playerSnapshot = { id: player.id, socketId: player.socketId, name: player.name, userId: player.userId || null };
+    // Carries over the player's own sessionSecret (see addPlayer's comment)
+    // rather than issuing a new one - a co-GM's id is just as visible to
+    // everyone else in the room as a player's is (needed for chat/UI
+    // references), so reconnecting as a co-GM needs the same proof-of-
+    // session check as reconnecting as a player (see index.js's
+    // reconnectToRoom's isCoGm branch).
+    const playerSnapshot = { id: player.id, socketId: player.socketId, name: player.name, userId: player.userId || null, sessionSecret: player.sessionSecret || randomUUID() };
 
     const couple = room.couples.find(c => c.playerIds.includes(playerId));
     let removedPartners = [];
@@ -299,12 +364,83 @@ class GameStore {
     return { room, newGM: playerSnapshot, removedPartners };
   }
 
+  // Used only when a co-GM's own connection is actually leaving the room
+  // (see index.js's leaveRoom) - fully removes their GM seat with no way
+  // back except a fresh promotion. Revoking GM rights while they're still
+  // around uses demoteCoGMToPlayer below instead, which keeps them in the
+  // game as a regular player.
   removeCoGM(roomId, gmId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     const removedGM = room.coGms.find(g => g.id === gmId) || null;
     room.coGms = room.coGms.filter(g => g.id !== gmId);
     return { room, removedGM };
+  }
+
+  // Revoking GM rights (by the main GM, or a co-GM stepping down themselves -
+  // see index.js's removeCoGM handler) - unlike removeCoGM above, they stay
+  // in the room as a fresh, unpaired player (spectator by default) rather
+  // than being kicked out entirely, since "demoted to player" is the whole
+  // point of this action.
+  demoteCoGMToPlayer(roomId, gmId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const idx = room.coGms.findIndex(g => g.id === gmId);
+    if (idx === -1) return null;
+    const [demoted] = room.coGms.splice(idx, 1);
+
+    const demotedPlayer = {
+      id: demoted.id,
+      socketId: demoted.socketId,
+      name: demoted.name,
+      danceRole: 'spectator',
+      originalDanceRole: 'spectator',
+      isFlexible: false,
+      isConfirmed: false,
+      hasViewedRole: false,
+      hasNoPhone: false,
+      userId: demoted.userId || null,
+      sessionSecret: demoted.sessionSecret || randomUUID(), // see addPlayer's comment on this field
+    };
+    room.players.push(demotedPlayer);
+    return { room, demotedPlayer };
+  }
+
+  // Main-GM-only (verified by socket.id in index.js, not just any GM) - the
+  // current main GM steps down in favor of an existing co-GM, who becomes the
+  // new main GM; the outgoing main GM becomes a co-GM themselves rather than
+  // losing GM status entirely. outgoingName is the display name the outgoing
+  // main GM will show as in the co-GM list from now on - the main GM has no
+  // stored name of their own anywhere else (see gm.mainGmName's generic
+  // client-side label), so the client supplies one (their account's display
+  // name, or a generic fallback) at the moment of handover.
+  handoverGM(roomId, targetCoGmId, outgoingName) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    const idx = room.coGms.findIndex(g => g.id === targetCoGmId);
+    if (idx === -1) return null;
+    const [newMainGm] = room.coGms.splice(idx, 1);
+
+    const oldMainGm = { id: room.gmClientId, socketId: room.gmId, name: outgoingName, userId: room.gmUserId, sessionSecret: randomUUID() };
+
+    room.gmId = newMainGm.socketId;
+    room.gmClientId = newMainGm.id;
+    room.gmUserId = newMainGm.userId || null;
+    // newMainGm.id (their old co-GM id) is not a secret - it's been visible
+    // to every socket in the room in every roomUpdated broadcast the whole
+    // time they were a co-GM (see sanitizeRoomForGM/ForPlayer, which only
+    // ever strip socketId/sessionSecret from coGms entries, not id). Without
+    // rotating gmSessionSecret here too, room.gmClientId alone would become
+    // a publicly-known value the instant this handover completes, and
+    // reconnectToRoom's isPrimaryGm check would accept it from literally
+    // anyone who'd been watching the room - a full, silent GM takeover. This
+    // mints a fresh one and hands it only to the new GM's own socket, same
+    // as oldMainGm.sessionSecret just above for the outgoing GM's new co-GM
+    // seat.
+    room.gmSessionSecret = randomUUID();
+    room.coGms.push(oldMainGm);
+
+    return { room, newMainGm, newMainGmSessionSecret: room.gmSessionSecret, oldMainGm };
   }
 
   addGMChatMessage(roomId, senderName, text) {
@@ -326,7 +462,7 @@ class GameStore {
     return this.gmChats.get(roomId) || [];
   }
 
-  requestRejoin(roomId, playerName, requestingClientId, requestingSocketId) {
+  requestRejoin(roomId, playerName, requestingClientId, requestingSocketId, sessionSecret) {
     const room = this.rooms.get(roomId);
     // Error values are locale keys resolved by the client ('server.<key>').
     if (!room) return { error: 'roomNotFound' };
@@ -335,9 +471,16 @@ class GameStore {
     if (!targetPlayer) return { error: 'rejoinPlayerNotFound' };
 
     if (targetPlayer.id === requestingClientId) {
-      // Same device/session reconnecting - no GM approval needed.
+      // Same device/session reconnecting - no GM approval needed. Same
+      // sessionSecret proof as joinRoom/reconnectToRoom's own id-match
+      // branches (see addPlayer's comment) - this id is just as visible to
+      // everyone else in the room as any other player's.
+      if (targetPlayer.sessionSecret && targetPlayer.sessionSecret !== sessionSecret) {
+        return { error: 'sessionInvalid' };
+      }
+      if (!targetPlayer.sessionSecret) targetPlayer.sessionSecret = randomUUID();
       targetPlayer.socketId = requestingSocketId;
-      return { room, autoReconnected: true };
+      return { room, autoReconnected: true, sessionSecret: targetPlayer.sessionSecret };
     }
 
     // Replace any older pending request targeting the same player.
@@ -378,13 +521,18 @@ class GameStore {
     // silently reclaim this seat again - it would need a fresh, GM-approved rejoin.
     targetPlayer.id = newPlayerId;
     targetPlayer.socketId = request.requestingSocketId;
+    // A fresh secret too (see addPlayer's comment on this field) - the old
+    // device never knew this one anyway (it's never sent to a rejected/
+    // superseded session), and issuing a new one here means the old device
+    // couldn't reconnect as this player even if it somehow still had it cached.
+    targetPlayer.sessionSecret = randomUUID();
 
     room.couples.forEach(c => {
       c.playerIds = c.playerIds.map(id => id === oldPlayerId ? newPlayerId : id);
       if (c.votingPlayerId === oldPlayerId) c.votingPlayerId = newPlayerId;
     });
 
-    return { room, request, accepted: true, oldSocketId, newPlayerId };
+    return { room, request, accepted: true, oldSocketId, newPlayerId, sessionSecret: targetPlayer.sessionSecret };
   }
 
   // Players can suggest a song any time. Two shapes: a real Spotify track
@@ -659,16 +807,42 @@ class GameStore {
     return room;
   }
 
-  // A player with their own account-linked Spotify connection (server/
-  // spotify.js's spotify_accounts, made once from the Playlists page) lends
-  // it to the room for playback - e.g. the GM has no Spotify Premium/account
-  // connected but a player does. index.js verifies the connection is
-  // actually live (getValidAccessToken) before calling this; only one
-  // delegate can be active at a time, granting again just replaces it.
-  setSpotifyDelegate(roomId, playerId, userId, name) {
+  // Mirrors whether the GM's own browser currently has a working, non-
+  // delegated Spotify connection (GMDashboard.jsx reports this whenever it
+  // changes) - lets players tell a share offer would be redundant (or that
+  // one is even allowed) without having to try it first.
+  setGmSpotifyConnected(roomId, connected) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
-    room.spotifyDelegate = { userId, playerId, name };
+    room.gmSpotifyConnected = !!connected;
+    return room;
+  }
+
+  // A player with their own account-linked Spotify connection (server/
+  // spotify.js's spotify_accounts, made once from the Playlists page) offers
+  // to lend it to the room for playback - e.g. the GM has no Spotify
+  // Premium/account connected but a player does. index.js verifies the
+  // connection is actually live (getValidAccessToken) before calling this.
+  // Doesn't take effect on its own - only records the offer for the GM to
+  // explicitly accept/deny (see resolveSpotifyShareRequest); only one offer
+  // can be pending at a time, a second request from a different player is
+  // rejected by the caller while one is already pending or already active.
+  requestSpotifyShare(roomId, playerId, userId, name) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    room.pendingSpotifyShareRequest = { playerId, userId, name };
+    return room;
+  }
+
+  // GM-only decision on a pending offer (see requestSpotifyShare). Accepting
+  // commits it the same way the old direct-grant flow used to; denying just
+  // clears the offer without ever touching room.spotifyDelegate.
+  resolveSpotifyShareRequest(roomId, accept) {
+    const room = this.rooms.get(roomId);
+    if (!room || !room.pendingSpotifyShareRequest) return null;
+    const { playerId, userId, name } = room.pendingSpotifyShareRequest;
+    room.pendingSpotifyShareRequest = null;
+    if (accept) room.spotifyDelegate = { userId, playerId, name };
     return room;
   }
 
@@ -844,6 +1018,10 @@ class GameStore {
   startGame(roomId, killerCount = 1, killMode = 'classic') {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // Only reachable from 'paired' in the UI (GMDashboard's killer-count/mode
+    // stepper only renders there) - guarded here too so a stale co-GM tab or a
+    // race between two GMs can't re-trigger role assignment mid-round.
+    if (room.status !== 'paired') return null;
 
     room.couples.forEach(c => {
       c.status = 'alive';
@@ -861,9 +1039,17 @@ class GameStore {
     const activeCouples = room.couples;
 
     if (activeCouples.length > 0) {
-      // Always leave at least one dancer couple, even if the client-side cap is bypassed.
-      const maxKillers = Math.max(1, activeCouples.length - 1);
-      const killersToAssign = Math.min(killerCount, maxKillers);
+      // Hard rule: killers must stay a strict minority of individual
+      // *players*, not just couples - a couple can be 2 or 3 people (see the
+      // odd-excess trio handling in the pairing flow), so capping by
+      // couple-count alone could let a majority of people end up killers if
+      // the couples chosen as killers happen to be the larger ones. "< half"
+      // (not "<= half"), so ceil(total/2) itself is never allowed either.
+      const totalPlayers = activeCouples.reduce((sum, c) => sum + c.playerIds.length, 0);
+      const maxKillerPlayers = Math.ceil(totalPlayers / 2) - 1;
+      let killerPlayerCount = 0;
+      const canAssign = (couple) => killerPlayerCount + couple.playerIds.length <= maxKillerPlayers;
+      const assign = (couple) => { couple.role = 'killer'; killerPlayerCount += couple.playerIds.length; };
 
       // Site-owner override (room.killerOverridePlayerIds, set live from
       // /admin during this room's paired phase): whichever couple contains
@@ -871,23 +1057,29 @@ class GameStore {
       // before any remaining slots are filled by the normal random draw
       // below - invisible to the GM either way, who only ever sees who the
       // final killer(s) turned out to be. Killer selection has no manual GM
-      // path to respect (always this random draw), unlike pairing.
+      // path to respect (always this random draw), unlike pairing. An
+      // override that would break the half-player rule is skipped rather
+      // than honored - the rule has no manual bypass.
       const forcedCoupleIds = new Set();
       for (const playerId of room.killerOverridePlayerIds) {
-        if (forcedCoupleIds.size >= killersToAssign) break;
+        if (forcedCoupleIds.size >= killerCount) break;
         const couple = activeCouples.find(c => c.playerIds.includes(playerId));
-        if (couple) forcedCoupleIds.add(couple.id);
+        if (!couple || forcedCoupleIds.has(couple.id) || !canAssign(couple)) continue;
+        forcedCoupleIds.add(couple.id);
+        assign(couple);
       }
-      forcedCoupleIds.forEach(id => {
-        activeCouples.find(c => c.id === id).role = 'killer';
-      });
 
-      const remainingSlots = killersToAssign - forcedCoupleIds.size;
+      const remainingSlots = killerCount - forcedCoupleIds.size;
       if (remainingSlots > 0) {
         const remainingCouples = activeCouples.filter(c => !forcedCoupleIds.has(c.id));
         const shuffledIndices = Array.from({length: remainingCouples.length}, (_, i) => i).sort(() => 0.5 - Math.random());
-        for (let i = 0; i < remainingSlots; i++) {
-          remainingCouples[shuffledIndices[i]].role = 'killer';
+        let assigned = 0;
+        for (const idx of shuffledIndices) {
+          if (assigned >= remainingSlots) break;
+          const couple = remainingCouples[idx];
+          if (!canAssign(couple)) continue; // would push killers to/past half the players - skip, try the next shuffled candidate
+          assign(couple);
+          assigned++;
         }
       }
     }
@@ -943,6 +1135,11 @@ class GameStore {
   startDancing(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // Reachable from 'role_reveal' (first dancing phase of the round) or
+    // 'kill_reveal'/'voting' (the round-increment branch just below exists
+    // for those) - anything else (lobby, paired, dancing itself,
+    // silent_report, ended) is a stale/out-of-order call.
+    if (!['role_reveal', 'kill_reveal', 'voting'].includes(room.status)) return null;
 
     if (room.status === 'kill_reveal' || room.status === 'voting') {
       room.round += 1;
@@ -954,6 +1151,13 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    // The previous round's track (if any) is over the moment this round
+    // starts - only playQueueEntry should ever put something here again. Left
+    // unset, a round started with nothing queued (the GM proceeded past the
+    // song-ready lock with no track to hand off) would keep showing the
+    // *previous* round's song as "currently playing" - stale display data,
+    // not stale audio, but indistinguishable from the real thing on screen.
+    room.nowPlaying = null;
     return room;
   }
 
@@ -978,6 +1182,10 @@ class GameStore {
   reportKill(roomId, victimCoupleId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // GM's manual kill-marking UI only renders during 'dancing' (classic mode)
+    // or 'silent_report' (GM override for a phoneless couple) - see
+    // GMDashboard.jsx's handleReportKill call sites.
+    if (room.status !== 'dancing' && room.status !== 'silent_report') return null;
 
     if (victimCoupleId === null) {
       // Explicit "nobody killed" - clear all pending marks for this round.
@@ -1085,6 +1293,10 @@ class GameStore {
   revealKill(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // Only reachable from 'dancing' (classic mode) or 'silent_report' (silent
+    // mode, after resolveSilentReports) - see GMDashboard.jsx's
+    // handleRevealKill call sites.
+    if (room.status !== 'dancing' && room.status !== 'silent_report') return null;
 
     room.victimIds = [...room.pendingVictimIds];
 
@@ -1103,17 +1315,10 @@ class GameStore {
     return room;
   }
 
-  startDiscussion(roomId) {
-    const room = this.rooms.get(roomId);
-    if (!room) return null;
-
-    room.status = 'discussion';
-    return room;
-  }
-
   proceedToVoting(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    if (room.status !== 'kill_reveal') return null;
 
     room.status = 'voting';
     room.votes = {};
@@ -1140,9 +1345,15 @@ class GameStore {
     if (!room) return null;
     if (room.status !== 'voting') return null;
 
-    // Map voterClientId to their couple ID
+    // Map voterClientId to their couple ID. Must still be alive - a couple
+    // eliminated during this round's kill phase (before voting even started)
+    // has no say in who gets voted out. The client already hides the voting
+    // UI once eliminated (see PlayerScreen.jsx's isEliminated screen), but
+    // that's not enforced here otherwise - unlike submitKillClaim/
+    // submitVictimReport just above, which already both require
+    // couple.status === 'alive'.
     const voterCouple = room.couples.find(c => c.playerIds.includes(voterClientId));
-    if (voterCouple) {
+    if (voterCouple && voterCouple.status === 'alive') {
        // Store vote by couple ID so it's 1 vote per couple
        room.votes[voterCouple.id] = suspectCoupleId;
     }
@@ -1165,6 +1376,14 @@ class GameStore {
   executeVote(roomId, suspectCoupleId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // Reachable from 'voting' (normal execute) or 'kill_reveal' (GM's "skip
+    // to next round" shortcut, handleSkipToNextRound -> handleExecuteVote(null))
+    // - see GMDashboard.jsx. The two behave differently below: a real vote
+    // has a result worth announcing (see 'vote_reveal' branch), the shortcut
+    // never went through voting at all, so there's nothing to reveal.
+    if (room.status !== 'voting' && room.status !== 'kill_reveal') return null;
+
+    const wasVoting = room.status === 'voting';
 
     if (suspectCoupleId) {
       const couple = room.couples.find(c => c.id === suspectCoupleId);
@@ -1177,23 +1396,69 @@ class GameStore {
     // completed (reached a vote), unlike the abort case in endGame().
     this.pushRoundRecord(room, { votedOutCoupleId: suspectCoupleId || null, completed: true });
 
-    if (!gameEnded) {
-      room.status = 'dancing';
-      room.round += 1;
-      room.victimIds = [];
-      room.pendingVictimIds = [];
-      room.votes = {};
-      room.killClaims = {};
-      room.victimReports = {};
-      room.silentReportsResolved = false;
+    if (gameEnded) return room; // checkEndCondition already set room.status = 'ended'
+
+    if (wasVoting) {
+      // Publish the result and stop here instead of jumping straight into
+      // the next round unannounced - proceedFromVoteReveal (triggered by the
+      // GM from this new phase) does the actual round-advance below, once
+      // they've acknowledged who got voted out and (if needed) picked a song.
+      room.status = 'vote_reveal';
+      room.voteResult = { votedOutCoupleId: suspectCoupleId || null };
+      return room;
     }
 
+    // room.status was 'kill_reveal' (the skip-voting shortcut) - never had a
+    // vote to reveal, so advance straight into the next round exactly as before.
+    room.status = 'dancing';
+    room.round += 1;
+    room.victimIds = [];
+    room.pendingVictimIds = [];
+    room.votes = {};
+    room.killClaims = {};
+    room.victimReports = {};
+    room.silentReportsResolved = false;
+    room.nowPlaying = null;
+
+    return room;
+  }
+
+  // Advances from the vote-reveal phase (see executeVote's 'voting' branch
+  // above) into the next round - the same round-advance executeVote used to
+  // do immediately, now deferred until the GM has acknowledged the reveal
+  // and (if the song-ready lock applies) picked a song via the same
+  // popup/bypass flow as everywhere else this lock is enforced.
+  proceedFromVoteReveal(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'vote_reveal') return null;
+
+    room.status = 'dancing';
+    room.round += 1;
+    room.victimIds = [];
+    room.pendingVictimIds = [];
+    room.votes = {};
+    room.killClaims = {};
+    room.victimReports = {};
+    room.silentReportsResolved = false;
+    room.voteResult = null;
+    // See the identical comment in startDancing() above - same stale-display
+    // bug, reachable here when nothing was queued for the new round.
+    room.nowPlaying = null;
     return room;
   }
 
   endGame(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // Nothing to abort from 'lobby' (no game running - would otherwise create
+    // a bogus games/game_couples row via recordGameConclusion), and re-running
+    // this on an already-'ended' room would overwrite a natural conclusion's
+    // endReason with 'aborted', flipping every player's victory screen to the
+    // generic "game aborted" message even though it already legitimately
+    // ended (the GM's "End Game Now" menu item stays visible after a natural
+    // end too, so this is genuinely reachable, not just a theoretical race).
+    if (room.status === 'lobby' || room.status === 'ended') return null;
 
     // A round already archived by revealKill/executeVote (game aborted right
     // after a normal conclusion, or endGame called again on an already-ended
@@ -1233,6 +1498,7 @@ class GameStore {
     room.status = 'lobby';
     room.round = 0;
     room.votes = {};
+    room.voteResult = null;
     room.victimIds = [];
     room.pendingVictimIds = [];
     room.killClaims = {};
@@ -1244,6 +1510,14 @@ class GameStore {
     room.startedAt = null;
     room.roundHistory = [];
     room.spotifyDelegate = null; // a new game should re-ask for consent rather than silently keep using a previous grant
+    room.pendingSpotifyShareRequest = null;
+    // Unlike songQueue (deliberately left alone - see its declaration comment
+    // above, a GM re-running games in the same room shouldn't lose their
+    // curated upcoming picks), nowPlaying represents "what's actively
+    // playing this instant" - there's no active round anymore once reset to
+    // lobby, so leaving the previous game's last track sitting here would
+    // just be stale data with nothing left to describe.
+    room.nowPlaying = null;
     room.couples = []; // Reset couples completely for a new pairing
     room.players.forEach(p => {
       p.isConfirmed = false;
