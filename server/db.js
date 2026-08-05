@@ -34,6 +34,11 @@ async function migrate(activePool) {
   // from a since-changed account is harmless: it just never matches anyone's
   // own "how many people I invited" count.
   await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_user_id INT NULL`);
+  // Account-wide default: when set, a player with their own linked Spotify
+  // connection automatically requests to share it into any room they join as
+  // a player (still subject to the GM's explicit accept - see
+  // gameStore.requestSpotifyShare) instead of doing it by hand every room.
+  await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_share_spotify TINYINT(1) NOT NULL DEFAULT 0`);
   // Grants access to the hidden in-game admin menu item (see server/admin.js,
   // client/src/components/GMDashboard.jsx's kebab menu) - never set through
   // any UI, deliberately: the site owner inserts a row for their own account
@@ -109,6 +114,14 @@ async function migrate(activePool) {
   // playlists (no Spotify link) are unaffected.
   await activePool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS spotify_playlist_id VARCHAR(255) NULL`);
   await activePool.query(`ALTER TABLE playlists ADD UNIQUE INDEX IF NOT EXISTS idx_user_spotify_playlist (user_id, spotify_playlist_id)`);
+  // Spotify bumps a playlist's snapshot_id on every edit (add/remove/reorder).
+  // server/playlists.js's pullTracksFromSpotify compares the last snapshot_id
+  // seen here against a single cheap lookup before deciding whether a full
+  // (possibly multi-page) re-fetch of every track is actually necessary -
+  // this is what lets the 8s on-read throttle and the 3-minute background
+  // sync loop poll every linked playlist without burning a full paginated
+  // fetch each time nothing actually changed, which is the common case.
+  await activePool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS spotify_snapshot_id VARCHAR(255) NULL`);
   await activePool.query(`
     CREATE TABLE IF NOT EXISTS playlist_tracks (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -248,6 +261,38 @@ async function migrate(activePool) {
       FOREIGN KEY (suspect_couple_id) REFERENCES game_couples(id) ON DELETE SET NULL
     )
   `);
+  // Feedback used to be appended to a flat server/data/feedback.txt file with
+  // no way to review it in the app - now stored so a developer account (see
+  // requireSuperAdmin, same admin_users gate as the pairing/killer override
+  // tool) can browse/triage it from the hidden Dev Dashboard. user_id is only
+  // ever set if the submitter happened to be logged in - the public feedback
+  // form (client/src/components/Feedback.jsx) works with no account too.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NULL,
+      name VARCHAR(100) NULL,
+      message TEXT NOT NULL,
+      is_read TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    )
+  `);
+  // Single-row table (id is always 1) of small tunable numbers a developer
+  // can adjust live from the Dev Dashboard instead of needing a code
+  // change/redeploy - currently just the killer-count suggestion's divisor
+  // (suggested killers = round(totalPlayers / killer_ratio_divisor), see
+  // gameStore.startGame and GMDashboard.jsx). Whether the dev has ever opened
+  // the dashboard or not, the row must already exist so the public
+  // /api/dev-settings/killer-ratio read (every GM's dashboard depends on it)
+  // never has to special-case a missing row.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS dev_settings (
+      id INT PRIMARY KEY,
+      killer_ratio_divisor INT NOT NULL DEFAULT 8
+    )
+  `);
+  await activePool.query(`INSERT IGNORE INTO dev_settings (id, killer_ratio_divisor) VALUES (1, 8)`);
   await activePool.query(`
     CREATE TABLE IF NOT EXISTS game_played_songs (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -261,7 +306,37 @@ async function migrate(activePool) {
       FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
     )
   `);
-
+  // Dev-curated fallback tracks (see server/index.js's GET /api/fallback-
+  // songs/random) - offered to a GM who bypasses the "song ready" lock
+  // (client/src/components/GMDashboard.jsx's bypassSongReady) with no track
+  // selected at all, so the room still gets real music instead of silence.
+  // Managed from the hidden Dev Dashboard, same admin_users gate as the rest
+  // of it - not per-GM configurable, this is a shared house playlist.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS fallback_songs (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      track_uri VARCHAR(255) NOT NULL UNIQUE,
+      track_name VARCHAR(255) NOT NULL,
+      artist_name VARCHAR(255) NOT NULL,
+      added_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  // Lifetime per-account achievement counters (see server/achievements.js) -
+  // one row per (user, achievement type) ever earned, bumped by exactly 1
+  // per concluded game that earned it. count alone derives the bronze/silver/
+  // gold tier (10/50/100) client-side, so there's no separate tier column to
+  // keep in sync.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS achievement_progress (
+      user_id INT NOT NULL,
+      achievement_key VARCHAR(50) NOT NULL,
+      count INT NOT NULL DEFAULT 0,
+      first_earned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_earned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (user_id, achievement_key),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+  `);
 }
 
 // Lazily creates the pool and runs migrations at most once. Safe to call
