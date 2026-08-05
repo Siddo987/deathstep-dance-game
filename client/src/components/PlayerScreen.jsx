@@ -1,14 +1,10 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
-import { X, Music2, Skull, Sparkles, MessageCircle, Timer, Smartphone, Search, Send, Plus, Share2, Link2 } from 'lucide-react';
+import { X, Music2, Skull, Sparkles, Timer, Smartphone, Search, Send, Plus, Share2, Link2, HelpCircle } from 'lucide-react';
 
-import { ConfirmModal } from './Modal.jsx';
+import { ConfirmModal, HowToPlayModal } from './Modal.jsx';
 import { useLanguage } from '../i18n.jsx';
-import {
-  loginWithSpotify, loginWithSpotifyForAccountLink, getBestAvailableToken, SPOTIFY_SESSION_EXPIRED_EVENT,
-  fetchMySpotifyPlaylists, fetchSpotifyPlaylistTracks,
-} from '../spotify.js';
 import { fetchMyPlaylists, fetchPlaylist, createPlaylist, addTrackToPlaylist, searchTracksInRoom, fetchSpotifyStatus } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import AdminOverridesModal from './AdminOverridesModal.jsx';
@@ -25,17 +21,17 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   const [showRole, setShowRole] = useState(false);
   const [confirmState, setConfirmState] = useState(null);
   const [showAdminModal, setShowAdminModal] = useState(false);
+  const [showHowTo, setShowHowTo] = useState(false);
   const [votingTimeLeft, setVotingTimeLeft] = useState(0);
 
   // Song suggestions - three ways to suggest, gated by what the player has
-  // connected: plain text always works (no Spotify needed); a player's own
-  // device can also connect to Spotify the same way the GM does
-  // (client/src/spotify.js, local PKCE flow, no Deathstep account needed) to
-  // search real tracks; and a logged-in Deathstep account with imported
-  // playlists (server/playlists.js) can pick a track from one of those. Each
-  // is independent of the GM's own Spotify session/account.
+  // connected: plain text always works (no Spotify needed); a real Spotify
+  // track can be searched too, run through whichever GM/co-GM has a working
+  // connection (searchTracksInRoom - needs no connection of the player's
+  // own); and a logged-in Deathstep account with saved playlists (server/
+  // playlists.js - a link can be saved with no Spotify connection at all, see
+  // Playlists.jsx's import-by-link) can pick a track from one of those.
   const [showSongSuggest, setShowSongSuggest] = useState(false);
-  const [spotifySuggestToken, setSpotifySuggestToken] = useState(null);
   const [suggestMode, setSuggestMode] = useState('text'); // 'text' | 'spotify' | 'playlist'
   const [suggestText, setSuggestText] = useState('');
   const [suggestQuery, setSuggestQuery] = useState('');
@@ -68,11 +64,20 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   }, [currentUser?.id]);
 
   const isMySpotifyDelegate = room.spotifyDelegate?.playerId === clientId;
+  const isMyShareRequestPending = room.pendingSpotifyShareRequest?.playerId === clientId;
+  // A share only makes sense while nobody else already has one active/pending
+  // and the GM doesn't already have a working connection of their own -
+  // matches the authoritative check in server/index.js's
+  // requestSpotifyShareToRoom, so the entry point never invites a request
+  // that's just going to be refused.
+  const spotifyShareOffPossible = !room.gmSpotifyConnected
+    && (!room.spotifyDelegate || isMySpotifyDelegate)
+    && (!room.pendingSpotifyShareRequest || isMyShareRequestPending);
 
-  const handleGrantSpotify = () => {
+  const handleRequestSpotifyShare = () => {
     setSpotifyShareBusy(true);
     setSpotifyShareError('');
-    socket.emit('grantSpotifyToRoom', { roomId: room.id, clientId }, (response) => {
+    socket.emit('requestSpotifyShareToRoom', { roomId: room.id }, (response) => {
       setSpotifyShareBusy(false);
       if (!response?.success) setSpotifyShareError(`server.${response?.messageKey || 'spotifyNotConnected'}`);
     });
@@ -80,61 +85,42 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
   const handleRevokeSpotify = () => {
     setSpotifyShareBusy(true);
-    socket.emit('revokeSpotifyFromRoom', { roomId: room.id, clientId }, () => {
+    socket.emit('revokeSpotifyFromRoom', { roomId: room.id }, () => {
       setSpotifyShareBusy(false);
     });
   };
 
-  // Prefers this account's Deathstep-linked Spotify connection (works
-  // immediately, on any device, once logged into Deathstep) over a fresh
-  // local per-browser connect - see spotify.js's getBestAvailableToken.
+  // Account-wide "always offer my Spotify" setting (Settings.jsx) - fires the
+  // exact same request a manual click would, still subject to the GM's
+  // explicit accept, just so it doesn't have to be redone by hand every room.
+  // Guarded by a ref (not state) so it only ever fires once per room per
+  // mount, regardless of how many times the room broadcasts in the meantime.
+  const autoShareTriedRef = React.useRef(false);
   React.useEffect(() => {
-    if (!spotifySuggestionsAllowed) return;
-    getBestAvailableToken().then(token => { if (token) setSpotifySuggestToken(token); });
-  }, [spotifySuggestionsAllowed, currentUser?.id]);
+    if (autoShareTriedRef.current) return;
+    if (!currentUser?.autoShareSpotify || !mySpotifyLinked) return;
+    if (!spotifyShareOffPossible || isMySpotifyDelegate || isMyShareRequestPending) return;
+    autoShareTriedRef.current = true;
+    handleRequestSpotifyShare();
+  }, [currentUser?.autoShareSpotify, mySpotifyLinked, spotifyShareOffPossible, isMySpotifyDelegate, isMyShareRequestPending]);
 
-  // client/src/spotify.js dispatches this the moment a token refresh
-  // definitively fails (the stored refresh token is dead) - fall back to
-  // text-only suggestions and say why, instead of the Spotify/playlist tabs
-  // just silently disappearing next render.
+  // Only a logged-in Deathstep account's own DB-backed playlists (server/
+  // playlists.js) show up here - a live-browsed "whatever's on your actual
+  // Spotify account" list used to be mixed in too (source: 'local'), but
+  // during a game that's redundant with the DB-backed Playlists page (which
+  // can now hold any playlist via a pasted link, no Spotify connection
+  // needed - see Playlists.jsx's import-by-link) and was confusing to see
+  // change on every fetch, so in-game pickers only ever show playlists the
+  // player actually saved.
   React.useEffect(() => {
-    const handleExpired = () => {
-      setSpotifySuggestToken(null);
-      setSuggestMode('text');
-      setSuggestErrorKey('spotify.sessionExpired');
-    };
-    window.addEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
-    return () => window.removeEventListener(SPOTIFY_SESSION_EXPIRED_EVENT, handleExpired);
-  }, []);
-
-  // Two independent sources, same as GMDashboard.jsx's gmPlaylists: a
-  // logged-in Deathstep account's DB-backed playlists (source: 'account'),
-  // and, with no account needed at all, whatever's already on the
-  // connected Spotify account itself (source: 'local', read-only, fetched
-  // fresh from Spotify - nothing imported or stored).
-  React.useEffect(() => {
+    if (!currentUser) { setPlayerPlaylists([]); return; }
     let cancelled = false;
     (async () => {
-      const lists = [];
-      if (currentUser) {
-        const result = await fetchMyPlaylists();
-        if (!result.error) lists.push(...result.playlists.map(p => ({ ...p, source: 'account' })));
-      }
-      if (spotifySuggestToken) {
-        try {
-          const local = await fetchMySpotifyPlaylists();
-          lists.push(...local.map(p => ({ ...p, source: 'local' })));
-        } catch (e) { /* local Spotify playlists just won't show this time - not fatal */ }
-      }
-      if (!cancelled) setPlayerPlaylists(lists);
+      const result = await fetchMyPlaylists();
+      if (!cancelled && !result.error) setPlayerPlaylists(result.playlists);
     })();
     return () => { cancelled = true; };
-  }, [currentUser?.id, spotifySuggestToken]);
-
-  // "Add this track to a playlist" (post-game summary) only ever writes to
-  // a DB-backed playlist - local, non-account Spotify playlists are
-  // read-only browsing, nothing to persist to.
-  const accountPlayerPlaylists = playerPlaylists.filter(pl => pl.source !== 'local');
+  }, [currentUser?.id]);
 
   const handleAddTrackToPlaylist = async (playlistId, track) => {
     const result = await addTrackToPlaylist(playlistId, { uri: track.uri, name: track.name, artist: track.artist });
@@ -208,9 +194,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       </div>
       {currentUser && addToPlaylistFor === rowKey && (
         <div style={{ border: '1px solid var(--neon-purple)', borderRadius: 'var(--radius-sm)', padding: '12px' }}>
-          {accountPlayerPlaylists.length > 0 && (
+          {playerPlaylists.length > 0 && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginBottom: '10px' }}>
-              {accountPlayerPlaylists.map(pl => (
+              {playerPlaylists.map(pl => (
                 <button
                   key={pl.id}
                   onClick={() => handleAddTrackToPlaylist(pl.id, song)}
@@ -248,44 +234,28 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   // Lets a player grab the currently playing (or just-finished) track into
   // their own playlist without waiting for the game to end - visible from
   // the moment a song starts through every phase up to the next one
-  // (dancing, then silent_report/kill_reveal/discussion/voting while that
+  // (dancing, then silent_report/kill_reveal/voting while that
   // song is still the last one played). Own-audio mode never sets
   // room.nowPlaying at all, so this simply never renders there.
+  // Shows room.nowPlaying (the most recent pick - see server/gameStore.js's
+  // playQueueEntry, which is the only place that ever sets it, never cleared
+  // in between) labeled "current" while it's actually playing (dancing), or
+  // "last" for every phase after that - until the next round's dancing
+  // starts an actual new pick, which is exactly when this flips back to
+  // "current" for that new track. Never shown to the GM (see GMDashboard.jsx
+  // - its own current-track widget only ever renders during dancing, i.e.
+  // never as a "last played" callback) and never a full history, just this
+  // one track at a time.
   const renderCurrentTrackWidget = () => {
-    const relevantStatuses = ['dancing', 'silent_report', 'kill_reveal', 'discussion', 'voting'];
-    if (!relevantStatuses.includes(room.status) || !room.nowPlaying) return null;
+    const isDancing = room.status === 'dancing';
+    const lastStatuses = ['silent_report', 'kill_reveal', 'voting', 'vote_reveal', 'ended'];
+    if ((!isDancing && !lastStatuses.includes(room.status)) || !room.nowPlaying) return null;
     return (
       <div className="panel panel--success" style={{ textAlign: 'left', marginBottom: '15px' }}>
         <div className="panel-title" style={{ color: 'var(--neon-green)' }}>
-          <Music2 size={16} className="icon-inline" /> {t('player.currentSongLabel')}
+          <Music2 size={16} className="icon-inline" /> {t(isDancing ? 'player.currentSongLabel' : 'player.lastSongLabel')}
         </div>
         {renderTrackRow(room.nowPlaying, `nowplaying-${room.nowPlaying.uri}`)}
-      </div>
-    );
-  };
-
-  // Post-game (and post-round, from kill_reveal onward) summary of every
-  // track the server recorded as actually played (server/gameStore.js
-  // addPlayedSong), grouped by round - empty whenever the GM used own-audio
-  // mode the whole game, since the app never sees what plays externally.
-  const renderPlayedSongs = () => {
-    if (!room.playedSongs || room.playedSongs.length === 0) return null;
-    const byRound = new Map();
-    room.playedSongs.forEach(song => {
-      if (!byRound.has(song.round)) byRound.set(song.round, []);
-      byRound.get(song.round).push(song);
-    });
-    return (
-      <div className="panel panel--success" style={{ textAlign: 'left', marginTop: '20px' }}>
-        <div className="panel-title" style={{ color: 'var(--neon-green)' }}>
-          <Music2 size={16} className="icon-inline" /> {t('player.playedSongs')}
-        </div>
-        {[...byRound.entries()].map(([round, songs]) => (
-          <div key={round} style={{ marginBottom: '15px' }}>
-            <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '8px', textTransform: 'uppercase' }}>{t('player.round', { n: round })}</div>
-            {songs.map(song => renderTrackRow(song, `${song.uri}-${song.playedAt}`))}
-          </div>
-        ))}
       </div>
     );
   };
@@ -294,7 +264,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
   const sendSuggestion = (suggestion) => {
     setSuggestErrorKey('');
-    socket.emit('suggestSong', { roomId: room.id, clientId, suggestion }, (response) => {
+    socket.emit('suggestSong', { roomId: room.id, suggestion }, (response) => {
       if (!response?.success) {
         setSuggestErrorKey(`server.${response?.messageKey || 'suggestionFailed'}`);
       }
@@ -320,13 +290,15 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     setSuggestSearchDone(true);
   };
 
-  // searchTracksInRoom returns the same flat { uri, name, artist } shape as
-  // server/playlists.js's search route - normalize it into the
-  // { artists: [...], album: { images: [] } } shape the suggestion panel
-  // (GMDashboard.jsx) and nowPlayingTrack expect, same as
-  // handleSuggestPlaylistTrack below does for playlist tracks.
+  // searchTracksInRoom returns { uri, name, artist, imageUrl } (see
+  // server/spotify.js's searchTracksWithToken) - normalize into the
+  // { artists: [...], album: { images: [...] } } shape the suggestion panel
+  // (GMDashboard.jsx) expects, same as handleSuggestPlaylistTrack below does
+  // for playlist tracks, but carrying the real cover art through via a flat
+  // imageUrl (GMDashboard.jsx's suggestionImageUrl reads that first) instead
+  // of an always-empty images array.
   const handleSuggestTrack = (track) => {
-    sendSuggestion({ type: 'spotify', track: { uri: track.uri, name: track.name, artists: [{ name: track.artist }], album: { images: [] } } });
+    sendSuggestion({ type: 'spotify', track: { uri: track.uri, name: track.name, artists: [{ name: track.artist }], imageUrl: track.imageUrl || null, album: { images: [] } } });
     setSuggestResults([]);
     setSuggestSearchDone(false);
     setSuggestQuery('');
@@ -341,25 +313,6 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   };
 
   const handlePickSuggestPlaylist = async (playlist) => {
-    if (playlist.source === 'local') {
-      try {
-        // Normalized to the same { id, uri, name, artist } shape a
-        // DB-backed playlist's tracks have (artist as one joined string,
-        // not Spotify's .artists array) so this render block and
-        // handleSuggestPlaylistTrack below don't need to know the source.
-        const tracks = await fetchSpotifyPlaylistTracks(playlist.id);
-        setActiveSuggestPlaylist({
-          id: playlist.id,
-          name: playlist.name,
-          tracks: tracks.map((t, i) => ({ id: `${playlist.id}_${i}`, uri: t.uri, name: t.name, artist: t.artists.map(a => a.name).join(', ') })),
-        });
-      } catch (e) {
-        if (e.message !== 'SPOTIFY_NOT_CONNECTED') console.error('Failed to load local Spotify playlist', e);
-        // SPOTIFY_NOT_CONNECTED: the SPOTIFY_SESSION_EXPIRED_EVENT listener
-        // already reset spotifySuggestToken and set the error message.
-      }
-      return;
-    }
     const result = await fetchPlaylist(playlist.id);
     if (!result.error) setActiveSuggestPlaylist(result.playlist);
   };
@@ -444,22 +397,22 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   const hasVoted = !!(myCouple && room.votes && Object.prototype.hasOwnProperty.call(room.votes, myCouple.id));
 
   const handleConfirm = () => {
-    socket.emit('confirmPartner', { roomId: room.id, clientId });
+    socket.emit('confirmPartner', { roomId: room.id });
   };
 
   const handleVote = (suspectCoupleId) => {
-    socket.emit('castVote', { roomId: room.id, voterId: clientId, suspectId: suspectCoupleId });
+    socket.emit('castVote', { roomId: room.id, suspectId: suspectCoupleId });
   };
 
   const handleSubmitKillClaim = (victimCoupleId, victimName) => {
     setConfirmState({
       message: victimCoupleId ? t('player.confirmKillClaim', { name: victimName }) : t('player.confirmKillClaimNobody'),
-      onConfirm: () => socket.emit('submitKillClaim', { roomId: room.id, clientId, victimId: victimCoupleId })
+      onConfirm: () => socket.emit('submitKillClaim', { roomId: room.id, victimId: victimCoupleId })
     });
   };
 
   const handleSubmitVictimReport = (feltKilled, suspectCoupleId) => {
-    socket.emit('submitVictimReport', { roomId: room.id, clientId, feltKilled, suspectId: suspectCoupleId });
+    socket.emit('submitVictimReport', { roomId: room.id, feltKilled, suspectId: suspectCoupleId });
   };
 
   const handleLeaveClick = () => {
@@ -530,7 +483,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                 <button className={`segmented-option accent-green ${suggestMode === 'spotify' ? 'is-active' : ''}`} onClick={() => setSuggestMode('spotify')}>
                   {t('player.suggestModeSpotify')}
                 </button>
-                {spotifySuggestToken && playerPlaylists.length > 0 && (
+                {playerPlaylists.length > 0 && (
                   <button className={`segmented-option accent-green ${suggestMode === 'playlist' ? 'is-active' : ''}`} onClick={() => setSuggestMode('playlist')}>
                     {t('player.suggestModePlaylist')}
                   </button>
@@ -553,12 +506,6 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                   <Send size={16} className="icon-inline" />
                 </button>
               </form>
-            )}
-
-            {spotifySuggestionsAllowed && !spotifySuggestToken && (
-              <button className="cyber-button" style={{ background: 'transparent', border: '1px solid var(--neon-green)', color: 'var(--neon-green)' }} onClick={() => (currentUser ? loginWithSpotifyForAccountLink() : loginWithSpotify())}>
-                {t('player.connectForMoreOptions')}
-              </button>
             )}
 
             {spotifySuggestionsAllowed && suggestMode === 'spotify' && (
@@ -601,7 +548,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               </>
             )}
 
-            {spotifySuggestToken && suggestMode === 'playlist' && (
+            {suggestMode === 'playlist' && (
               <>
                 {!activeSuggestPlaylist ? (
                   <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
@@ -615,7 +562,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                         <Music2 size={20} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>
-                            {pl.name}{pl.source === 'local' && <span style={{ color: 'var(--text-muted)' }}> ({t('playlists.spotifySource')})</span>}
+                            {pl.name}
                           </div>
                           <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{t('playlists.trackCount', { count: pl.trackCount })}</div>
                         </div>
@@ -679,7 +626,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         document.body
       )}
 
-      {currentUser && mySpotifyLinked && (
+      {currentUser && mySpotifyLinked && (isMySpotifyDelegate || isMyShareRequestPending || spotifyShareOffPossible) && (
         <button
           onClick={() => setShowSpotifyShare(true)}
           className="icon-btn"
@@ -708,15 +655,21 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                   {t('player.spotifyShareRevoke')}
                 </button>
               </>
-            ) : (
+            ) : isMyShareRequestPending ? (
               <>
-                {room.spotifyDelegate && (
-                  <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '15px', fontSize: '0.85rem' }}>{t('player.spotifyShareOtherActive', { name: room.spotifyDelegate.name })}</p>
-                )}
-                <button className="cyber-button" disabled={spotifyShareBusy} onClick={handleGrantSpotify}>
-                  {t('player.spotifyShareGrant')}
+                <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '15px' }}>{t('player.spotifyShareWaiting')}</p>
+                <button className="cyber-button" disabled={spotifyShareBusy} style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }} onClick={handleRevokeSpotify}>
+                  {t('player.spotifyShareWithdraw')}
                 </button>
               </>
+            ) : room.gmSpotifyConnected ? (
+              <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>{t('player.spotifyShareGmConnected')}</p>
+            ) : room.spotifyDelegate ? (
+              <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>{t('player.spotifyShareOtherActive', { name: room.spotifyDelegate.name })}</p>
+            ) : (
+              <button className="cyber-button" disabled={spotifyShareBusy} onClick={handleRequestSpotifyShare}>
+                {t('player.spotifyShareGrant')}
+              </button>
             )}
             {spotifyShareError && (
               <p style={{ color: 'var(--neon-red)', textAlign: 'center', marginTop: '10px', fontSize: '0.9rem' }}>{t(spotifyShareError)}</p>
@@ -790,6 +743,23 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         <h2 style={{ color: 'var(--neon-blue)', marginBottom: '20px', marginTop: '20px' }}>{t('phase.lobby')}</h2>
         <div className="pulse-animation" style={{ width: '50px', height: '50px', borderRadius: '50%', background: 'var(--neon-purple)', margin: '0 auto 20px' }}></div>
         <p style={{ color: 'var(--text-muted)' }}>{t('player.lobbyWait')}</p>
+        <button
+          onClick={() => setShowHowTo(true)}
+          style={{ background: 'transparent', border: 'none', padding: 0, marginTop: '10px', color: 'var(--neon-blue)', fontSize: '0.85rem', textDecoration: 'underline', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+        >
+          <HelpCircle size={14} className="icon-inline" />
+          {t('howto.linkLabel')}
+        </button>
+        <div style={{ textAlign: 'center', margin: '20px 0' }}>
+          <div className="qr-frame">
+            <img
+              src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(window.location.origin + '/?room=' + room.id)}`}
+              alt="QR Code"
+              style={{ display: 'block' }}
+            />
+          </div>
+        </div>
+        <HowToPlayModal isOpen={showHowTo} onClose={() => setShowHowTo(false)} />
       </div>
     );
   }
@@ -865,7 +835,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           <h3 style={{ color: 'var(--text-muted)' }}>
             {t('player.abortedBody')}
           </h3>
-          {renderPlayedSongs()}
+          {renderCurrentTrackWidget()}
         </div>
       );
     }
@@ -927,7 +897,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         })()}
 
         <p style={{ color: 'var(--text-muted)' }}>{t('player.waitNewRound')}</p>
-        {renderPlayedSongs()}
+        {renderCurrentTrackWidget()}
       </div>
     );
   }
@@ -957,7 +927,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       {playerNameTag}
       {leaveButton}
         {songSuggestButton}
-      {(room.status === 'dancing' || room.status === 'silent_report' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'discussion') && (
+      {(room.status === 'dancing' || room.status === 'silent_report' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'vote_reveal') && (
         <p style={{ color: 'var(--text-muted)', marginBottom: '10px', marginTop: '20px' }}>{t('player.round', { n: room.round })}</p>
       )}
 
@@ -1011,7 +981,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             <div className="panel panel--info" style={{ textAlign: 'center', marginTop: '20px' }}>
               <h3 style={{ color: 'var(--neon-blue)', marginBottom: '15px' }}>{t('player.confirmPhoneHiddenTitle')}</h3>
               <p style={{ color: 'white', marginBottom: '15px' }}>{t('player.confirmPhoneHiddenBody')}</p>
-              <button className="cyber-button" onClick={() => setPhoneHiddenConfirmedRound(room.round)}>
+              <button className="cyber-button pulse-animation" onClick={() => setPhoneHiddenConfirmedRound(room.round)}>
                 {t('player.confirmPhoneHiddenButton')}
               </button>
             </div>
@@ -1084,7 +1054,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               onChange={(e) => setDecoyAnswer(e.target.value)}
               style={{ width: '100%', marginBottom: '15px', padding: '10px', textAlign: 'center', fontSize: '1.1rem' }}
             />
-            <button className="cyber-button" disabled={decoyAnswer === ''} onClick={() => handleSubmitVictimReport(false, null)}>
+            <button className={decoyAnswer === '' ? 'cyber-button disabled' : 'cyber-button pulse-animation'} disabled={decoyAnswer === ''} onClick={() => handleSubmitVictimReport(false, null)}>
               {t('player.decoySubmit')}
             </button>
           </div>
@@ -1111,17 +1081,6 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           </div>
         );
       })()}
-      {room.status === 'kill_reveal' && renderPlayedSongs()}
-      {room.status === 'discussion' && (
-        <div className="panel panel--purple">
-          <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.5rem', letterSpacing: '2px', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-            <MessageCircle size={22} className="icon-inline" /> {t('player.discussionTitle')}
-          </h2>
-          <p style={{ color: 'white' }}>{t('player.discussionBody')}</p>
-        </div>
-      )}
-      {room.status === 'discussion' && renderPlayedSongs()}
-
       {(room.status === 'role_reveal' || room.status === 'dancing' || room.status === 'kill_reveal') && (
         <div style={{ marginTop: '20px' }}>
           {room.status === 'role_reveal' && canSwitchVotingRole && (
@@ -1131,13 +1090,13 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             className="cyber-button pulse-animation"
             onMouseDown={() => {
               setShowRole(true);
-              if (!me.hasViewedRole) socket.emit('roleViewed', { roomId: room.id, clientId });
+              if (!me.hasViewedRole) socket.emit('roleViewed', { roomId: room.id });
             }}
             onMouseUp={() => setShowRole(false)}
             onMouseLeave={() => setShowRole(false)}
             onTouchStart={() => {
               setShowRole(true);
-              if (!me.hasViewedRole) socket.emit('roleViewed', { roomId: room.id, clientId });
+              if (!me.hasViewedRole) socket.emit('roleViewed', { roomId: room.id });
             }}
             onTouchEnd={() => setShowRole(false)}
             style={{ marginBottom: '20px', userSelect: 'none', WebkitUserSelect: 'none' }}
@@ -1241,7 +1200,33 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           )}
         </div>
       )}
-      {room.status === 'voting' && renderPlayedSongs()}
+
+      {/* VOTE REVEAL - between 'voting' and the next 'dancing' round, the GM
+          announces who (if anyone) got voted out before continuing (see
+          gameStore.executeVote's 'voting' branch and GMDashboard.jsx's
+          matching VOTE REVEAL phase block). */}
+      {room.status === 'vote_reveal' && (() => {
+        const votedOutCouple = room.voteResult?.votedOutCoupleId
+          ? room.couples.find(c => c.id === room.voteResult.votedOutCoupleId)
+          : null;
+        return (
+          <div className={`panel ${votedOutCouple ? 'panel--danger' : 'panel--info'}`}>
+            <h2 style={{ color: votedOutCouple ? 'var(--neon-red)' : 'var(--neon-blue)', marginBottom: '15px' }}>
+              {t('player.voteRevealTitle')}
+            </h2>
+            {votedOutCouple ? (
+              <p style={{ fontSize: '1.2rem', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                <Skull size={20} className="icon-inline" style={{ color: 'var(--neon-red)' }} /> <strong style={{ color: 'var(--neon-red)' }}>{t('player.wasVotedOut', { name: votedOutCouple.name })}</strong>
+              </p>
+            ) : (
+              <p style={{ fontSize: '1.2rem', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                <Sparkles size={20} className="icon-inline" /> {t('player.nobodyVotedOut')}
+              </p>
+            )}
+            <p style={{ color: 'var(--text-muted)', marginTop: '20px' }}>{t('player.waitingGm')}</p>
+          </div>
+        );
+      })()}
     </div>
   );
 }
