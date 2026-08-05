@@ -1,8 +1,34 @@
 import React, { useEffect, useState } from 'react';
-import { Users, Crown, LogIn, LogOut, Repeat, ArrowLeft, Globe, UserCircle2, Trophy, BarChart3, Settings as SettingsIcon, Music2 } from 'lucide-react';
+import { Users, Crown, LogIn, LogOut, Repeat, ArrowLeft, Globe, UserCircle2, Trophy, BarChart3, Settings as SettingsIcon, Music2, Wrench, Award, HelpCircle } from 'lucide-react';
 import { openCookieSettings } from './CookieBanner.jsx';
 import { fetchMyStats } from '../auth.js';
+import { fetchUnreadFeedbackCount } from '../admin.js';
 import { useLanguage } from '../i18n.jsx';
+import { HowToPlayModal } from './Modal.jsx';
+
+// "Wie funktioniert's?" trigger - a plain underlined text link (not a
+// cyber-button) so it reads as secondary to the actual join/create actions,
+// consistent with the other small text links already on the home screen
+// (feedback/privacy/imprint). Shared between the main screen and the join
+// view below, since a player who scanned a QR code lands directly on the
+// join view and never sees the main screen at all.
+// iconOnly drops the text label down to a bare "?" icon button - used where
+// this sits in a corner next to a heading (the join view below) instead of
+// its own centered line (the main screen), where the full label would either
+// crowd the heading or force it to wrap on a phone-width screen.
+function HowToPlayLink({ onClick, iconOnly = false }) {
+  const { t } = useLanguage();
+  return (
+    <button
+      onClick={onClick}
+      title={iconOnly ? t('howto.linkLabel') : undefined}
+      style={{ background: 'transparent', border: 'none', padding: 0, color: 'var(--neon-blue)', fontSize: '0.85rem', textDecoration: iconOnly ? 'none' : 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', margin: iconOnly ? 0 : '0 auto', flexShrink: 0 }}
+    >
+      <HelpCircle size={iconOnly ? 22 : 14} className="icon-inline" />
+      {!iconOnly && t('howto.linkLabel')}
+    </button>
+  );
+}
 
 function LanguageSwitcher() {
   const { lang, setLang } = useLanguage();
@@ -38,6 +64,7 @@ function LanguageSwitcher() {
 function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
   const { t } = useLanguage();
   const [stats, setStats] = useState(null);
+  const [unreadFeedback, setUnreadFeedback] = useState(0);
 
   useEffect(() => {
     if (!currentUser) { setStats(null); return; }
@@ -46,20 +73,31 @@ function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
     return () => { cancelled = true; };
   }, [currentUser?.id]);
 
+  // Hidden Dev Dashboard entry point (see components/DevDashboard.jsx) only
+  // ever renders for a currentUser.isSuperAdmin account - the unread count
+  // is what turns it from a plain link into a "there's something to look at"
+  // notification, checked once on every home-screen visit.
+  useEffect(() => {
+    if (!currentUser?.isSuperAdmin) { setUnreadFeedback(0); return; }
+    let cancelled = false;
+    fetchUnreadFeedbackCount().then((r) => { if (!cancelled && !r.error) setUnreadFeedback(r.count); });
+    return () => { cancelled = true; };
+  }, [currentUser?.isSuperAdmin]);
+
   // fetchMe() is still in flight - stay blank rather than flashing "Login /
   // Register" at an already-logged-in visitor for a moment.
   if (authLoading) return null;
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px', marginBottom: '15px' }}>
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '10px', fontSize: '0.85rem' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', marginBottom: '15px' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: '8px 10px', fontSize: '0.85rem' }}>
         <UserCircle2 size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
         {currentUser ? (
           <>
             <span style={{ color: 'var(--text-main)' }}>{t('auth.greeting', { name: currentUser.displayName })}</span>
             <button
               onClick={onLogout}
-              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', textDecoration: 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+              style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', textDecoration: 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}
             >
               <LogOut size={14} className="icon-inline" />
               {t('auth.logout')}
@@ -68,7 +106,7 @@ function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
         ) : (
           <button
             onClick={onLoginClick}
-            style={{ background: 'transparent', border: 'none', color: 'var(--neon-blue)', textDecoration: 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+            style={{ background: 'transparent', border: 'none', color: 'var(--neon-blue)', textDecoration: 'underline', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}
           >
             <LogIn size={14} className="icon-inline" />
             {t('auth.loginOrRegister')}
@@ -77,13 +115,13 @@ function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
       </div>
 
       {currentUser && stats && (
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '16px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '6px 16px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
             <Trophy size={14} className="icon-inline" />
             {t('stats.winsSummary', { wins: stats.wins, games: stats.gamesPlayed })}
           </span>
           {stats.gamesHosted > 0 && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
               <Crown size={14} className="icon-inline" />
               {t('stats.hostedSummary', { count: stats.gamesHosted })}
             </span>
@@ -92,32 +130,47 @@ function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
       )}
 
       {currentUser && (
-        <div style={{ display: 'flex', justifyContent: 'center', gap: '15px', fontSize: '0.8rem' }}>
-          <a href="/stats" style={{ color: 'var(--text-muted)', textDecoration: 'underline', display: 'flex', alignItems: 'center', gap: '4px' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '6px' }}>
+          <a href="/stats" className="nav-pill">
             <BarChart3 size={14} className="icon-inline" />
             {t('stats.pageLink')}
           </a>
-          <a href="/settings" style={{ color: 'var(--text-muted)', textDecoration: 'underline', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <a href="/settings" className="nav-pill">
             <SettingsIcon size={14} className="icon-inline" />
             {t('settings.pageLink')}
           </a>
-          <a href="/playlists" style={{ color: 'var(--text-muted)', textDecoration: 'underline', display: 'flex', alignItems: 'center', gap: '4px' }}>
+          <a href="/playlists" className="nav-pill">
             <Music2 size={14} className="icon-inline" />
             {t('playlists.pageLink')}
           </a>
+          <a href="/achievements" className="nav-pill">
+            <Award size={14} className="icon-inline" />
+            {t('achievements.pageLink')}
+          </a>
+          {currentUser.isSuperAdmin && (
+            <a
+              href="/dev"
+              className="nav-pill"
+              style={unreadFeedback > 0 ? { color: 'var(--neon-red)', borderColor: 'var(--neon-red)', fontWeight: 'bold' } : undefined}
+            >
+              <Wrench size={14} className="icon-inline" />
+              {t('dev.pageLink')}{unreadFeedback > 0 ? ` (${unreadFeedback})` : ''}
+            </a>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick, onLogout }) {
+function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick, onLogout, hasActiveGame, onRejoinGame }) {
   const { t } = useLanguage();
   const [roomId, setRoomId] = useState('');
   const [playerName, setPlayerName] = useState('');
   const [danceRole, setDanceRole] = useState('lead'); // 'lead' or 'follow'
   const [isFlexible, setIsFlexible] = useState(false);
   const [view, setView] = useState('main'); // main, join
+  const [showHowTo, setShowHowTo] = useState(false);
 
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -144,9 +197,25 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick
         <AccountBar currentUser={currentUser} authLoading={authLoading} onLoginClick={onLoginClick} onLogout={onLogout} />
         <LanguageSwitcher />
         <h2 style={{ marginBottom: '8px', color: 'var(--neon-blue)' }}>{t('home.title')}</h2>
-        <p style={{ color: 'var(--text-muted)', marginBottom: '30px', fontSize: '0.95rem' }}>
+        <p style={{ color: 'var(--text-muted)', marginBottom: '15px', fontSize: '0.95rem' }}>
           {t('home.subtitle')}
         </p>
+        <div style={{ marginBottom: '25px' }}>
+          <HowToPlayLink onClick={() => setShowHowTo(true)} />
+        </div>
+
+        {hasActiveGame && (
+          <div style={{ margin: '0 0 25px 0' }}>
+            <button
+              className="cyber-button pulse-animation"
+              style={{ background: 'var(--neon-green)', borderColor: 'var(--neon-green)', color: 'black', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}
+              onClick={onRejoinGame}
+            >
+              <Repeat size={20} className="icon-inline" />
+              {t('home.rejoinGame')}
+            </button>
+          </div>
+        )}
 
         <button
           className="cyber-button pulse-animation"
@@ -204,16 +273,21 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick
             {t('home.cookieSettings')}
           </button>
         </div>
+
+        <HowToPlayModal isOpen={showHowTo} onClose={() => setShowHowTo(false)} />
       </div>
     );
   }
 
   return (
     <div className="cyber-card phase-enter">
-      <h2 style={{ marginBottom: '20px', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <Users size={26} className="icon-inline" />
-        {t('home.joinTitle')}
-      </h2>
+      <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: '10px', marginBottom: '20px' }}>
+        <h2 style={{ margin: 0, color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <Users size={26} className="icon-inline" />
+          {t('home.joinTitle')}
+        </h2>
+        <HowToPlayLink onClick={() => setShowHowTo(true)} iconOnly />
+      </div>
 
       <input
         type="text"
@@ -232,7 +306,7 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick
         onChange={(e) => setPlayerName(e.target.value)}
       />
 
-      <div className="segmented-control" style={{ margin: '15px 0 5px 0' }}>
+      <div className="segmented-control" style={{ margin: '15px 0 18px 0' }}>
         <button
           className={`segmented-option accent-blue ${danceRole === 'lead' ? 'is-active' : ''}`}
           onClick={() => setDanceRole('lead')}
@@ -276,6 +350,8 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick
         <ArrowLeft size={18} className="icon-inline" />
         {t('common.back')}
       </button>
+
+      <HowToPlayModal isOpen={showHowTo} onClose={() => setShowHowTo(false)} />
     </div>
   );
 }
