@@ -12,7 +12,10 @@ async function request(url, options = {}) {
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    return { error: data.error || 'unknown_error' };
+    // Spread data first so e.g. a 429's retryAfterSeconds survives alongside
+    // error - some callers (fallback-playlist import) need more than just
+    // the error code to show a specific enough message.
+    return { ...data, error: data.error || 'unknown_error' };
   }
   return data;
 }
@@ -30,3 +33,47 @@ export const addKillerOverride = (roomId, playerId) =>
 
 export const removeKillerOverride = (roomId, playerId) =>
   request(`/api/admin/rooms/${roomId}/killer-override/${playerId}`, { method: 'DELETE' });
+
+// --- Dev Dashboard (also gated on admin_users - see server/admin.js) ---
+
+export const fetchFeedbackList = () => request('/api/admin/feedback');
+
+export const fetchUnreadFeedbackCount = () => request('/api/admin/feedback/unread-count');
+
+export const markFeedbackRead = (id) => request(`/api/admin/feedback/${id}/read`, { method: 'POST', body: '{}' });
+
+export const deleteFeedbackEntry = (id) => request(`/api/admin/feedback/${id}`, { method: 'DELETE' });
+
+export const fetchDevSettings = () => request('/api/admin/dev-settings');
+
+export const updateDevSettings = (killerRatioDivisor) =>
+  request('/api/admin/dev-settings', { method: 'PUT', body: JSON.stringify({ killerRatioDivisor }) });
+
+// Public (no admin_users gate) - every GM's dashboard needs the current
+// divisor to compute its own killer-count suggestion, not just developers.
+export const fetchKillerRatio = () => request('/api/dev-settings/killer-ratio');
+
+// Dev-curated fallback songs (see server/db.js's fallback_songs table) -
+// offered to any GM who bypasses the "song ready" lock with no track
+// selected at all (client/src/spotifyPlaylists.js's fetchRandomFallbackSong,
+// public/no admin_users gate, used from GMDashboard.jsx).
+export const fetchFallbackSongs = () => request('/api/admin/fallback-songs');
+
+export const addFallbackSong = (url) =>
+  request('/api/admin/fallback-songs', { method: 'POST', body: JSON.stringify({ url }) });
+
+// Needs the calling dev's own account-linked Spotify connection (Settings/
+// Playlists) to actually read the playlist's tracks - unlike addFallbackSong
+// above, which only needs public oEmbed metadata for a single track link.
+export const importFallbackPlaylist = (url) =>
+  request('/api/admin/fallback-songs/import-playlist', { method: 'POST', body: JSON.stringify({ url }) });
+
+export const deleteFallbackSong = (id) => request(`/api/admin/fallback-songs/${id}`, { method: 'DELETE' });
+
+// Browsable history of every concluded/aborted game (see server/admin.js's
+// /games routes and server/stats.js's recordGameHistory, the one place that
+// writes any of it). List is paginated (offset-based, see server/admin.js);
+// detail is fetched separately per game, only once a dev actually opens one.
+export const fetchGamesList = (limit, offset) => request(`/api/admin/games?limit=${limit}&offset=${offset}`);
+
+export const fetchGameDetail = (id) => request(`/api/admin/games/${id}`);
