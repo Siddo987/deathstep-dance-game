@@ -10,7 +10,12 @@ const CLIENT_ID = process.env.VITE_SPOTIFY_CLIENT_ID;
 // Network calls to Spotify are far more likely to fail/time out than a local
 // DB query - wrap every handler so a Spotify-side hiccup returns a clean
 // error instead of an unhandled rejection taking the whole process down.
-function asyncRoute(handler) {
+// Exported so other routers making the same kind of Spotify Web API call
+// (e.g. admin.js's fallback-playlist import) get the same safety net -
+// without it, a private/deleted playlist (spotifyFetch throwing on a non-OK
+// response) would just hang the request forever instead of answering with
+// an error, since Express 4 doesn't auto-catch rejected async handlers.
+export function asyncRoute(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(err => {
       console.error('Spotify route error:', err.message);
@@ -126,6 +131,16 @@ export function invalidateAccessTokenCache(userId) {
 // happened to land in a gap between blocks).
 let rateLimitedUntil = 0;
 
+// Lets a caller skip a whole batch of work up front (see playlists.js's
+// background sync loop) instead of attempting - and immediately failing -
+// every item in that batch individually while a block is active. Purely an
+// optimization (spotifyFetch's own check at the top of every call is what
+// actually enforces the block); this just avoids the wasted DB
+// query/per-item loop/log noise in the meantime.
+export function isSpotifyRateLimited() {
+  return Date.now() < rateLimitedUntil;
+}
+
 // Marks an error as "we're rate-limited" (vs. a genuinely broken token/
 // connection) so callers can tell the two apart instead of collapsing both
 // into the same generic failure - see e.g. the /connect route below, which
@@ -239,15 +254,16 @@ router.get('/status', requireAuth, asyncRoute(async (req, res) => {
   res.json({ connected: !!token, displayName: token ? rows[0].display_name : null });
 }));
 
-router.get('/playlists', requireAuth, asyncRoute(async (req, res) => {
-  const token = await getValidAccessToken(req.db, req.userId);
-  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
-
+// Shared by GET /playlists below (a Deathstep account's own connection) and
+// server/index.js's public room-scoped playlists route (which resolves a
+// token from whichever player has lent their Spotify connection to the room
+// instead) - listing a user's own playlists needs no Deathstep-account
+// identity beyond the Spotify token itself.
+export async function fetchPlaylistsWithToken(accessToken) {
   const playlists = [];
   let path = '/me/playlists?limit=50';
   while (path && playlists.length < 200) {
-    const data = await spotifyFetch(token.accessToken, path);
-    if (data.items?.[0]) console.log('DEBUG /me/playlists raw item:', JSON.stringify(data.items[0]));
+    const data = await spotifyFetch(accessToken, path);
     // Spotify's API can return null entries here (e.g. a formerly-
     // collaborative playlist the user lost access to) - skip them instead of
     // throwing inside .map, which would otherwise turn one bad entry into a
@@ -264,19 +280,75 @@ router.get('/playlists', requireAuth, asyncRoute(async (req, res) => {
     })));
     path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
   }
-  res.json({ playlists });
+  return playlists;
+}
+
+router.get('/playlists', requireAuth, asyncRoute(async (req, res) => {
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
+  res.json({ playlists: await fetchPlaylistsWithToken(token.accessToken) });
+}));
+
+// Shared by GET /playlists/:id/tracks below and server/index.js's public
+// room-scoped playlist-tracks route - fetches every track of a single
+// playlist, with cover art, so a picked-from-a-playlist track/thumbnail
+// looks the same as one picked from search (see searchTracksWithToken below).
+export async function fetchPlaylistTracksWithToken(accessToken, playlistId) {
+  const tracks = [];
+  let path = `/playlists/${playlistId}/items?limit=100&fields=next,items(item(uri,name,artists(name),album(images)),track(uri,name,artists(name),album(images)))`;
+  while (path && tracks.length < 500) {
+    const data = await spotifyFetch(accessToken, path);
+    for (const entry of data.items || []) {
+      // "track" was renamed to "item" per entry (Feb 2026 Web API changes),
+      // but Spotify still sends the deprecated "track" field alongside it for
+      // now - accept either.
+      const track = entry.item || entry.track;
+      if (!track || !track.uri) continue; // skip local/unavailable tracks
+      tracks.push({
+        uri: track.uri,
+        name: track.name,
+        artist: (track.artists || []).map(a => a.name).join(', '),
+        imageUrl: track.album?.images?.[2]?.url || track.album?.images?.[0]?.url || null,
+      });
+    }
+    path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
+  }
+  return tracks;
+}
+
+// Cheap 1-call check used by server/playlists.js's pullTracksFromSpotify to
+// avoid a full, possibly multi-page re-fetch of every track on a playlist
+// (fetchPlaylistTracksWithToken above) when nothing has actually changed
+// since the last sync - Spotify bumps snapshot_id on every playlist edit
+// (add/remove/reorder), so comparing it against what was stored last time
+// tells the two apart for the cost of one lightweight request instead of up
+// to 5 (500 tracks / 100 per page).
+export async function getPlaylistSnapshotId(accessToken, playlistId) {
+  const data = await spotifyFetch(accessToken, `/playlists/${playlistId}?fields=snapshot_id`);
+  return data?.snapshot_id || null;
+}
+
+router.get('/playlists/:id/tracks', requireAuth, asyncRoute(async (req, res) => {
+  const token = await getValidAccessToken(req.db, req.userId);
+  if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
+  res.json({ tracks: await fetchPlaylistTracksWithToken(token.accessToken, req.params.id) });
 }));
 
 // Shared by GET /search below (a Deathstep account's own connection) and
 // server/index.js's public room-scoped search route (which resolves a token
-// from whichever GM/co-GM in the room has one connected instead) - track
-// search itself is public catalog data, needs no per-caller identity.
+// from whichever GM/co-GM/delegate in the room has one connected instead) -
+// track search itself is public catalog data, needs no per-caller identity.
+// imageUrl uses the smallest available cover art (index 2, typically 64x64 -
+// Spotify sorts images largest-first) since this only ever renders as a small
+// list-row thumbnail, same choice GMDashboard.jsx's own direct-to-Spotify
+// search already made for its `track.album.images[2]` lookups.
 export async function searchTracksWithToken(accessToken, query) {
   const data = await spotifyFetch(accessToken, `/search?q=${encodeURIComponent(query)}&type=track&limit=10`);
   return (data.tracks?.items || []).map(t => ({
     uri: t.uri,
     name: t.name,
     artist: t.artists.map(a => a.name).join(', '),
+    imageUrl: t.album?.images?.[2]?.url || t.album?.images?.[0]?.url || null,
   }));
 }
 

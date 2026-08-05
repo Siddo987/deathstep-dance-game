@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { requireDb, getPool } from './db.js';
 import { getUserIdFromRequest } from './authToken.js';
-import { getValidAccessToken, spotifyFetch } from './spotify.js';
+import { getValidAccessToken, spotifyFetch, isSpotifyRateLimited, getPlaylistSnapshotId } from './spotify.js';
 
 function asyncRoute(handler) {
   return (req, res, next) => {
@@ -39,32 +39,38 @@ async function nextTrackPosition(pool, playlistId) {
 
 // Push a locally-staged addition to the real Spotify playlist. Failures
 // (token expired, Spotify unreachable, playlist deleted on Spotify's side,
-// ...) just report back false - the local row is left untouched either way.
+// ...) just report back null - the local row is left untouched either way.
+// Returns the resulting snapshot_id on success (Spotify includes it in every
+// add/remove-items response for free) so the caller can seed
+// pullTracksFromSpotify's snapshot check with it - without this, the very
+// next sync after a manual confirm would see a stale local snapshot_id and
+// pay for a full re-fetch just to learn what this call already told us.
 async function pushTrackAddToSpotify(pool, userId, spotifyPlaylistId, uri) {
   const token = await getValidAccessToken(pool, userId);
-  if (!token) return false;
+  if (!token) return null;
   try {
     // Spotify renamed this endpoint from /tracks to /items in their Feb 2026
     // Web API changes (/tracks is deprecated) - same request body shape.
-    await spotifyFetch(token.accessToken, `/playlists/${spotifyPlaylistId}/items`, { method: 'POST', body: { uris: [uri] } });
-    return true;
+    const result = await spotifyFetch(token.accessToken, `/playlists/${spotifyPlaylistId}/items`, { method: 'POST', body: { uris: [uri] } });
+    return result?.snapshot_id || true;
   } catch (err) {
     console.error('Failed to push track add to Spotify playlist:', err.message);
-    return false;
+    return null;
   }
 }
 
-// Push a locally-staged removal to the real Spotify playlist.
+// Push a locally-staged removal to the real Spotify playlist. Same
+// snapshot_id return contract as pushTrackAddToSpotify above.
 async function pushTrackRemoveToSpotify(pool, userId, spotifyPlaylistId, uri) {
   const token = await getValidAccessToken(pool, userId);
-  if (!token) return false;
+  if (!token) return null;
   try {
     // The request body key was renamed from "tracks" to "items" along with the endpoint.
-    await spotifyFetch(token.accessToken, `/playlists/${spotifyPlaylistId}/items`, { method: 'DELETE', body: { items: [{ uri }] } });
-    return true;
+    const result = await spotifyFetch(token.accessToken, `/playlists/${spotifyPlaylistId}/items`, { method: 'DELETE', body: { items: [{ uri }] } });
+    return result?.snapshot_id || true;
   } catch (err) {
     console.error('Failed to push track removal to Spotify playlist:', err.message);
-    return false;
+    return null;
   }
 }
 
@@ -101,6 +107,21 @@ async function pullTracksFromSpotify(pool, userId, playlist) {
 
   const token = await getValidAccessToken(pool, userId);
   if (!token) return;
+
+  // One cheap call up front: if Spotify's snapshot_id for this playlist
+  // hasn't moved since we last synced it, nothing on it has changed and the
+  // full (possibly multi-page) track re-fetch below can be skipped entirely.
+  // This is what makes the 8s on-read throttle and the 3-minute background
+  // loop across every linked playlist affordable - most cycles find nothing
+  // changed, so they cost 1 call instead of up to 5.
+  let snapshotId = null;
+  try {
+    snapshotId = await getPlaylistSnapshotId(token.accessToken, playlist.spotify_playlist_id);
+  } catch (err) {
+    console.error('Spotify snapshot check failed:', err.message);
+    return;
+  }
+  if (snapshotId && snapshotId === playlist.spotify_snapshot_id) return; // unchanged since last sync
 
   const [localRows] = await pool.query('SELECT id, track_uri, sync_status FROM playlist_tracks WHERE playlist_id = ?', [playlist.id]);
   const localUris = new Set(localRows.map(r => r.track_uri));
@@ -147,6 +168,10 @@ async function pullTracksFromSpotify(pool, userId, playlist) {
     const values = newTracks.map(t => [playlist.id, t.uri, t.name, t.artist, position++, 'synced']);
     await pool.query('INSERT INTO playlist_tracks (playlist_id, track_uri, track_name, artist_name, position, sync_status) VALUES ?', [values]);
   }
+
+  if (snapshotId) {
+    await pool.query('UPDATE playlists SET spotify_snapshot_id = ? WHERE id = ?', [snapshotId, playlist.id]);
+  }
 }
 
 // "dauerhaft synchronisiert" - keeps every linked playlist reconciled even
@@ -154,14 +179,23 @@ async function pullTracksFromSpotify(pool, userId, playlist) {
 // Playlists page (which still triggers its own throttled sync on read, on
 // top of this). Shares the same throttle map above, so this and any
 // concurrent on-demand read never double up on the same playlist.
-const BACKGROUND_SYNC_INTERVAL_MS = 30000;
+// 3 minutes (was 30s): this is a passive "eventually consistent" backstop,
+// not a gameplay-critical feature - a few minutes' staleness is imperceptible,
+// but polling every linked playlist across the whole server every 30s does
+// add up over hours of uptime and was a real contributor to tripping
+// Spotify's own (undisclosed, sometimes hours-long) rate limit, which - since
+// spotifyFetch's cooldown is shared process-wide - then blocks every OTHER
+// server-mediated Spotify feature too (room-scoped search, delegate playlist
+// browsing, ...) for however long Spotify decided to enforce it.
+const BACKGROUND_SYNC_INTERVAL_MS = 3 * 60 * 1000;
 async function backgroundSyncAllLinkedPlaylists() {
+  if (isSpotifyRateLimited()) return; // already blocked - don't burn a DB query attempting every playlist just to fail each one
   const pool = await getPool();
   if (!pool) return; // DB not configured/unreachable this cycle - just skip, try again next interval
   try {
-    const [rows] = await pool.query('SELECT id, user_id, spotify_playlist_id FROM playlists WHERE spotify_playlist_id IS NOT NULL');
+    const [rows] = await pool.query('SELECT id, user_id, spotify_playlist_id, spotify_snapshot_id FROM playlists WHERE spotify_playlist_id IS NOT NULL');
     for (const row of rows) {
-      await pullTracksFromSpotify(pool, row.user_id, { id: row.id, spotify_playlist_id: row.spotify_playlist_id })
+      await pullTracksFromSpotify(pool, row.user_id, { id: row.id, spotify_playlist_id: row.spotify_playlist_id, spotify_snapshot_id: row.spotify_snapshot_id })
         .catch(err => console.error(`Background sync failed for playlist ${row.id}:`, err.message));
     }
   } catch (err) {
@@ -297,16 +331,18 @@ router.post('/:id/tracks/:trackId/confirm', asyncRoute(async (req, res) => {
   if (!track) return res.status(404).json({ error: 'track_not_found' });
 
   if (track.sync_status === 'pending_add') {
-    const pushed = await pushTrackAddToSpotify(req.db, req.userId, playlist.spotify_playlist_id, track.track_uri);
-    if (!pushed) return res.status(502).json({ error: 'spotify_push_failed' });
+    const snapshotId = await pushTrackAddToSpotify(req.db, req.userId, playlist.spotify_playlist_id, track.track_uri);
+    if (!snapshotId) return res.status(502).json({ error: 'spotify_push_failed' });
     await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE id = ?', [track.id]);
+    if (typeof snapshotId === 'string') await req.db.query('UPDATE playlists SET spotify_snapshot_id = ? WHERE id = ?', [snapshotId, playlist.id]);
     return res.json({ success: true, syncStatus: 'synced' });
   }
 
   if (track.sync_status === 'pending_delete') {
-    const pushed = await pushTrackRemoveToSpotify(req.db, req.userId, playlist.spotify_playlist_id, track.track_uri);
-    if (!pushed) return res.status(502).json({ error: 'spotify_push_failed' });
+    const snapshotId = await pushTrackRemoveToSpotify(req.db, req.userId, playlist.spotify_playlist_id, track.track_uri);
+    if (!snapshotId) return res.status(502).json({ error: 'spotify_push_failed' });
     await req.db.query('DELETE FROM playlist_tracks WHERE id = ?', [track.id]);
+    if (typeof snapshotId === 'string') await req.db.query('UPDATE playlists SET spotify_snapshot_id = ? WHERE id = ?', [snapshotId, playlist.id]);
     return res.json({ success: true, removed: true });
   }
 
@@ -363,32 +399,74 @@ router.post('/:id/link-to-spotify', asyncRoute(async (req, res) => {
   const [tracks] = await req.db.query('SELECT track_uri FROM playlist_tracks WHERE playlist_id = ? ORDER BY position ASC', [playlist.id]);
 
   let created;
+  let snapshotId = null;
   try {
     created = await spotifyFetch(token.accessToken, `/users/${spotifyUserId}/playlists`, {
       method: 'POST',
       body: { name: playlist.name, public: false },
     });
-    // Spotify caps a single add-items call at 100 URIs.
+    snapshotId = created.snapshot_id || null;
+    // Spotify caps a single add-items call at 100 URIs. Each add-items
+    // response already carries the resulting snapshot_id, so the last batch
+    // leaves us with the playlist's final state for free - no extra call
+    // needed to seed pullTracksFromSpotify's snapshot check below.
     for (let i = 0; i < tracks.length; i += 100) {
       const batch = tracks.slice(i, i + 100).map(t => t.track_uri);
-      await spotifyFetch(token.accessToken, `/playlists/${created.id}/items`, { method: 'POST', body: { uris: batch } });
+      const addResult = await spotifyFetch(token.accessToken, `/playlists/${created.id}/items`, { method: 'POST', body: { uris: batch } });
+      snapshotId = addResult?.snapshot_id || snapshotId;
     }
   } catch (err) {
     console.error('Failed to create/populate Spotify playlist:', err.message);
     return res.status(502).json({ error: 'spotify_push_failed' });
   }
 
-  await req.db.query('UPDATE playlists SET spotify_playlist_id = ? WHERE id = ?', [created.id, playlist.id]);
+  await req.db.query('UPDATE playlists SET spotify_playlist_id = ?, spotify_snapshot_id = ? WHERE id = ?', [created.id, snapshotId, playlist.id]);
   await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE playlist_id = ?', [playlist.id]);
   lastPullSyncedAt.set(playlist.id, Date.now()); // just pushed everything ourselves, skip an immediate redundant pull-sync
 
   res.json({ playlist: { id: playlist.id, name: playlist.name, spotifyPlaylistId: created.id, trackCount: tracks.length } });
 }));
 
-// Imports a Spotify playlist as a new, live-linked app playlist in one step
-// (rather than create-then-import) so a rejected duplicate import never
-// leaves an orphaned empty playlist behind. Linked playlists stay reconciled
-// going forward via pullTracksFromSpotify (see above) and the background loop.
+// Shared by the /import route below and autoImportDeathstepPlaylists - fetches
+// every track on the given Spotify playlist and inserts it as a new,
+// already-linked app playlist in one step (rather than create-then-import) so
+// a rejected duplicate import never leaves an orphaned empty playlist behind.
+// Linked playlists stay reconciled going forward via pullTracksFromSpotify
+// (see above) and the background loop. Caller must already have checked for
+// an existing (userId, spotifyPlaylistId) row.
+async function importPlaylistForUser(pool, userId, accessToken, spotifyPlaylistId, name) {
+  const tracks = [];
+  let path = `/playlists/${spotifyPlaylistId}/items?limit=100&fields=next,items(item(uri,name,artists(name)),track(uri,name,artists(name)))`;
+  while (path && tracks.length < 500) {
+    const data = await spotifyFetch(accessToken, path);
+    for (const entry of data.items || []) {
+      const track = entry.item || entry.track;
+      if (!track || !track.uri) continue; // skip local/unavailable tracks
+      tracks.push({
+        uri: track.uri,
+        name: track.name,
+        artist: (track.artists || []).map(a => a.name).join(', '),
+      });
+    }
+    path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
+  }
+
+  const [result] = await pool.query(
+    'INSERT INTO playlists (user_id, name, spotify_playlist_id) VALUES (?, ?, ?)',
+    [userId, name, spotifyPlaylistId]
+  );
+  const playlistId = result.insertId;
+
+  if (tracks.length > 0) {
+    const values = tracks.map((t, i) => [playlistId, t.uri, t.name, t.artist, i]);
+    await pool.query('INSERT INTO playlist_tracks (playlist_id, track_uri, track_name, artist_name, position) VALUES ?', [values]);
+  }
+  lastPullSyncedAt.set(playlistId, Date.now()); // fresh import already has everything, skip an immediate redundant pull-sync
+
+  return { id: playlistId, name, trackCount: tracks.length, spotifyPlaylistId };
+}
+
+// Imports a Spotify playlist as a new, live-linked app playlist in one step.
 router.post('/import', asyncRoute(async (req, res) => {
   const spotifyPlaylistId = req.body?.spotifyPlaylistId;
   const name = (req.body?.name || '').trim();
@@ -404,35 +482,126 @@ router.post('/import', asyncRoute(async (req, res) => {
   const token = await getValidAccessToken(req.db, req.userId);
   if (!token) return res.status(409).json({ error: 'spotify_not_connected' });
 
-  const tracks = [];
-  let path = `/playlists/${spotifyPlaylistId}/items?limit=100&fields=next,items(item(uri,name,artists(name)),track(uri,name,artists(name)))`;
-  while (path && tracks.length < 500) {
+  const playlist = await importPlaylistForUser(req.db, req.userId, token.accessToken, spotifyPlaylistId, name);
+  res.json({ playlist });
+}));
+
+// Called right after a player's Spotify connection is accepted as this
+// room's playback delegate (server/index.js's resolveSpotifyShareRequest) -
+// auto-imports any of that Spotify account's own playlists whose name
+// contains "deathstep" (case-insensitive), so the couple of playlists someone
+// actually curated for game night show up under their own Playlists page
+// immediately, without a manual import first. Best-effort: silently does
+// nothing if the connection isn't (or is no longer) valid, and skips anything
+// already imported (same rule as the manual /import route above) - never
+// throws, since a failure here shouldn't take down the share-accept flow
+// that calls it.
+export async function autoImportDeathstepPlaylists(pool, userId) {
+  const token = await getValidAccessToken(pool, userId);
+  if (!token) return;
+
+  const [existingRows] = await pool.query('SELECT spotify_playlist_id FROM playlists WHERE user_id = ? AND spotify_playlist_id IS NOT NULL', [userId]);
+  const alreadyImported = new Set(existingRows.map(r => r.spotify_playlist_id));
+
+  const candidates = [];
+  let path = '/me/playlists?limit=50';
+  while (path && candidates.length < 200) {
     const data = await spotifyFetch(token.accessToken, path);
-    for (const entry of data.items || []) {
-      const track = entry.item || entry.track;
-      if (!track || !track.uri) continue; // skip local/unavailable tracks
-      tracks.push({
-        uri: track.uri,
-        name: track.name,
-        artist: (track.artists || []).map(a => a.name).join(', '),
-      });
-    }
+    candidates.push(...(data.items || []).filter(Boolean));
     path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;
   }
 
+  const toImport = candidates.filter(p => p.name?.toLowerCase().includes('deathstep') && !alreadyImported.has(p.id));
+  for (const p of toImport) {
+    try {
+      await importPlaylistForUser(pool, userId, token.accessToken, p.id, p.name);
+    } catch (err) {
+      console.error(`Auto-import of Spotify playlist "${p.name}" failed:`, err.message);
+    }
+  }
+}
+
+// Resolves basic metadata (title only - no auth needed) for a public Spotify
+// URL via Spotify's oEmbed endpoint, so a playlist/track link can be saved
+// even by a user with no Spotify connection of their own at all. Returns null
+// for anything that isn't a reachable/public Spotify link.
+export async function fetchSpotifyOEmbed(url) {
+  const response = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`);
+  if (!response.ok) return null;
+  return response.json().catch(() => null);
+}
+
+// Spotify share links sometimes include a locale segment before the resource
+// type (e.g. https://open.spotify.com/intl-de/track/ID) depending on the
+// user's region/language settings - optional so plain links still match too.
+export const SPOTIFY_PLAYLIST_URL_RE = /open\.spotify\.com\/(?:[a-zA-Z-]+\/)?playlist\/([a-zA-Z0-9]+)/;
+export const SPOTIFY_TRACK_URL_RE = /open\.spotify\.com\/(?:[a-zA-Z-]+\/)?track\/([a-zA-Z0-9]+)/;
+
+// Saves a Spotify playlist as a bare reference (name only, no tracks) purely
+// from its public share link - no Spotify connection required at all. If this
+// user later connects Spotify, the background sync loop (see
+// backgroundSyncAllLinkedPlaylists above) picks it up automatically and
+// starts pulling in its real tracks, exactly like a normal import - nothing
+// extra to do at that point.
+router.post('/import-by-link', asyncRoute(async (req, res) => {
+  const url = (req.body?.url || '').trim();
+  const match = url.match(SPOTIFY_PLAYLIST_URL_RE);
+  if (!match) return res.status(400).json({ error: 'invalid_spotify_link' });
+  const spotifyPlaylistId = match[1];
+
+  const [existing] = await req.db.query(
+    'SELECT id FROM playlists WHERE user_id = ? AND spotify_playlist_id = ?',
+    [req.userId, spotifyPlaylistId]
+  );
+  if (existing[0]) return res.status(409).json({ error: 'already_imported' });
+
+  const meta = await fetchSpotifyOEmbed(url);
+  if (!meta) return res.status(400).json({ error: 'invalid_spotify_link' });
+
   const [result] = await req.db.query(
     'INSERT INTO playlists (user_id, name, spotify_playlist_id) VALUES (?, ?, ?)',
-    [req.userId, name, spotifyPlaylistId]
+    [req.userId, meta.title || 'Spotify Playlist', spotifyPlaylistId]
   );
-  const playlistId = result.insertId;
+  res.json({ playlist: { id: result.insertId, name: meta.title || 'Spotify Playlist', trackCount: 0, spotifyPlaylistId } });
+}));
 
-  if (tracks.length > 0) {
-    const values = tracks.map((t, i) => [playlistId, t.uri, t.name, t.artist, i]);
-    await req.db.query('INSERT INTO playlist_tracks (playlist_id, track_uri, track_name, artist_name, position) VALUES ?', [values]);
+// Adds a single track to one of this user's own (non-Spotify-connected)
+// playlists purely from its public share link - same oEmbed metadata source
+// as import-by-link above, so no Spotify connection is required. oEmbed only
+// ever returns a track's title, never its artist separately, so artist is
+// left blank here.
+router.post('/:id/tracks/by-link', asyncRoute(async (req, res) => {
+  const playlist = await getOwnedPlaylist(req.db, req.params.id, req.userId);
+  if (!playlist) return res.status(404).json({ error: 'playlist_not_found' });
+
+  const url = (req.body?.url || '').trim();
+  const match = url.match(SPOTIFY_TRACK_URL_RE);
+  if (!match) return res.status(400).json({ error: 'invalid_spotify_link' });
+  const uri = `spotify:track:${match[1]}`;
+
+  // track_name/artist_name are selected (not just id/sync_status) because the
+  // reactivate response below hands them straight back to the client - they
+  // were missing here before, which silently sent back name: undefined /
+  // artist: undefined (dropped entirely by JSON.stringify), showing a blank
+  // track until the next full reload re-fetched the real row from the DB.
+  const [existingRows] = await req.db.query('SELECT id, sync_status, track_name, artist_name FROM playlist_tracks WHERE playlist_id = ? AND track_uri = ?', [playlist.id, uri]);
+  const existing = existingRows[0];
+  if (existing) {
+    if (existing.sync_status !== 'pending_delete') return res.status(409).json({ error: 'track_already_in_playlist' });
+    await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE id = ?', [existing.id]);
+    return res.json({ track: { id: existing.id, uri, name: existing.track_name, artist: existing.artist_name, syncStatus: 'synced' }, reactivated: true });
   }
-  lastPullSyncedAt.set(playlistId, Date.now()); // fresh import already has everything, skip an immediate redundant pull-sync
 
-  res.json({ playlist: { id: playlistId, name, trackCount: tracks.length, spotifyPlaylistId } });
+  const meta = await fetchSpotifyOEmbed(url);
+  if (!meta) return res.status(400).json({ error: 'invalid_spotify_link' });
+
+  const syncStatus = playlist.spotify_playlist_id ? 'pending_add' : 'synced';
+  const position = await nextTrackPosition(req.db, playlist.id);
+  const [result] = await req.db.query(
+    'INSERT INTO playlist_tracks (playlist_id, track_uri, track_name, artist_name, position, sync_status) VALUES (?, ?, ?, ?, ?, ?)',
+    [playlist.id, uri, meta.title || uri, '', position, syncStatus]
+  );
+  res.json({ track: { id: result.insertId, uri, name: meta.title || uri, artist: '', syncStatus } });
 }));
 
 export default router;

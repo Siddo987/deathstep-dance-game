@@ -32,6 +32,7 @@ function sanitizeUser(row, isSuperAdmin = false) {
     defaultDanceRole: row.default_dance_role ?? null,
     defaultIsFlexible: !!row.default_is_flexible,
     leaderboardOptIn: !!row.leaderboard_opt_in,
+    autoShareSpotify: !!row.auto_share_spotify,
     isSuperAdmin,
   };
 }
@@ -175,6 +176,7 @@ router.put('/me', asyncRoute(async (req, res) => {
   // can't distinguish "omitted" from "explicitly false" once converted to 0/1.
   const defaultIsFlexible = req.body?.defaultIsFlexible;
   const leaderboardOptIn = req.body?.leaderboardOptIn;
+  const autoShareSpotify = req.body?.autoShareSpotify;
 
   if (!displayName) return res.status(400).json({ error: 'missing_display_name' });
   if (defaultDanceRole !== null && defaultDanceRole !== 'lead' && defaultDanceRole !== 'follow') {
@@ -186,13 +188,15 @@ router.put('/me', asyncRoute(async (req, res) => {
       display_name = ?,
       default_dance_role = ?,
       default_is_flexible = COALESCE(?, default_is_flexible),
-      leaderboard_opt_in = COALESCE(?, leaderboard_opt_in)
+      leaderboard_opt_in = COALESCE(?, leaderboard_opt_in),
+      auto_share_spotify = COALESCE(?, auto_share_spotify)
      WHERE id = ?`,
     [
       displayName,
       defaultDanceRole,
       defaultIsFlexible === undefined ? null : (defaultIsFlexible ? 1 : 0),
       leaderboardOptIn === undefined ? null : (leaderboardOptIn ? 1 : 0),
+      autoShareSpotify === undefined ? null : (autoShareSpotify ? 1 : 0),
       userId,
     ]
   );

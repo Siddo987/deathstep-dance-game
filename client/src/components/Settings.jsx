@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { LogIn, Repeat, Save, Trophy } from 'lucide-react';
+import { LogIn, Repeat, Save, Trophy, Music2 } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
 import { updateSettings } from '../auth.js';
 
@@ -9,6 +9,7 @@ function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
   const [defaultDanceRole, setDefaultDanceRole] = useState(null); // 'lead' | 'follow' | null
   const [defaultIsFlexible, setDefaultIsFlexible] = useState(false);
   const [leaderboardOptIn, setLeaderboardOptIn] = useState(false);
+  const [autoShareSpotify, setAutoShareSpotify] = useState(false);
   const [statusKey, setStatusKey] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
@@ -18,6 +19,7 @@ function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
     setDefaultDanceRole(currentUser.defaultDanceRole ?? null);
     setDefaultIsFlexible(!!currentUser.defaultIsFlexible);
     setLeaderboardOptIn(!!currentUser.leaderboardOptIn);
+    setAutoShareSpotify(!!currentUser.autoShareSpotify);
   }, [currentUser?.id]);
 
   // Don't know yet whether this visitor is logged in (fetchMe() is still in
@@ -57,7 +59,7 @@ function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
     e.preventDefault();
     setStatusKey('');
     setIsSaving(true);
-    const result = await updateSettings({ displayName, defaultDanceRole, defaultIsFlexible, leaderboardOptIn });
+    const result = await updateSettings({ displayName, defaultDanceRole, defaultIsFlexible, leaderboardOptIn, autoShareSpotify });
     setIsSaving(false);
     if (result.error) {
       setStatusKey(`auth.error.${result.error}`);
@@ -122,6 +124,16 @@ function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
             />
             <Trophy size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
             <span style={{ color: 'white', fontSize: '0.9rem' }}>{t('settings.leaderboardOptIn')}</span>
+          </label>
+
+          <label className="check-row" style={{ padding: '10px', background: 'rgba(255,255,255,0.05)', borderRadius: 'var(--radius-sm)' }}>
+            <input
+              type="checkbox"
+              checked={autoShareSpotify}
+              onChange={(e) => setAutoShareSpotify(e.target.checked)}
+            />
+            <Music2 size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
+            <span style={{ color: 'white', fontSize: '0.9rem' }}>{t('settings.autoShareSpotify')}</span>
           </label>
 
           <button type="submit" className="cyber-button pulse-animation" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }} disabled={isSaving}>

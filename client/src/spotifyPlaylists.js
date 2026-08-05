@@ -40,6 +40,29 @@ export const searchTracksInRoom = (roomId, query) => request(`/api/rooms/${roomI
 // spotifyDelegate and GMDashboard.jsx's getPlaybackToken.
 export const fetchRoomSpotifyToken = (roomId) => request(`/api/rooms/${roomId}/spotify-token`);
 
+// Public (no login needed, same room-code trust boundary) - the room's
+// current delegate's own Spotify playlists/tracks, so GMDashboard.jsx can
+// offer them in the "add to queue" picker even though they live under a
+// different (or no) Deathstep account than the GM's own.
+export const fetchRoomSpotifyPlaylists = (roomId) => request(`/api/rooms/${roomId}/spotify-playlists`);
+export const fetchRoomSpotifyPlaylistTracks = (roomId, playlistId) => request(`/api/rooms/${roomId}/spotify-playlists/${encodeURIComponent(playlistId)}/tracks`);
+
+// Public (no login needed, same room-code trust boundary) - the room's
+// current delegate's own Deathstep-app playlists (server/playlists.js's
+// DB-stored `playlists` table), not Spotify's live data - the one set of
+// playlists fetchRoomSpotifyPlaylists can never show, since an app-only
+// playlist (never linked to a real Spotify playlist) doesn't exist on
+// Spotify's side at all.
+export const fetchRoomDeathstepPlaylists = (roomId) => request(`/api/rooms/${roomId}/deathstep-playlists`);
+export const fetchRoomDeathstepPlaylistTracks = (roomId, playlistId) => request(`/api/rooms/${roomId}/deathstep-playlists/${encodeURIComponent(playlistId)}/tracks`);
+
+// Public (no login needed) - a random pick from the dev-curated fallback
+// list (server/db.js's fallback_songs table), offered to a GM who bypasses
+// the "song ready" lock with no track selected at all - see
+// GMDashboard.jsx's handleBypassSongReady. { track: null } if the list is
+// empty or the DB is unavailable.
+export const fetchRandomFallbackSong = () => request('/api/fallback-songs/random');
+
 // --- Own (in-app) playlists ---
 
 export const fetchMyPlaylists = () => request('/api/playlists');
@@ -62,3 +85,10 @@ export const importSpotifyPlaylist = (spotifyPlaylistId, name) =>
   request('/api/playlists/import', { method: 'POST', body: JSON.stringify({ spotifyPlaylistId, name }) });
 
 export const linkPlaylistToSpotify = (id) => request(`/api/playlists/${id}/link-to-spotify`, { method: 'POST', body: '{}' });
+
+// No Spotify connection needed for either of these - see server/playlists.js's
+// import-by-link / tracks/by-link routes (resolved via Spotify's public,
+// unauthenticated oEmbed metadata).
+export const importPlaylistByLink = (url) => request('/api/playlists/import-by-link', { method: 'POST', body: JSON.stringify({ url }) });
+
+export const addTrackByLink = (playlistId, url) => request(`/api/playlists/${playlistId}/tracks/by-link`, { method: 'POST', body: JSON.stringify({ url }) });
