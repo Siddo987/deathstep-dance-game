@@ -1,20 +1,79 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { socket } from './socket.js';
 import Home from './components/Home.jsx';
-import GMDashboard from './components/GMDashboard.jsx';
-import PlayerScreen from './components/PlayerScreen.jsx';
-import Feedback from './components/Feedback.jsx';
-import Datenschutz from './components/Datenschutz.jsx';
-import Impressum from './components/Impressum.jsx';
-import Stats from './components/Stats.jsx';
-import Settings from './components/Settings.jsx';
-import Leaderboard from './components/Leaderboard.jsx';
-import Playlists from './components/Playlists.jsx';
 import CookieBanner from './components/CookieBanner.jsx';
 import { AlertModal, ConfirmModal } from './components/Modal.jsx';
 import { AuthModal } from './components/Auth.jsx';
 import { fetchMe, logout as logoutRequest } from './auth.js';
 import { useLanguage } from './i18n.jsx';
+
+// A dynamic import() rejects if the chunk fails to load - by far the most
+// common real-world cause is a tab that's been open since before the last
+// deploy, whose already-loaded index.html still references a chunk hash
+// that got replaced/removed by the newer build. Reloading fetches the
+// current index.html (and therefore the current, correct hashes), which
+// fixes that case outright - retried at most once per page load (the
+// sessionStorage flag), so a chunk that's still unreachable after a reload
+// (a real network/server problem, not a stale-hash problem) fails through to
+// ErrorBoundary (see main.jsx) instead of reloading forever.
+const CHUNK_RELOAD_FLAG = 'deathstep_chunk_reload_attempted';
+
+function lazyWithRetry(importFn) {
+  return lazy(async () => {
+    try {
+      const module = await importFn();
+      // A later chunk load (a different lazy route, possibly long after
+      // whatever the flag below was set for) succeeding means this tab is
+      // caught up again - clear it so a *future* failure still gets its own
+      // one-time reload instead of silently skipping straight to
+      // ErrorBoundary just because some earlier, unrelated failure already
+      // used up the retry once this session.
+      try { sessionStorage.removeItem(CHUNK_RELOAD_FLAG); } catch (e) { /* sessionStorage unavailable */ }
+      return module;
+    } catch (err) {
+      // A dynamic import() rejects if the chunk fails to load - by far the
+      // most common real-world cause is a tab that's been open since before
+      // the last deploy, whose already-loaded index.html still references a
+      // chunk hash that got replaced/removed by the newer build. Reloading
+      // fetches the current index.html (and therefore the current, correct
+      // hashes), which fixes that case outright - retried at most once per
+      // failure episode, so a chunk that's still unreachable after a reload
+      // (a real network/server problem, not a stale-hash problem) fails
+      // through to ErrorBoundary (see main.jsx) instead of reloading forever.
+      let alreadyRetried = true;
+      try { alreadyRetried = !!sessionStorage.getItem(CHUNK_RELOAD_FLAG); } catch (e) { /* sessionStorage unavailable */ }
+      if (!alreadyRetried) {
+        try { sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1'); } catch (e) { /* sessionStorage unavailable */ }
+        window.location.reload();
+        return new Promise(() => {}); // reload takes over; never resolves
+      }
+      throw err;
+    }
+  });
+}
+
+// Code-split everything below Home - each of these is only ever needed on
+// one specific route/view, but before this they were all bundled (and
+// downloaded+parsed by every visitor, on every page, including the plain
+// homepage) into a single ~930KB JS chunk. GMDashboard alone is 4000+ lines.
+// Home/CookieBanner/Modal/Auth above stay eager since they're on screen (or
+// about to be) for essentially every visit.
+const GMDashboard = lazyWithRetry(() => import('./components/GMDashboard.jsx'));
+const PlayerScreen = lazyWithRetry(() => import('./components/PlayerScreen.jsx'));
+const Feedback = lazyWithRetry(() => import('./components/Feedback.jsx'));
+const Datenschutz = lazyWithRetry(() => import('./components/Datenschutz.jsx'));
+const Impressum = lazyWithRetry(() => import('./components/Impressum.jsx'));
+const Stats = lazyWithRetry(() => import('./components/Stats.jsx'));
+const Settings = lazyWithRetry(() => import('./components/Settings.jsx'));
+const Leaderboard = lazyWithRetry(() => import('./components/Leaderboard.jsx'));
+const Playlists = lazyWithRetry(() => import('./components/Playlists.jsx'));
+const AchievementsDashboard = lazyWithRetry(() => import('./components/AchievementsDashboard.jsx'));
+const DevDashboard = lazyWithRetry(() => import('./components/DevDashboard.jsx'));
+
+// Minimal, near-invisible fallback for the Suspense boundaries below - these
+// lazy chunks are small and fast on a real connection, so this is only ever
+// visible for a beat; no need for a full spinner component/animation here.
+const RouteLoading = () => <div className="route-loading" aria-hidden="true" />;
 
 // Server responses/events carry a messageKey (+ optional messageParams) that is
 // looked up in the locale files under 'server.<key>'. Alerts are stored as
@@ -34,7 +93,30 @@ let handledOAuthCode = null;
 function App() {
   const { t } = useLanguage();
   const [alertMessage, setAlertMessage] = useState(null); // { key, params, success }
-  const [view, setView] = useState(() => localStorage.getItem('deathstep_view') || 'home'); // home, gm, player
+  // Only trust a restored 'gm'/'player' view if there's actually a room id to
+  // reconnect to - without this check, a browser whose deathstep_view was
+  // left stale/mismatched (e.g. deathstep_room_id got cleared some other way
+  // without view following) would permanently open on a blank screen: 'gm'/
+  // 'player' render nothing until `room` is populated (see the view===/room
+  // checks in the JSX below), and nothing ever un-sticks that since there's
+  // no room id to reconnect with. Defaulting to 'home' here is always safe -
+  // a *legitimate* saved session still has both keys set together.
+  const [view, setView] = useState(() => {
+    const savedView = localStorage.getItem('deathstep_view');
+    const savedRoomId = localStorage.getItem('deathstep_room_id');
+    return (savedView && savedRoomId) ? savedView : 'home';
+  }); // home, gm, player
+  // Whether the in-game screen (GM/Player dashboard) should actually be
+  // rendered right now, as opposed to the home/start screen - kept separate
+  // from `view` above so an active game (view === 'gm'/'player' + room
+  // loaded, reconnected silently in the background on every page load) no
+  // longer forces the game screen open by itself. The root "/" must always
+  // land on the start screen; only "/game" (or explicitly rejoining via the
+  // start screen's "Spiel wieder beitreten" button, see hasActiveGame below)
+  // shows the dashboard. Read once at mount, same pattern as `view` above -
+  // nothing here ever listens for pathname changes afterwards, this app has
+  // no router and only ever navigates between these two paths itself.
+  const [inGameView, setInGameView] = useState(() => window.location.pathname === '/game');
   const [room, setRoom] = useState(null);
   const [playerRole, setPlayerRole] = useState(null);
   const [isEliminated, setIsEliminated] = useState(false);
@@ -56,8 +138,44 @@ function App() {
     }
     return id;
   });
+  // clientId above is visible to everyone else in the room (couples/kick-
+  // target references need it), so it can't prove a joinRoom/reconnectToRoom
+  // call claiming it is really this browser's own session - this is the
+  // actual proof, issued by the server on join/reconnect/promotion and never
+  // broadcast to anyone else (see gameStore.js's addPlayer). Persisted the
+  // same way as clientId so it survives a reload.
+  const sessionSecretRef = useRef(localStorage.getItem('deathstep_session_secret') || null);
+  const setSessionSecret = (secret) => {
+    if (!secret) return;
+    sessionSecretRef.current = secret;
+    localStorage.setItem('deathstep_session_secret', secret);
+  };
 
   const isLeavingRef = useRef(false);
+
+  // Reflects the current view in the URL - actually being in a game (as GM
+  // or player) lives at /game, everything else (the create/join screen) is
+  // the root "/". No router: this is the only path the app itself ever
+  // navigates between, so a plain pathname check plus replaceState is
+  // enough - the server's catch-all route already serves index.html for any
+  // unmatched path (including a fresh/bookmarked /game), and the other
+  // standalone pages below (/feedback, /stats, etc.) return before this
+  // component's main view logic ever runs, so this only ever fires while
+  // actually on '/' or '/game'.
+  useEffect(() => {
+    const isGameRoute = window.location.pathname === '/' || window.location.pathname === '/game';
+    if (!isGameRoute) return;
+    // Gated on `room` and `inGameView`, not just `view` - view alone can be a
+    // restored-but-not-yet-confirmed guess (see its initializer above and the
+    // reconnectToRoom flow), and inGameView is what actually decides whether
+    // the dashboard or the start screen is on screen right now (see
+    // showGameScreen below) - the URL should always follow what's visibly
+    // rendered, not just what's silently reconnected in the background.
+    const target = inGameView && (view === 'gm' || view === 'player') && room ? '/game' : '/';
+    if (window.location.pathname !== target) {
+      window.history.replaceState({}, '', target);
+    }
+  }, [view, room, inGameView]);
 
   useEffect(() => {
     fetchMe().then((user) => {
@@ -139,9 +257,10 @@ function App() {
     socket.on('connect', () => {
       const savedRoomId = localStorage.getItem('deathstep_room_id');
       if (savedRoomId && view !== 'home') {
-        socket.emit('reconnectToRoom', { roomId: savedRoomId, clientId, isGM: view === 'gm' }, (response) => {
+        socket.emit('reconnectToRoom', { roomId: savedRoomId, clientId, isGM: view === 'gm', sessionSecret: sessionSecretRef.current }, (response) => {
           if (response.success) {
             handleRoomUpdated(response.room);
+            setSessionSecret(response.sessionSecret);
             if (response.gmChatHistory) {
               setGmChatMessages(response.gmChatHistory);
             }
@@ -170,16 +289,18 @@ function App() {
       }
     });
 
-    socket.on('rejoinApproved', ({ room: approvedRoom, clientId: approvedClientId }) => {
+    socket.on('rejoinApproved', ({ room: approvedRoom, clientId: approvedClientId, sessionSecret }) => {
       if (approvedClientId && approvedClientId !== clientId) {
         localStorage.setItem('deathstep_client_id', approvedClientId);
         setClientId(approvedClientId);
       }
+      setSessionSecret(sessionSecret);
       setRejoinPending(false);
       setRoom(approvedRoom);
       localStorage.setItem('deathstep_room_id', approvedRoom.id);
       localStorage.setItem('deathstep_view', 'player');
       setView('player');
+      setInGameView(true);
     });
 
     socket.on('rejoinDenied', (payload) => {
@@ -210,14 +331,41 @@ function App() {
       setAlertMessage({ ...serverAlert(payload), success: payload?.messageKey === 'suggestionConfirmed' });
     });
 
-    socket.on('promotedToGM', ({ room: newRoom, gmChatHistory }) => {
+    socket.on('promotedToGM', ({ room: newRoom, gmChatHistory, sessionSecret }) => {
       isLeavingRef.current = false;
       setRoom(newRoom);
+      setSessionSecret(sessionSecret);
       setGmChatMessages(gmChatHistory || []);
       localStorage.setItem('deathstep_room_id', newRoom.id);
       localStorage.setItem('deathstep_view', 'gm');
       setView('gm');
+      setInGameView(true);
       setAlertMessage({ key: 'alert.promoted' });
+    });
+
+    // A co-GM's rights were revoked (by the main GM, or themselves - see
+    // GMDashboard.jsx's handleRemoveCoGM) - they stay in the room as a
+    // regular player rather than being removed (see removedFromGame above),
+    // so this switches the view instead of leaving.
+    socket.on('demotedToPlayer', ({ room: newRoom, sessionSecret }) => {
+      setRoom(newRoom);
+      setSessionSecret(sessionSecret);
+      localStorage.setItem('deathstep_view', 'player');
+      setView('player');
+      setAlertMessage({ key: 'alert.demoted' });
+    });
+
+    // The main GM handed the round over to this co-GM (see
+    // GMDashboard.jsx's handleHandoverGM) - already still viewing 'gm', so
+    // no view change needed, just an update and a heads-up. sessionSecret is
+    // the room's freshly rotated primary-GM secret (see gameStore.
+    // handoverGM/server/index.js's handoverGM handler) - must be stored the
+    // same way joinRoom/reconnectToRoom's does, since every future
+    // reconnectToRoom call as this now-primary GM needs to prove it.
+    socket.on('becameMainGM', ({ room: newRoom, sessionSecret: newSessionSecret }) => {
+      setRoom(newRoom);
+      setSessionSecret(newSessionSecret);
+      setAlertMessage({ key: 'alert.becameMainGM' });
     });
 
     socket.on('gmChatMessage', (message) => {
@@ -235,6 +383,8 @@ function App() {
       socket.off('partnerLeftNotice');
       socket.off('songSuggestionHandled');
       socket.off('promotedToGM');
+      socket.off('demotedToPlayer');
+      socket.off('becameMainGM');
       socket.off('gmChatMessage');
     };
   }, [view, clientId]);
@@ -274,8 +424,14 @@ function App() {
       }
 
       getToken(code).then((token) => {
+        // Cleared unconditionally, same as the link-mode branch above - a
+        // failed exchange still means this ?code= is spent (or was already
+        // invalid), so leaving it in the URL only sets up a guaranteed second
+        // failure (Spotify authorization codes are single-use) on the next
+        // plain page reload, once handledOAuthCode's module-level guard has
+        // reset with the fresh page load.
+        window.history.replaceState({}, document.title, window.location.pathname);
         if (token) {
-          window.history.replaceState({}, document.title, window.location.pathname);
           setAlertMessage({ key: 'alert.spotifyConnected', success: true });
         } else {
           setAlertMessage({ key: 'alert.spotifyFailed' });
@@ -300,6 +456,7 @@ function App() {
     setRejoinPending(false);
     setGmChatMessages([]);
     setView('home');
+    setInGameView(false);
   };
 
   const handleCreateRoom = () => {
@@ -308,10 +465,12 @@ function App() {
     socket.emit('createRoom', { clientId }, (response) => {
       if (response.success) {
         setRoom(response.room);
+        setSessionSecret(response.sessionSecret);
         setGmChatMessages(response.gmChatHistory || []);
         localStorage.setItem('deathstep_room_id', response.room.id);
         localStorage.setItem('deathstep_view', 'gm');
         setView('gm');
+        setInGameView(true);
       }
     });
   };
@@ -323,12 +482,14 @@ function App() {
 
   const handleJoinRoom = (roomId, playerName, danceRole, isFlexible) => {
     isLeavingRef.current = false;
-    socket.emit('joinRoom', { roomId, playerName, danceRole, isFlexible, clientId }, (response) => {
+    socket.emit('joinRoom', { roomId, playerName, danceRole, isFlexible, clientId, sessionSecret: sessionSecretRef.current }, (response) => {
       if (response.success) {
         setRoom(response.room);
+        setSessionSecret(response.sessionSecret);
         localStorage.setItem('deathstep_room_id', response.room.id);
         localStorage.setItem('deathstep_view', 'player');
         setView('player');
+        setInGameView(true);
       } else if (response.nameTaken) {
         setRejoinPrompt({ roomId, playerName });
       } else {
@@ -339,12 +500,14 @@ function App() {
 
   const handleRequestRejoin = (roomId, playerName) => {
     isLeavingRef.current = false;
-    socket.emit('requestRejoin', { roomId, playerName, clientId }, (response) => {
+    socket.emit('requestRejoin', { roomId, playerName, clientId, sessionSecret: sessionSecretRef.current }, (response) => {
       if (response.success) {
         setRoom(response.room);
+        setSessionSecret(response.sessionSecret);
         localStorage.setItem('deathstep_room_id', response.room.id);
         localStorage.setItem('deathstep_view', 'player');
         setView('player');
+        setInGameView(true);
       } else if (response.pending) {
         setRejoinPending(true);
       } else {
@@ -355,13 +518,21 @@ function App() {
 
   const myGmName = room?.coGms?.find(g => g.id === clientId)?.name || t('gm.mainGmName');
 
+  // A room reconnected silently in the background (see the socket 'connect'
+  // handler above, which fires on every page load/reconnect regardless of
+  // inGameView) counts as "active" the moment it's confirmed - this is what
+  // powers the start screen's "Spiel wieder beitreten" button, and gates
+  // whether inGameView is even allowed to actually show the dashboard.
+  const hasActiveGame = (view === 'gm' || view === 'player') && !!room;
+  const showGameScreen = inGameView && hasActiveGame;
+
   if (window.location.pathname === '/feedback') {
     return (
       <div className="app-container">
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Feedback />
+        <Suspense fallback={<RouteLoading />}><Feedback /></Suspense>
         <CookieBanner />
       </div>
     );
@@ -373,7 +544,7 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Datenschutz />
+        <Suspense fallback={<RouteLoading />}><Datenschutz /></Suspense>
         <CookieBanner />
       </div>
     );
@@ -385,7 +556,7 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Impressum />
+        <Suspense fallback={<RouteLoading />}><Impressum /></Suspense>
         <CookieBanner />
       </div>
     );
@@ -397,8 +568,24 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Stats currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Suspense fallback={<RouteLoading />}>
+          <Stats currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
+        </Suspense>
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
+  if (window.location.pathname === '/dev') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Suspense fallback={<RouteLoading />}>
+          <DevDashboard currentUser={currentUser} authLoading={!authChecked} />
+        </Suspense>
         <CookieBanner />
       </div>
     );
@@ -410,7 +597,9 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Settings currentUser={currentUser} authLoading={!authChecked} onUserUpdated={setCurrentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Suspense fallback={<RouteLoading />}>
+          <Settings currentUser={currentUser} authLoading={!authChecked} onUserUpdated={setCurrentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        </Suspense>
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
         <CookieBanner />
       </div>
@@ -423,7 +612,9 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Leaderboard currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Suspense fallback={<RouteLoading />}>
+          <Leaderboard currentUser={currentUser} onLoginClick={() => setIsAuthModalOpen(true)} />
+        </Suspense>
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
         <CookieBanner />
       </div>
@@ -436,7 +627,24 @@ function App() {
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
-        <Playlists currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
+        <Suspense fallback={<RouteLoading />}>
+          <Playlists currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
+        </Suspense>
+        <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
+  if (window.location.pathname === '/achievements') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Suspense fallback={<RouteLoading />}>
+          <AchievementsDashboard currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
+        </Suspense>
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
         <CookieBanner />
       </div>
@@ -449,14 +657,14 @@ function App() {
         <h1 className="glitch-text">Deathstep</h1>
       </div>
 
-      {view === 'home' && rejoinPending && (
+      {!showGameScreen && rejoinPending && (
         <div className="cyber-card" style={{ textAlign: 'center' }}>
           <h2 style={{ marginBottom: '20px', color: 'var(--neon-purple)' }}>{t('app.rejoinRequestedTitle')}</h2>
           <p style={{ color: 'var(--text-muted)' }}>{t('app.rejoinRequestedWait')}</p>
         </div>
       )}
 
-      {view === 'home' && !rejoinPending && (
+      {!showGameScreen && !rejoinPending && (
         <Home
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
@@ -464,29 +672,37 @@ function App() {
           authLoading={!authChecked}
           onLoginClick={() => setIsAuthModalOpen(true)}
           onLogout={handleLogout}
+          hasActiveGame={hasActiveGame}
+          onRejoinGame={() => setInGameView(true)}
         />
       )}
 
-      {view === 'gm' && room && (
-        <GMDashboard
-          room={room}
-          onLeave={() => handleLeaveRoom(true)}
-          myGmName={myGmName}
-          gmChatMessages={gmChatMessages}
-          onSendGMChatMessage={handleSendGMChatMessage}
-          currentUser={currentUser}
-        />
+      {showGameScreen && view === 'gm' && (
+        <Suspense fallback={<RouteLoading />}>
+          <GMDashboard
+            room={room}
+            onLeave={() => handleLeaveRoom(true)}
+            myGmName={myGmName}
+            clientId={clientId}
+            onSessionSecretUpdated={setSessionSecret}
+            gmChatMessages={gmChatMessages}
+            onSendGMChatMessage={handleSendGMChatMessage}
+            currentUser={currentUser}
+          />
+        </Suspense>
       )}
 
-      {view === 'player' && room && (
-        <PlayerScreen
-          room={room}
-          role={playerRole}
-          isEliminated={isEliminated}
-          clientId={clientId}
-          currentUser={currentUser}
-          onLeave={() => handleLeaveRoom(true)}
-        />
+      {showGameScreen && view === 'player' && (
+        <Suspense fallback={<RouteLoading />}>
+          <PlayerScreen
+            room={room}
+            role={playerRole}
+            isEliminated={isEliminated}
+            clientId={clientId}
+            currentUser={currentUser}
+            onLeave={() => handleLeaveRoom(true)}
+          />
+        </Suspense>
       )}
 
       <AlertModal
