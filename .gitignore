@@ -1,4 +1,4 @@
 node_modules/
 /.env
 client/.env
-/server/data/feedback.txt
+Thumbs.db
