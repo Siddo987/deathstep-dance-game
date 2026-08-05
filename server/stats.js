@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { getPool, requireDb } from './db.js';
 import { getUserIdFromRequest } from './authToken.js';
+import { didKillersWin } from './gameStore.js';
+import { recordGameAchievements } from './achievements.js';
 
 // Without this, a thrown DB error inside an async route handler just hangs
 // the request instead of returning a clean error - same pattern as
@@ -12,18 +14,6 @@ function asyncRoute(handler) {
       if (!res.headersSent) res.status(500).json({ error: 'unknown_error' });
     });
   };
-}
-
-// Same winner predicate as gameStore.js's checkEndCondition(), reapplied
-// after the room has already flipped to 'ended' so we don't need gameStore
-// to hand us the answer directly.
-function didKillersWin(room) {
-  const aliveCouples = room.couples.filter(c => c.status === 'alive');
-  const killersAlive = aliveCouples.some(c => c.role === 'killer');
-  if (!killersAlive) return false;
-  const aliveKillers = aliveCouples.filter(c => c.role === 'killer').length;
-  const aliveDancers = aliveCouples.length - aliveKillers;
-  return aliveKillers >= aliveDancers;
 }
 
 // Spotify's "track" URIs (spotify:track:ID) are what room.playedSongs stores
@@ -162,7 +152,9 @@ export async function recordGameConclusion(room, { aborted }) {
     await recordGameHistory(pool, room, { aborted });
 
     // An aborted game has no winner, so it doesn't count as a win/loss for
-    // anyone - only that it was hosted (recorded above).
+    // anyone - only that it was hosted (recorded above). Achievements are the
+    // same: "erst nach Beenden der Runde" (only after a game actually
+    // concludes) - a cut-short game grants none.
     if (aborted) return;
 
     const killersWon = didKillersWin(room);
@@ -176,6 +168,8 @@ export async function recordGameConclusion(room, { aborted }) {
         [player.userId, room.id, couple.role, won ? 1 : 0]
       );
     }
+
+    await recordGameAchievements(pool, room);
   } catch (err) {
     console.error('Failed to record game conclusion stats:', err.message);
   }
