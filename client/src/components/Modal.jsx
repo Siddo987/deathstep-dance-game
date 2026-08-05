@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { HelpCircle, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { HelpCircle, CheckCircle2, AlertTriangle, Skull, X } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
 
 function useEscapeKey(isOpen, onEscape) {
@@ -65,6 +65,62 @@ export function AlertModal({ isOpen, message, onClose, isSuccess = false, action
         ) : (
           <button className={btnClass} onClick={onClose} style={btnStyle}>{t('common.ok')}</button>
         )}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Plain-language rules explainer for a first-time GM or player - reachable
+// from Home.jsx (both the main screen and the join view, since a player
+// scanning a QR code lands directly on the join view and never sees the main
+// screen at all) and from the lobby-wait screens of GMDashboard.jsx/
+// PlayerScreen.jsx, the other moment someone is idle with nothing else to do
+// but wonder what's about to happen. Content-only (no game-state dependency)
+// so the same component works from any of those call sites unmodified.
+export function HowToPlayModal({ isOpen, onClose }) {
+  const { t } = useLanguage();
+  useEscapeKey(isOpen, onClose || (() => {}));
+  if (!isOpen) return null;
+
+  const steps = [1, 2, 3, 4, 5];
+  return createPortal(
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-card cyber-card"
+        style={{ maxWidth: '480px', border: '1px solid var(--neon-blue)', textAlign: 'left', maxHeight: '85vh', overflowY: 'auto' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+          <h3 style={{ color: 'var(--neon-blue)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Skull size={20} className="icon-inline" /> {t('howto.title')}
+          </h3>
+          <button className="icon-btn" onClick={onClose}><X size={20} /></button>
+        </div>
+
+        <p style={{ color: 'var(--text-muted)', marginBottom: '18px' }}>{t('howto.intro')}</p>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '15px' }}>
+          {steps.map(n => (
+            <div key={n} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+              <div style={{
+                flexShrink: 0, width: '26px', height: '26px', borderRadius: '50%',
+                border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '0.85rem',
+              }}>
+                {n}
+              </div>
+              <div>
+                <strong style={{ color: 'white', display: 'block', marginBottom: '2px' }}>{t(`howto.step${n}Title`)}</strong>
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{t(`howto.step${n}Body`)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="panel panel--info" style={{ marginBottom: 0 }}>
+          <p style={{ margin: 0, color: 'white', fontSize: '0.9rem' }}>{t('howto.winCondition')}</p>
+        </div>
       </div>
     </div>,
     document.body
