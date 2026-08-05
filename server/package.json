@@ -1,6 +1,6 @@
 {
   "name": "deathstep-server",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Backend for Deathstep party game",
   "license": "GPL-3.0-or-later",
   "main": "index.js",
