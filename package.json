@@ -1,0 +1,18 @@
+{
+  "name": "deathstep",
+  "private": true,
+  "version": "0.7.2",
+  "license": "GPL-3.0-or-later",
+  "description": "Deathstep monorepo root - see client/ and server/. `npm install` here installs both; `npm run dev` runs both. (Not npm workspaces - client and server keep their own independent node_modules, so this also works on filesystems that don't support symlinks, e.g. network drives.)",
+  "scripts": {
+    "postinstall": "npm install --prefix server && npm install --prefix client",
+    "dev": "concurrently -n server,client -c blue,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "npm run start --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix client",
+    "start": "npm run start --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
