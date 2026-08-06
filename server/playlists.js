@@ -321,6 +321,10 @@ router.post('/:id/tracks/:trackId/undo-delete', asyncRoute(async (req, res) => {
 // 'pending_delete' track gets removed from Spotify. Either way the local row
 // ends up matching Spotify - 'synced' for an add, purged entirely for a
 // delete (there's nothing left to track once it's gone from both sides).
+// A 'removed_on_spotify' track (deleted on Spotify's side while it was still
+// staged as 'synced' locally - see pullTracksFromSpotify above) is handled
+// the same way as a fresh add: re-adding it via the API is exactly how the
+// user gets a since-deleted-on-Spotify track back into the real playlist.
 router.post('/:id/tracks/:trackId/confirm', asyncRoute(async (req, res) => {
   const playlist = await getOwnedPlaylist(req.db, req.params.id, req.userId);
   if (!playlist) return res.status(404).json({ error: 'playlist_not_found' });
@@ -330,7 +334,7 @@ router.post('/:id/tracks/:trackId/confirm', asyncRoute(async (req, res) => {
   const track = rows[0];
   if (!track) return res.status(404).json({ error: 'track_not_found' });
 
-  if (track.sync_status === 'pending_add') {
+  if (track.sync_status === 'pending_add' || track.sync_status === 'removed_on_spotify') {
     const snapshotId = await pushTrackAddToSpotify(req.db, req.userId, playlist.spotify_playlist_id, track.track_uri);
     if (!snapshotId) return res.status(502).json({ error: 'spotify_push_failed' });
     await req.db.query('UPDATE playlist_tracks SET sync_status = "synced" WHERE id = ?', [track.id]);

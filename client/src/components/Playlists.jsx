@@ -291,7 +291,9 @@ function Playlists({ currentUser, authLoading, onLoginClick }) {
 
   // Pushes a staged change to Spotify right now: a pending_add track becomes
   // synced, a pending_delete track is fully removed (from both sides, so the
-  // local row goes away entirely rather than flipping to another status).
+  // local row goes away entirely rather than flipping to another status), and
+  // a removed_on_spotify track (deleted on Spotify while still in this
+  // playlist here) gets re-added to Spotify and becomes synced again.
   const handleConfirmPendingTrack = async (trackId) => {
     setFeedback(null);
     const result = await confirmPendingTrack(expanded.id, trackId);
@@ -509,11 +511,11 @@ function Playlists({ currentUser, authLoading, onLoginClick }) {
                                       {isPendingDelete && <span style={{ color: 'var(--neon-red)' }}> ({t('playlists.pendingDelete')})</span>}
                                       {isRemovedOnSpotify && <span style={{ color: '#f5a623' }}> ({t('playlists.removedOnSpotify')})</span>}
                                     </span>
-                                    {(isPendingAdd || isPendingDelete) && (
+                                    {(isPendingAdd || isPendingDelete || isRemovedOnSpotify) && (
                                       <button
                                         onClick={() => handleConfirmPendingTrack(track.id)}
                                         className="icon-btn"
-                                        title={t(isPendingAdd ? 'playlists.confirmToSpotify' : 'playlists.confirmRemoveFromSpotify')}
+                                        title={t(isPendingDelete ? 'playlists.confirmRemoveFromSpotify' : isRemovedOnSpotify ? 'playlists.confirmReAddToSpotify' : 'playlists.confirmToSpotify')}
                                         style={{ color: 'var(--neon-green)', flexShrink: 0 }}
                                       >
                                         <Link2 size={14} />

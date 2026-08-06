@@ -41,17 +41,13 @@
 
 ### 1. Installation
 
-Clone the repository and install dependencies for both the server and client:
+Clone the repository and install dependencies for both the server and client with a single command from the **repository root**:
 
 ```bash
-# Install Server Dependencies
-cd server
-npm install
-
-# Install Client Dependencies
-cd ../client
 npm install
 ```
+
+(This is a plain root `package.json` with a `postinstall` script that installs `server/` and `client/` in turn - not npm workspaces, so it works the same on any filesystem, including network drives where npm's workspace symlinks don't. If you ever need to install just one side, `npm install --prefix server` / `--prefix client` still works too.)
 
 ### 2. Environment Variables
 
@@ -65,21 +61,14 @@ At minimum, set your Spotify Client ID. Login/accounts (MariaDB + optional Googl
 
 ### 3. Running Locally
 
-Start the backend server:
+From the repository root:
 
 ```bash
-cd server
-npm start
-# Runs on http://localhost:3001
-```
-
-Start the frontend development server:
-
-```bash
-cd client
 npm run dev
-# Runs on http://localhost:5173
+# Server on http://localhost:3001, client on http://localhost:5173, both at once
 ```
+
+Or run just one side (e.g. if the other is already running): `npm run dev:server` / `npm run dev:client`.
 
 ### 4. Docker Deployment
 
