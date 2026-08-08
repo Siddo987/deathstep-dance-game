@@ -63,6 +63,21 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
   // player's rejoin) - never read by PlayerScreen.jsx, and would otherwise
   // hand every player in the room a live feed of who else is trying to
   // reconnect and their internal ids.
+  // Max Kills mode: room.maxKillsOrder is the full future turn order - never
+  // sent to players at all (only once revealAllRoles, for a nice "how the
+  // whole tournament played out" screen), or every couple would know exactly
+  // who's killer in every future round the instant the game starts, killing
+  // the round-by-round role_reveal surprise the rest of the mode depends on.
+  // maxKillsRoundVictimIds/OutIds/HitAt are live, per-round "who's out right
+  // now" state - real secrets *during* 'dancing' (see the plan's "20 second
+  // window" - the point is that surviving couples can't just look this up),
+  // but once the round ends (any other status) there's nothing left to
+  // protect, same reasoning as pendingVictimIds vs victimIds above.
+  const isMaxKillsRoundLive = room.gameMode === 'maxkills' && room.status === 'dancing';
+  const ownMaxKillsCoupleId = (list) => (isMaxKillsRoundLive
+    ? (myCouple && list.includes(myCouple.id) ? [myCouple.id] : [])
+    : list);
+
   const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, pendingRejoinRequests, ...rest } = room;
   return {
     ...rest,
@@ -81,6 +96,18 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     // "game's over, nothing left to hide" condition as couple roles above.
     protectorPick: (myCouple?.specialRole === 'protector' || revealAllRoles) ? room.protectorPick : null,
     pendingVictimIds: [], // GM's in-progress kill marking is not public until revealKill
+    maxKillsOrder: revealAllRoles ? room.maxKillsOrder : [],
+    maxKillsTotalRounds: room.maxKillsOrder.length, // harmless to always send - the count alone (unlike the order's contents) reveals nothing about who's up next
+    maxKillsRoundVictimIds: ownMaxKillsCoupleId(room.maxKillsRoundVictimIds),
+    maxKillsRoundOutIds: ownMaxKillsCoupleId(room.maxKillsRoundOutIds),
+    maxKillsHitAt: isMaxKillsRoundLive
+      ? (myCouple && room.maxKillsHitAt[myCouple.id] ? { [myCouple.id]: room.maxKillsHitAt[myCouple.id] } : {})
+      : room.maxKillsHitAt,
+    // Only the round's killer couple ever submits a claim, so there's only
+    // ever one couple's worth of data to hide here - unlike victim self-
+    // reports below, no live/ended split is needed.
+    maxKillsKillClaims: myCouple?.role === 'killer' ? room.maxKillsKillClaims : [],
+    maxKillsVictimSelfReports: myCouple ? room.maxKillsVictimSelfReports.filter(id => id === myCouple.id) : [],
   };
 }
 
@@ -189,6 +216,28 @@ class GameStore {
       // startGame), so nothing lingers into a later, unrelated round.
       pairOverrides: [], // { playerIdA, playerIdB } - forces these two players into the same couple next time the GM randomizes pairing (never applied to a couple the GM built manually)
       killerOverridePlayerIds: [], // player ids, in priority order - whichever of their couples are present become killer(s) first, before the normal random draw fills any remaining slots
+      // --- Max Kills mode (gameMode: 'maxkills') - see the new-roles/modes
+      // plan's section 3 and startGame()/buildMaxKillsOrder()/
+      // advanceMaxKillsRound() below. A round-robin tournament: every entry
+      // takes exactly one turn as killer (order randomized once at game
+      // start), elimination is round-scoped only (couple.status never
+      // changes here, unlike every other mode), and the eventual "winner" is
+      // a kill-count ranking, not the standard killer/dancer team outcome -
+      // this whole mode deliberately never touches checkEndCondition/
+      // didKillersWin, couple.status, or any of the standard vote/kill-claim
+      // fields above.
+      maxKillsOrder: [], // [{ coupleId, counted }] - tournament order, built once in startGame()
+      maxKillsRoundIndex: -1, // pointer into maxKillsOrder for the round currently in progress
+      maxKillsVariant: 'shortened', // 'shortened' (Paarzahl-2 rounds) | 'doubleTurn' (everyone once, plus a couple of uncounted decoy repeats)
+      maxKillsSongLengthSec: 90, // GM-configured target song length - see the client's fade-out-at-target-duration effect
+      killCounts: {}, // { coupleId: number } - persists the whole tournament (not reset per round) - the final ranking source
+      maxKillsRoundVictimIds: [], // couples confirmed hit *this* round - reset every round
+      maxKillsRoundOutIds: [], // couples out of action for *this* round (confirmed victims + wrong accusers) - reset every round
+      maxKillsKillClaims: [], // silent floor-mode: coupleIds the current round's killer has privately claimed to hit - reset every round
+      maxKillsVictimSelfReports: [], // silent floor-mode: coupleIds who privately self-reported being hit - reset every round
+      maxKillsHitAt: {}, // { coupleId: timestamp } - when a couple was confirmed hit, drives the client's 20s "leave the floor" countdown (silent floor-mode)
+      maxKillsRoundResult: null, // { killerCoupleId, kills, caught, accuserCoupleId, wrongAccuserCoupleIds, victimCoupleIds } | null - this round's outcome, shown during the round-summary phase (reuses 'kill_reveal' status)
+      maxKillsFinalRanking: null, // [{ coupleId, kills }] sorted desc | null - set once the tournament's last round concludes
     };
     
     this.rooms.set(code, newRoom);
@@ -303,7 +352,14 @@ class GameStore {
     memberIds.forEach(id => this.clearSpotifyDelegateIfPlayer(room, id));
 
     if (room.status !== 'lobby' && room.status !== 'paired') {
-      this.checkEndCondition(room);
+      // Max Kills reuses couple.role as a per-round killer flag rather than a
+      // permanent team, and never flips couple.status at all - running the
+      // standard checkEndCondition here would misread a departure as the
+      // normal "killers are now a majority" win condition (trivially true
+      // the moment only 2 couples remain) and wrongly end the whole
+      // tournament. See handleMaxKillsCoupleLeft.
+      if (room.gameMode === 'maxkills') this.handleMaxKillsCoupleLeft(room);
+      else this.checkEndCondition(room);
     }
 
     return { room, removedPlayers };
@@ -346,7 +402,10 @@ class GameStore {
     }
 
     if (room.status !== 'lobby' && room.status !== 'paired') {
-      this.checkEndCondition(room);
+      // See the identical branch in removeCouple above for why Max Kills
+      // can't go through the standard checkEndCondition.
+      if (room.gameMode === 'maxkills') this.handleMaxKillsCoupleLeft(room);
+      else this.checkEndCondition(room);
     }
 
     return { room, remainingIds, dissolved };
@@ -1117,6 +1176,287 @@ class GameStore {
     room.voteResult = null; // harmless no-op from startDancing's branch, clears stale state from proceedFromVoteReveal's
   }
 
+  // Max Kills mode's tournament order (see room.maxKillsOrder): every couple
+  // takes exactly one turn as killer, in a random order picked once here.
+  // 'shortened' (default) drops the last two draws entirely so the final
+  // round can't be deduced by elimination (see the plan); 'doubleTurn' keeps
+  // every couple's first turn but sprinkles in a few uncounted decoy repeats
+  // instead, for groups too small to comfortably spare two full couples.
+  buildMaxKillsOrder(room, variant) {
+    const shuffled = room.couples.map(c => c.id);
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
+
+    if (variant === 'doubleTurn') {
+      const order = shuffled.map(coupleId => ({ coupleId, counted: true }));
+      // Only the couple's *first* turn ever counts for ranking - a repeat is
+      // inserted at a random position strictly after that first turn, so it
+      // can never accidentally masquerade as the couple's one real result.
+      const extraCount = shuffled.length >= 4 ? Math.max(1, Math.floor(shuffled.length / 4)) : 0;
+      for (let i = 0; i < extraCount; i++) {
+        const firstTurnIdx = Math.floor(Math.random() * shuffled.length);
+        const insertAt = firstTurnIdx + 1 + Math.floor(Math.random() * (order.length - firstTurnIdx));
+        order.splice(insertAt, 0, { coupleId: shuffled[firstTurnIdx], counted: false });
+      }
+      return order;
+    }
+
+    // Paarzahl - 2 rounds (confirmed in the plan) - leaves two couples never
+    // drawn at all, so who's left over stays genuinely ambiguous. Falls back
+    // to every couple getting a turn if there aren't enough to spare two.
+    const roundCount = Math.max(1, shuffled.length - 2);
+    return shuffled.slice(0, roundCount).map(coupleId => ({ coupleId, counted: true }));
+  }
+
+  // Max Kills mode reads the round's live killer straight off couple.role -
+  // temporarily flipped per round exactly like Chaos mode's rotating killer
+  // (see startChaosRound above) - rather than a separate id field, so
+  // there's only ever one source of truth for "who's killer right now".
+  getMaxKillsKillerCouple(room) {
+    return room.couples.find(c => c.role === 'killer') || null;
+  }
+
+  isMaxKillsCoupleOut(room, coupleId) {
+    return room.maxKillsRoundOutIds.includes(coupleId);
+  }
+
+  // Confirms (or, called again on an already-confirmed victim, reverses) one
+  // couple as hit this round - the classic floor-mode's only kill-marking
+  // mechanism, and the GM's manual correction/override tool in *either*
+  // floor-mode. Never touches couple.status - Max Kills elimination is
+  // round-scoped only (see the plan), so a hit couple is back for the next
+  // round regardless of this game's ultimate ranking. Deliberately doesn't
+  // touch room.killCounts here at all - that's only ever committed once, at
+  // finishMaxKillsRound, from this round's live maxKillsRoundVictimIds tally
+  // (see its own comment for why: a killer whose *this* round is an
+  // uncounted 'doubleTurn' repeat must never add onto the counted score
+  // their real turn already earned them).
+  markMaxKillsHit(room, coupleId) {
+    const killer = this.getMaxKillsKillerCouple(room);
+    if (!killer || coupleId === killer.id) return;
+    const couple = room.couples.find(c => c.id === coupleId && c.status === 'alive');
+    if (!couple) return;
+
+    if (room.maxKillsRoundOutIds.includes(coupleId)) {
+      // Undo - only meaningful for an actual confirmed kill. A wrong
+      // accusation never touched maxKillsRoundVictimIds in the first place
+      // (see submitMaxKillsAccusation), so there's nothing to roll back for one of those.
+      if (room.maxKillsRoundVictimIds.includes(coupleId)) {
+        room.maxKillsRoundVictimIds = room.maxKillsRoundVictimIds.filter(id => id !== coupleId);
+        room.maxKillsRoundOutIds = room.maxKillsRoundOutIds.filter(id => id !== coupleId);
+        delete room.maxKillsHitAt[coupleId];
+      }
+      return;
+    }
+
+    room.maxKillsRoundOutIds.push(coupleId);
+    room.maxKillsRoundVictimIds.push(coupleId);
+    room.maxKillsHitAt[coupleId] = Date.now();
+    this.checkMaxKillsRoundEnd(room);
+  }
+
+  // Classic floor-mode: the GM watches the floor and marks each hit live
+  // (toggle - calling again on an already-marked couple undoes it, for
+  // mistakes). Also doubles as the silent floor-mode's manual override for
+  // disputes, from the same dashboard panel.
+  gmMarkMaxKillsHit(roomId, coupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing' || room.gameMode !== 'maxkills') return null;
+    this.markMaxKillsHit(room, coupleId);
+    return room;
+  }
+
+  // Silent floor-mode: the round's killer privately claims a hit on their
+  // own phone (toggled) - this alone never confirms anything, the victim's
+  // own self-report has to agree first (see reconcileMaxKillsHits), the same
+  // two-sided matching the base game's killClaims/victimReports already use.
+  submitMaxKillsKillClaim(roomId, clientId, targetCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing' || room.gameMode !== 'maxkills') return null;
+
+    const killer = this.getMaxKillsKillerCouple(room);
+    if (!killer || !killer.playerIds.includes(clientId)) return null;
+    if (targetCoupleId === killer.id || this.isMaxKillsCoupleOut(room, targetCoupleId)) return room;
+    const target = room.couples.find(c => c.id === targetCoupleId && c.status === 'alive');
+    if (!target) return room;
+
+    const idx = room.maxKillsKillClaims.indexOf(targetCoupleId);
+    if (idx === -1) room.maxKillsKillClaims.push(targetCoupleId);
+    else room.maxKillsKillClaims.splice(idx, 1);
+
+    this.reconcileMaxKillsHits(room);
+    return room;
+  }
+
+  // Silent floor-mode: any active, non-killer couple privately reports being
+  // hit - the counterpart to submitMaxKillsKillClaim above. No suspect to
+  // name - there's only ever one possible killer this round.
+  submitMaxKillsVictimSelfReport(roomId, clientId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing' || room.gameMode !== 'maxkills') return null;
+
+    const couple = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!couple || couple.role === 'killer' || couple.status !== 'alive') return null;
+    if (this.isMaxKillsCoupleOut(room, couple.id)) return room;
+
+    const idx = room.maxKillsVictimSelfReports.indexOf(couple.id);
+    if (idx === -1) room.maxKillsVictimSelfReports.push(couple.id);
+    else room.maxKillsVictimSelfReports.splice(idx, 1);
+
+    this.reconcileMaxKillsHits(room);
+    return room;
+  }
+
+  // Matches claims against self-reports live/continuously (rather than in a
+  // separate deferred phase like the base game's resolveSilentReports) -
+  // required by the plan's live "20 second window" detection. Any couple
+  // both sides currently agree on is immediately confirmed hit.
+  reconcileMaxKillsHits(room) {
+    room.maxKillsKillClaims
+      .filter(id => room.maxKillsVictimSelfReports.includes(id) && !room.maxKillsRoundOutIds.includes(id))
+      .forEach(coupleId => this.markMaxKillsHit(room, coupleId));
+  }
+
+  // Any active, non-killer couple can raise their hand and accuse at any
+  // point during dancing. A correct guess ends the round immediately; a
+  // wrong one takes the accusing couple out for the rest of the round too -
+  // exactly like an actual victim, but never counted as one (so it never
+  // pads the killer's tally) - see the plan.
+  submitMaxKillsAccusation(roomId, clientId, suspectCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing' || room.gameMode !== 'maxkills') return null;
+
+    const killer = this.getMaxKillsKillerCouple(room);
+    if (!killer) return null;
+    const accuser = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!accuser || accuser.role === 'killer' || accuser.status !== 'alive') return null;
+    if (this.isMaxKillsCoupleOut(room, accuser.id)) return room;
+
+    if (suspectCoupleId === killer.id) {
+      this.finishMaxKillsRound(room, { caught: true, accuserCoupleId: accuser.id });
+    } else {
+      room.maxKillsRoundOutIds.push(accuser.id);
+      this.checkMaxKillsRoundEnd(room);
+    }
+    return room;
+  }
+
+  // "nur noch Killer + ein weiteres Paar übrig" (see the plan) - ends the
+  // round the moment only one other active couple is left, instead of
+  // letting the killer hunt down the literal last pair standing while
+  // everyone else already watches from the sidelines.
+  checkMaxKillsRoundEnd(room) {
+    const killer = this.getMaxKillsKillerCouple(room);
+    if (!killer) return;
+    const activeOthers = room.couples.filter(c => c.id !== killer.id && c.status === 'alive' && !room.maxKillsRoundOutIds.includes(c.id));
+    if (activeOthers.length <= 1) this.finishMaxKillsRound(room, { caught: false });
+  }
+
+  // A departing couple mid-round needs its own end-check (see removeCouple/
+  // removeCoupleMember above) - the standard checkEndCondition doesn't
+  // understand this mode's round-scoped elimination at all and would
+  // misfire the moment only 2 couples remain in the room, tournament-wide.
+  handleMaxKillsCoupleLeft(room) {
+    if (room.status !== 'dancing') return;
+    const killer = this.getMaxKillsKillerCouple(room);
+    if (!killer) {
+      // The round's own killer couple just left - nothing left to score,
+      // end the round exactly like the song simply running out.
+      this.finishMaxKillsRound(room, { caught: false });
+    } else {
+      this.checkMaxKillsRoundEnd(room);
+    }
+  }
+
+  // GM's explicit "song ended" trigger - the third way a round can end
+  // (alongside population thinning to the last pair, and a correct
+  // accusation), for whenever neither of those happens before the track runs out.
+  endMaxKillsRoundManually(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing' || room.gameMode !== 'maxkills') return null;
+    this.finishMaxKillsRound(room, { caught: false });
+    return room;
+  }
+
+  finishMaxKillsRound(room, { caught = false, accuserCoupleId = null } = {}) {
+    if (room.status !== 'dancing') return; // already finished - guards against two end-triggers landing the same tick
+    const killer = this.getMaxKillsKillerCouple(room);
+    const kills = room.maxKillsRoundVictimIds.length;
+    // Committed to the persistent ranking exactly once, here, rather than
+    // live per-hit - and only for a *counted* turn (see buildMaxKillsOrder's
+    // 'doubleTurn' decoy repeats, which must never add onto the score the
+    // couple's real turn already earned them).
+    const currentEntry = room.maxKillsOrder[room.maxKillsRoundIndex];
+    if (killer && currentEntry?.counted) {
+      room.killCounts[killer.id] = (room.killCounts[killer.id] || 0) + kills;
+    }
+    room.maxKillsRoundResult = {
+      killerCoupleId: killer?.id || null,
+      kills,
+      caught,
+      accuserCoupleId,
+      wrongAccuserCoupleIds: room.maxKillsRoundOutIds.filter(id => !room.maxKillsRoundVictimIds.includes(id)),
+      victimCoupleIds: [...room.maxKillsRoundVictimIds],
+    };
+    room.status = 'kill_reveal'; // reused as this mode's round-summary phase - see advanceMaxKillsRound
+  }
+
+  // GM proceeds from the round-summary phase to the next round - reuses the
+  // exact 'role_reveal' re-entry Chaos mode already built (fresh
+  // hold-to-reveal moment, GM readiness checklist - no new client code
+  // needed for the reveal itself), just driven by maxKillsOrder instead of a
+  // random re-pick each time. Couples that left the game entirely between
+  // rounds are skipped in the order rather than breaking the tournament (see
+  // the plan).
+  advanceMaxKillsRound(roomId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'kill_reveal' || room.gameMode !== 'maxkills') return null;
+
+    let nextIndex = room.maxKillsRoundIndex + 1;
+    while (nextIndex < room.maxKillsOrder.length && !room.couples.some(c => c.id === room.maxKillsOrder[nextIndex].coupleId)) {
+      nextIndex++;
+    }
+
+    room.couples.forEach(c => { if (c.status === 'alive') c.role = 'dancer'; });
+
+    if (nextIndex >= room.maxKillsOrder.length) {
+      // Tournament over - rank every couple that ever took a *counted* turn
+      // by their final kill tally (couples never drawn under 'shortened', or
+      // only ever a decoy repeat under 'doubleTurn', simply never appear
+      // here - see buildMaxKillsOrder).
+      const rankedCoupleIds = [...new Set(room.maxKillsOrder.filter(e => e.counted).map(e => e.coupleId))];
+      room.maxKillsFinalRanking = rankedCoupleIds
+        .map(coupleId => ({ coupleId, kills: room.killCounts[coupleId] || 0 }))
+        .sort((a, b) => b.kills - a.kills);
+      room.status = 'ended';
+      room.endReason = 'maxkills_complete';
+      return room;
+    }
+
+    room.maxKillsRoundIndex = nextIndex;
+    const killerCouple = room.couples.find(c => c.id === room.maxKillsOrder[nextIndex].coupleId);
+    if (killerCouple) killerCouple.role = 'killer';
+
+    room.maxKillsRoundVictimIds = [];
+    room.maxKillsRoundOutIds = [];
+    room.maxKillsKillClaims = [];
+    room.maxKillsVictimSelfReports = [];
+    room.maxKillsHitAt = {};
+    room.maxKillsRoundResult = null;
+    room.players.forEach(p => p.hasViewedRole = false);
+    room.status = 'role_reveal';
+    room.round += 1;
+    return room;
+  }
+
   // Options bundled into a single object (rather than more positional
   // params) since this list keeps growing with every new mode/setting - see
   // the new-roles/modes plan. specialRoles is a { [key in SPECIAL_ROLE_KEYS]:
@@ -1130,7 +1470,9 @@ class GameStore {
     deadPlayersKeepDancing = false,
     specialRoles = {},
     martyrWinsOnVote = false, // GM override for the Märtyrer special role's win condition - see couple.eliminatedBy
-    gameMode = 'standard', // 'standard' | 'chaos' - see assignKillers()/startDancing()
+    gameMode = 'standard', // 'standard' | 'chaos' | 'maxkills' - see assignKillers()/startDancing()/buildMaxKillsOrder()
+    maxKillsVariant = 'shortened', // 'shortened' | 'doubleTurn' - see buildMaxKillsOrder()
+    maxKillsSongLengthSec = 90, // Max Kills mode only - see the client's fade-out-at-target-duration effect
   } = {}) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -1169,27 +1511,49 @@ class GameStore {
     room.deadPlayersKeepDancing = !!deadPlayersKeepDancing;
     room.martyrWinsOnVote = !!martyrWinsOnVote;
 
-    room.gameMode = gameMode; // 'standard' | 'chaos' - see startDancing()'s chaos branch below for the per-round re-pick
+    room.gameMode = gameMode; // 'standard' | 'chaos' | 'maxkills' - see startDancing()'s chaos branch / advanceMaxKillsRound() below for the per-round re-pick
     room.killerCount = killerCount; // persisted so Chaos mode's per-round re-pick in startDancing() reuses the same count
 
-    this.assignKillers(room, killerCount);
+    if (gameMode === 'maxkills') {
+      // Max Kills bypasses assignKillers()/specialRoles entirely - see the
+      // plan's confirmed assumptions (special roles stay off in this mode
+      // too, same as Chaos) and buildMaxKillsOrder()/advanceMaxKillsRound()
+      // for the per-round killer rotation this sets up.
+      room.maxKillsVariant = maxKillsVariant;
+      room.maxKillsSongLengthSec = Math.max(20, Math.min(300, Number(maxKillsSongLengthSec) || 90));
+      room.killCounts = {};
+      room.maxKillsOrder = this.buildMaxKillsOrder(room, maxKillsVariant);
+      room.maxKillsRoundIndex = 0;
+      room.maxKillsRoundVictimIds = [];
+      room.maxKillsRoundOutIds = [];
+      room.maxKillsKillClaims = [];
+      room.maxKillsVictimSelfReports = [];
+      room.maxKillsHitAt = {};
+      room.maxKillsRoundResult = null;
+      room.maxKillsFinalRanking = null;
+      const firstEntry = room.maxKillsOrder[0];
+      const firstKiller = firstEntry && room.couples.find(c => c.id === firstEntry.coupleId);
+      if (firstKiller) firstKiller.role = 'killer';
+    } else {
+      this.assignKillers(room, killerCount);
 
-    // Special-role assignment (see SPECIAL_ROLE_KEYS/couple.specialRole) -
-    // runs after killers are picked so a killer couple never doubles as a
-    // special-role holder (these are a dancer-side mechanic). One random
-    // dancer couple per GM-enabled role, one role per couple for v1 (no
-    // stacking) - if there aren't enough dancer couples left for every
-    // enabled role, the remaining ones are simply skipped rather than
-    // failing the whole game start. Chaos mode keeps this permanently empty
-    // (see the new-roles/modes plan) - GMDashboard.jsx hides/clears the
-    // special-role pickers whenever gameMode is 'chaos', so specialRoles is
-    // always {} there in practice, but this isn't re-enforced here too.
-    const unassignedForSpecialRole = room.couples.filter(c => c.role === 'dancer');
-    for (const key of SPECIAL_ROLE_KEYS) {
-      if (!specialRoles[key] || unassignedForSpecialRole.length === 0) continue;
-      const idx = Math.floor(Math.random() * unassignedForSpecialRole.length);
-      unassignedForSpecialRole[idx].specialRole = key;
-      unassignedForSpecialRole.splice(idx, 1);
+      // Special-role assignment (see SPECIAL_ROLE_KEYS/couple.specialRole) -
+      // runs after killers are picked so a killer couple never doubles as a
+      // special-role holder (these are a dancer-side mechanic). One random
+      // dancer couple per GM-enabled role, one role per couple for v1 (no
+      // stacking) - if there aren't enough dancer couples left for every
+      // enabled role, the remaining ones are simply skipped rather than
+      // failing the whole game start. Chaos mode keeps this permanently empty
+      // (see the new-roles/modes plan) - GMDashboard.jsx hides/clears the
+      // special-role pickers whenever gameMode is 'chaos', so specialRoles is
+      // always {} there in practice, but this isn't re-enforced here too.
+      const unassignedForSpecialRole = room.couples.filter(c => c.role === 'dancer');
+      for (const key of SPECIAL_ROLE_KEYS) {
+        if (!specialRoles[key] || unassignedForSpecialRole.length === 0) continue;
+        const idx = Math.floor(Math.random() * unassignedForSpecialRole.length);
+        unassignedForSpecialRole[idx].specialRole = key;
+        unassignedForSpecialRole.splice(idx, 1);
+      }
     }
 
     room.players.forEach(p => p.hasViewedRole = false);
@@ -1270,6 +1634,15 @@ class GameStore {
       this.startChaosRound(room);
       return room;
     }
+
+    // Max Kills never reaches 'kill_reveal'/'voting' through this method at
+    // all in normal play - its round-summary phase (also 'kill_reveal', see
+    // finishMaxKillsRound) advances via advanceMaxKillsRound() instead, which
+    // returns straight to 'role_reveal', not 'dancing'. Rejecting a stray
+    // call here (rather than silently falling into the standard-mode
+    // round-advance below) guards against a stale/legacy client call
+    // corrupting the tournament's round-scoped state.
+    if (isNewRound && room.gameMode === 'maxkills') return null;
 
     if (isNewRound) {
       room.round += 1;
@@ -1357,6 +1730,7 @@ class GameStore {
   proceedToSilentReport(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    if (room.gameMode === 'maxkills') return null; // Max Kills' silent floor-mode reconciles live instead - see reconcileMaxKillsHits
     if (room.status !== 'dancing' || room.killMode !== 'silent') return null;
 
     room.status = 'silent_report';
@@ -1458,6 +1832,10 @@ class GameStore {
   revealKill(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    // Max Kills has its own round-end/reveal pipeline (finishMaxKillsRound) -
+    // this method's permanent couple.status elimination would corrupt its
+    // round-scoped model, see the plan.
+    if (room.gameMode === 'maxkills') return null;
     // Only reachable from 'dancing' (classic mode) or 'silent_report' (silent
     // mode, after resolveSilentReports) - see GMDashboard.jsx's
     // handleRevealKill call sites.
@@ -1553,6 +1931,7 @@ class GameStore {
   proceedToVoting(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    if (room.gameMode === 'maxkills') return null; // no voting phase in this mode - see the plan
     if (room.status !== 'kill_reveal') return null;
 
     room.status = 'voting';
@@ -1611,6 +1990,7 @@ class GameStore {
   executeVote(roomId, suspectCoupleId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
+    if (room.gameMode === 'maxkills') return null; // no voting/vote-out in this mode - see the plan
     // Reachable from 'voting' (normal execute) or 'kill_reveal' (GM's "skip
     // to next round" shortcut, handleSkipToNextRound -> handleExecuteVote(null))
     // - see GMDashboard.jsx. The two behave differently below: a real vote
@@ -1717,6 +2097,20 @@ class GameStore {
     // end too, so this is genuinely reachable, not just a theoretical race).
     if (room.status === 'lobby' || room.status === 'ended') return null;
 
+    // Max Kills has no permanent killer/dancer team and no roundHistory of
+    // its own kind - abort it by ranking whatever's been played so far
+    // instead of running the standard-mode wrap-up below, which would
+    // misread the round's temporary killer flag as a real team to eliminate.
+    if (room.gameMode === 'maxkills') {
+      const rankedCoupleIds = [...new Set(room.maxKillsOrder.filter(e => e.counted).map(e => e.coupleId))];
+      room.maxKillsFinalRanking = rankedCoupleIds
+        .map(coupleId => ({ coupleId, kills: room.killCounts[coupleId] || 0 }))
+        .sort((a, b) => b.kills - a.kills);
+      room.status = 'ended';
+      room.endReason = 'aborted';
+      return room;
+    }
+
     // A round already archived by revealKill/executeVote (game aborted right
     // after a normal conclusion, or endGame called again on an already-ended
     // room) shouldn't be recorded twice. Otherwise, if this round had any
@@ -1764,6 +2158,16 @@ class GameStore {
     room.seerPeeks = {};
     room.toucherReports = {};
     room.protectorPick = null;
+    room.maxKillsOrder = [];
+    room.maxKillsRoundIndex = -1;
+    room.killCounts = {};
+    room.maxKillsRoundVictimIds = [];
+    room.maxKillsRoundOutIds = [];
+    room.maxKillsKillClaims = [];
+    room.maxKillsVictimSelfReports = [];
+    room.maxKillsHitAt = {};
+    room.maxKillsRoundResult = null;
+    room.maxKillsFinalRanking = null;
     room.endReason = null;
     room.songSuggestions = [];
     room.playedSongs = [];

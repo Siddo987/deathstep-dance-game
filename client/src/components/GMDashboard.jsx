@@ -15,7 +15,7 @@ import {
   MessageCircle, Crown, X, PhoneOff, Repeat, Scissors, AlertTriangle, Lightbulb,
   Music2, Skull, Sparkles, EyeOff, Eye, Check, Plus, Minus, LogOut, Flag,
   Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone,
-  ChevronUp, ChevronDown, RotateCcw, Info, HelpCircle
+  ChevronUp, ChevronDown, RotateCcw, Info, HelpCircle, Trophy
 } from 'lucide-react';
 
 function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated, gmChatMessages, onSendGMChatMessage, currentUser }) {
@@ -148,10 +148,16 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [killerRatioDivisor, setKillerRatioDivisor] = useState(8);
   const [killMode, setKillMode] = useState('classic');
   const [deadPlayersKeepDancing, setDeadPlayersKeepDancing] = useState(false);
-  // 'standard' | 'chaos' - see the new-roles/modes plan. Special roles stay
-  // off in Chaos games (see the specialRoles reset in the mode switcher
-  // below) - keeps the per-round killer rotation the only moving part.
+  // 'standard' | 'chaos' | 'maxkills' - see the new-roles/modes plan. Special
+  // roles stay off in Chaos/Max Kills games (see the specialRoles reset in
+  // the mode switcher below) - keeps the per-round killer rotation the only
+  // moving part.
   const [gameMode, setGameMode] = useState('standard');
+  // Max Kills mode only (see server/gameStore.js's buildMaxKillsOrder) -
+  // 'shortened' (Paarzahl-2 rounds, default) or 'doubleTurn' (everyone once
+  // plus a couple of uncounted decoy repeats).
+  const [maxKillsVariant, setMaxKillsVariant] = useState('shortened');
+  const [maxKillsSongLengthSec, setMaxKillsSongLengthSec] = useState(90);
   // Special roles (see SPECIAL_ROLE_KEYS in server/gameStore.js) - only
   // 'puzzle' is wired up with real behavior so far, the rest of the plan's
   // 5 roles get their own toggle here as they're built.
@@ -533,6 +539,42 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     setHasSongFinished(false);
   }, [room?.nowPlaying?.uri, room?.status, room?.round]);
 
+  // Max Kills mode: "längere Songs werden bei Erreichen der Ziel-Dauer
+  // ausgefadet" (see the plan) - fades the SDK player's volume down over 4s
+  // and pauses once the round's song reaches the GM-configured target length
+  // (room.maxKillsSongLengthSec), instead of letting a long track run out
+  // the natural way. maxKillsFadeTriggeredRef (keyed by track uri, not just a
+  // boolean) guards against re-triggering on every 1s progress tick once the
+  // fade has already started for this track, and gets cleared by the effect
+  // right below whenever a new track/round begins.
+  const maxKillsFadeTriggeredRef = React.useRef(null);
+  React.useEffect(() => {
+    if (room.gameMode !== 'maxkills' || room.status !== 'dancing') return;
+    if (!spotifyPlayer || !room.nowPlaying?.uri) return;
+    if (maxKillsFadeTriggeredRef.current === room.nowPlaying.uri) return;
+    const targetMs = (room.maxKillsSongLengthSec || 90) * 1000;
+    if (playbackProgress < targetMs) return;
+
+    maxKillsFadeTriggeredRef.current = room.nowPlaying.uri;
+    const steps = 8;
+    const stepMs = 500; // ~4s total fade
+    let step = 0;
+    const fadeInterval = setInterval(() => {
+      step++;
+      spotifyPlayer.setVolume(Math.max(0, 1 - step / steps)).catch(() => {});
+      if (step >= steps) {
+        clearInterval(fadeInterval);
+        spotifyPlayer.pause().catch(() => {}).finally(() => spotifyPlayer.setVolume(1).catch(() => {}));
+        setHasSongFinished(true);
+      }
+    }, stepMs);
+    return () => clearInterval(fadeInterval);
+  }, [room.gameMode, room.status, room.nowPlaying?.uri, room.maxKillsSongLengthSec, spotifyPlayer, playbackProgress]);
+
+  React.useEffect(() => {
+    maxKillsFadeTriggeredRef.current = null;
+  }, [room?.nowPlaying?.uri, room?.status, room?.round]);
+
   // A connected token that never actually reaches the SDK's 'ready' event
   // (blocked script, dead device, etc.) used to leave the GM stuck on
   // "Player wird initialisiert..." forever with no feedback at all - flip to
@@ -846,7 +888,11 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing, specialRoles: gameMode === 'chaos' ? {} : specialRoles, martyrWinsOnVote, gameMode });
+    socket.emit('startGame', {
+      roomId: room.id, killerCount, killMode, deadPlayersKeepDancing,
+      specialRoles: (gameMode === 'chaos' || gameMode === 'maxkills') ? {} : specialRoles,
+      martyrWinsOnVote, gameMode, maxKillsVariant, maxKillsSongLengthSec,
+    });
   };
 
   const handleSubmitKillClaimForCouple = (killerCoupleId) => {
@@ -2657,21 +2703,25 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
 
           <div className="panel panel--purple" style={{ marginBottom: '20px' }}>
             <h4 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.gameSettings')}</h4>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-              <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.killerCount')}</label>
-              <div className="stepper">
-                <button className="stepper-btn" onClick={() => setKillerCount(Math.max(1, killerCount - 1))} disabled={killerCount <= 1} style={{ opacity: killerCount <= 1 ? 0.3 : 1, cursor: killerCount <= 1 ? 'not-allowed' : 'pointer' }}><Minus size={18} /></button>
-                <span className="stepper-value">{killerCount}</span>
-                <button className="stepper-btn" onClick={() => setKillerCount(Math.min(Math.max(1, maxKillerCouples), killerCount + 1))} disabled={killerCount >= Math.max(1, maxKillerCouples)} style={{ opacity: killerCount >= Math.max(1, maxKillerCouples) ? 0.3 : 1, cursor: killerCount >= Math.max(1, maxKillerCouples) ? 'not-allowed' : 'pointer' }}><Plus size={18} /></button>
-              </div>
-            </div>
-            {killerCount !== suggestedKillerCount && (
-              <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <Lightbulb size={14} className="icon-inline" />
-                {suggestedKillerCount === 1
-                  ? t('gm.killerRecSuggestedOne', { total: totalPairedPlayers })
-                  : t('gm.killerRecSuggestedMany', { total: totalPairedPlayers, count: suggestedKillerCount })}
-              </p>
+            {gameMode !== 'maxkills' && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                  <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.killerCount')}</label>
+                  <div className="stepper">
+                    <button className="stepper-btn" onClick={() => setKillerCount(Math.max(1, killerCount - 1))} disabled={killerCount <= 1} style={{ opacity: killerCount <= 1 ? 0.3 : 1, cursor: killerCount <= 1 ? 'not-allowed' : 'pointer' }}><Minus size={18} /></button>
+                    <span className="stepper-value">{killerCount}</span>
+                    <button className="stepper-btn" onClick={() => setKillerCount(Math.min(Math.max(1, maxKillerCouples), killerCount + 1))} disabled={killerCount >= Math.max(1, maxKillerCouples)} style={{ opacity: killerCount >= Math.max(1, maxKillerCouples) ? 0.3 : 1, cursor: killerCount >= Math.max(1, maxKillerCouples) ? 'not-allowed' : 'pointer' }}><Plus size={18} /></button>
+                  </div>
+                </div>
+                {killerCount !== suggestedKillerCount && (
+                  <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Lightbulb size={14} className="icon-inline" />
+                    {suggestedKillerCount === 1
+                      ? t('gm.killerRecSuggestedOne', { total: totalPairedPlayers })
+                      : t('gm.killerRecSuggestedMany', { total: totalPairedPlayers, count: suggestedKillerCount })}
+                  </p>
+                )}
+              </>
             )}
             <div style={{ marginTop: '15px' }}>
               <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.killMode')}</label>
@@ -2680,7 +2730,9 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <option value="silent">{t('gm.killModeSilent')}</option>
               </select>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
-                {killMode === 'silent' ? t('gm.killModeSilentDesc') : t('gm.killModeClassicDesc')}
+                {gameMode === 'maxkills'
+                  ? (killMode === 'silent' ? t('gm.killModeSilentMaxKillsDesc') : t('gm.killModeClassicMaxKillsDesc'))
+                  : (killMode === 'silent' ? t('gm.killModeSilentDesc') : t('gm.killModeClassicDesc'))}
               </p>
             </div>
             <div style={{ marginTop: '15px' }}>
@@ -2690,17 +2742,42 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 value={gameMode}
                 onChange={(e) => {
                   setGameMode(e.target.value);
-                  if (e.target.value === 'chaos') setSpecialRoles({ puzzle: false, martyr: false, seer: false, protector: false, toucher: false });
+                  if (e.target.value === 'chaos' || e.target.value === 'maxkills') setSpecialRoles({ puzzle: false, martyr: false, seer: false, protector: false, toucher: false });
                 }}
                 style={{ width: '100%' }}
               >
                 <option value="standard">{t('gm.gameModeStandard')}</option>
                 <option value="chaos">{t('gm.gameModeChaos')}</option>
+                <option value="maxkills">{t('gm.gameModeMaxKills')}</option>
               </select>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
-                {gameMode === 'chaos' ? t('gm.gameModeChaosDesc') : t('gm.gameModeStandardDesc')}
+                {gameMode === 'chaos' ? t('gm.gameModeChaosDesc') : gameMode === 'maxkills' ? t('gm.gameModeMaxKillsDesc') : t('gm.gameModeStandardDesc')}
               </p>
             </div>
+            {gameMode === 'maxkills' && (
+              <div style={{ marginTop: '15px', paddingTop: '15px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+                <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.maxKillsVariant')}</label>
+                <select className="cyber-select" value={maxKillsVariant} onChange={(e) => setMaxKillsVariant(e.target.value)} style={{ width: '100%' }}>
+                  <option value="shortened">{t('gm.maxKillsVariantShortened')}</option>
+                  <option value="doubleTurn">{t('gm.maxKillsVariantDoubleTurn')}</option>
+                </select>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
+                  {maxKillsVariant === 'doubleTurn' ? t('gm.maxKillsVariantDoubleTurnDesc') : t('gm.maxKillsVariantShortenedDesc')}
+                </p>
+
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '15px' }}>
+                  <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.maxKillsSongLength')}</label>
+                  <div className="stepper">
+                    <button className="stepper-btn" onClick={() => setMaxKillsSongLengthSec(Math.max(20, maxKillsSongLengthSec - 10))}><Minus size={18} /></button>
+                    <span className="stepper-value">{Math.floor(maxKillsSongLengthSec / 60)}:{String(maxKillsSongLengthSec % 60).padStart(2, '0')}</span>
+                    <button className="stepper-btn" onClick={() => setMaxKillsSongLengthSec(Math.min(300, maxKillsSongLengthSec + 10))}><Plus size={18} /></button>
+                  </div>
+                </div>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
+                  {t('gm.maxKillsSongLengthHint')}
+                </p>
+              </div>
+            )}
             <div style={{ marginTop: '15px' }}>
               <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
               <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
@@ -2726,7 +2803,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
             </button>
             {showAdvancedSettings && (
               <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
-              {gameMode === 'chaos' ? (
+              {gameMode === 'chaos' || gameMode === 'maxkills' ? (
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic', margin: 0 }}>
                   {t('gm.specialRolesDisabledInChaos')}
                 </p>
@@ -3436,7 +3513,61 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               )}
             </div>
 
-            {room.killMode === 'silent' ? (
+            {room.gameMode === 'maxkills' ? (
+              <div className="panel panel--purple">
+                <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>
+                  {t('gm.maxKillsRoundTitle', { current: room.maxKillsRoundIndex + 1, total: room.maxKillsTotalRounds })}
+                </h4>
+                <p style={{ color: 'white', marginBottom: '5px' }}>
+                  {t('gm.maxKillsKillerLabel', { name: room.couples.find(c => c.role === 'killer')?.name || '?' })}
+                </p>
+                <p style={{ color: 'var(--neon-purple)', fontWeight: 'bold', marginBottom: '15px' }}>
+                  {t('gm.maxKillsLiveKillCount', { count: room.maxKillsRoundVictimIds?.length || 0 })}
+                </p>
+
+                {room.killMode === 'silent' && (
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '10px', fontStyle: 'italic' }}>
+                    {t('gm.maxKillsSilentGmHint')}
+                  </p>
+                )}
+
+                <div className="couple-list" style={{ marginBottom: '20px' }}>
+                  {aliveCouples.filter(c => c.role !== 'killer').map(couple => {
+                    const isOut = room.maxKillsRoundOutIds?.includes(couple.id);
+                    const isVictim = room.maxKillsRoundVictimIds?.includes(couple.id);
+                    const claimed = room.killMode === 'silent' && room.maxKillsKillClaims?.includes(couple.id);
+                    const selfReported = room.killMode === 'silent' && room.maxKillsVictimSelfReports?.includes(couple.id);
+                    return (
+                      <button
+                        key={couple.id}
+                        className={`kill-option-btn ${isOut ? 'selected' : ''}`}
+                        onClick={() => socket.emit('gmMarkMaxKillsHit', { roomId: room.id, coupleId: couple.id })}
+                      >
+                        <span style={{ flexShrink: 0, minWidth: '110px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          {isOut
+                            ? (isVictim ? <><Skull size={14} className="icon-inline" /> {t('gm.maxKillsHit')}</> : <><X size={14} className="icon-inline" /> {t('gm.maxKillsWrongGuess')}</>)
+                            : <><Check size={14} className="icon-inline" /> {t('gm.maxKillsMark')}</>}
+                        </span>
+                        {renderTruncatedNames(couple.name)}
+                        {room.killMode === 'silent' && !isOut && (claimed || selfReported) && (
+                          <span style={{ fontSize: '0.7rem', color: 'var(--neon-blue)', marginLeft: 'auto', flexShrink: 0 }}>
+                            {claimed && selfReported ? t('gm.maxKillsBothPending') : claimed ? t('gm.maxKillsClaimPending') : t('gm.maxKillsReportPending')}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <button
+                  className="cyber-button pulse-animation"
+                  style={{ width: '100%', padding: '15px', fontSize: '1.2rem', borderColor: 'var(--neon-purple)' }}
+                  onClick={() => socket.emit('endMaxKillsRoundManually', { roomId: room.id })}
+                >
+                  {t('gm.maxKillsEndRoundBtn')}
+                </button>
+              </div>
+            ) : room.killMode === 'silent' ? (
               <div className="panel panel--purple">
                 <h4 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('gm.silentReportReadyTitle')}</h4>
                 <p style={{ color: 'var(--text-muted)', marginBottom: '15px' }}>
@@ -3722,7 +3853,53 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
       })()}
 
       {/* KILL REVEAL PHASE */}
-      {room.status === 'kill_reveal' && (() => {
+      {/* MAX KILLS ROUND SUMMARY - reuses 'kill_reveal' as this mode's own
+          round-summary phase (see gameStore.js's finishMaxKillsRound) -
+          nothing to do with the standard game's kill-reveal at all, so it
+          gets its own render branch instead of threading gameMode checks
+          through the block below. */}
+      {room.status === 'kill_reveal' && room.gameMode === 'maxkills' && (() => {
+        const result = room.maxKillsRoundResult;
+        if (!result) return null;
+        const killerCouple = room.couples.find(c => c.id === result.killerCoupleId);
+        const victimCouples = result.victimCoupleIds.map(id => room.couples.find(c => c.id === id)).filter(Boolean);
+        const wrongAccuserCouples = (result.wrongAccuserCoupleIds || []).map(id => room.couples.find(c => c.id === id)).filter(Boolean);
+        const accuserCouple = result.accuserCoupleId ? room.couples.find(c => c.id === result.accuserCoupleId) : null;
+        const isLastRound = room.maxKillsRoundIndex + 1 >= room.maxKillsTotalRounds;
+        return (
+          <div className="phase-enter" style={{ marginBottom: '20px', textAlign: 'center' }}>
+            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.maxKillsRoundSummaryTitle')}</h3>
+            <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+              <Skull size={20} className="icon-inline" /> <strong>{t('gm.maxKillsRoundKillerWas', { name: killerCouple ? maskName(killerCouple.name) : '?' })}</strong>
+            </p>
+            <p style={{ color: 'white', fontSize: '1.1rem', marginBottom: '10px' }}>
+              {t('gm.maxKillsRoundKillTotal', { count: result.kills })}
+            </p>
+            {result.caught ? (
+              <p style={{ color: 'var(--neon-blue)', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                <Eye size={18} className="icon-inline" /> {t('gm.maxKillsCaughtBy', { name: accuserCouple ? maskName(accuserCouple.name) : '?' })}
+              </p>
+            ) : (
+              <p style={{ color: 'var(--text-muted)', marginBottom: '10px', fontStyle: 'italic' }}>{t('gm.maxKillsNotCaught')}</p>
+            )}
+            {victimCouples.length > 0 && (
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '5px' }}>
+                {t('gm.maxKillsVictimsWere', { names: victimCouples.map(c => maskName(c.name)).join(', ') })}
+              </p>
+            )}
+            {wrongAccuserCouples.length > 0 && (
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '15px' }}>
+                {t('gm.maxKillsWrongAccusersWere', { names: wrongAccuserCouples.map(c => maskName(c.name)).join(', ') })}
+              </p>
+            )}
+            <button className="cyber-button pulse-animation" onClick={() => socket.emit('advanceMaxKillsRound', { roomId: room.id })} style={{ width: '100%', fontSize: '1.2rem', padding: '15px', marginTop: '10px' }}>
+              {isLastRound ? t('gm.maxKillsShowFinalRanking') : t('gm.maxKillsNextRoundBtn')}
+            </button>
+          </div>
+        );
+      })()}
+
+      {room.status === 'kill_reveal' && room.gameMode !== 'maxkills' && (() => {
         const victimCouples = (room.victimIds || []).map(id => room.couples.find(c => c.id === id)).filter(Boolean);
         // No longer disabled while no song is ready - clicking it now opens
         // the music modal in "required" mode instead (see runOnceSongReady/
@@ -3947,6 +4124,37 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               </p>
               <button className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '20px' }} onClick={handleResetGame}>
                 {t('gm.backToLobby')}
+              </button>
+            </div>
+          );
+        }
+        if (room.gameMode === 'maxkills') {
+          const ranking = room.maxKillsFinalRanking || [];
+          const topKills = ranking[0]?.kills ?? 0;
+          return (
+            <div className="panel phase-enter panel--purple" style={{ marginTop: '30px', textAlign: 'center' }}>
+              <h3 style={{ color: 'var(--neon-purple)', marginBottom: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                <Trophy size={20} className="icon-inline" /> {t('gm.maxKillsFinalRankingTitle')}
+              </h3>
+              <div className="couple-list" style={{ marginBottom: '20px', textAlign: 'left' }}>
+                {ranking.map((entry, i) => {
+                  const couple = room.couples.find(c => c.id === entry.coupleId);
+                  const isWinner = entry.kills === topKills && topKills > 0;
+                  return (
+                    <div key={entry.coupleId} className={`list-item ${isWinner ? 'list-item--active' : ''}`}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
+                        <span style={{ color: isWinner ? 'var(--neon-purple)' : 'var(--text-muted)', fontWeight: 'bold', flexShrink: 0 }}>#{i + 1}</span>
+                        {isWinner && <Trophy size={16} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />}
+                        {renderTruncatedNames(couple?.name || '?')}
+                      </div>
+                      <span className="badge badge--purple" style={{ flexShrink: 0 }}>{t('gm.maxKillsKillsBadge', { count: entry.kills })}</span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>{t('gm.gameEnded')}</p>
+              <button className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '20px' }} onClick={handleResetGame}>
+                ZURÜCK ZUR LOBBY / NEUE RUNDE
               </button>
             </div>
           );

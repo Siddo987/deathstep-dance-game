@@ -354,6 +354,25 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     setDecoyAnswer('');
   }, [room.round]);
 
+  // Max Kills mode (see server/gameStore.js's submitMaxKillsAccusation) -
+  // whether the "raise your hand and accuse" picker is currently open. Reset
+  // every round like the other per-round UI toggles above.
+  const [showMaxKillsAccusationPicker, setShowMaxKillsAccusationPicker] = useState(false);
+  React.useEffect(() => {
+    setShowMaxKillsAccusationPicker(false);
+  }, [room.round]);
+
+  // Max Kills silent floor-mode: drives the "leave the floor in Xs" countdown
+  // below off room.maxKillsHitAt (a server timestamp) - a plain client clock
+  // comparison is close enough for a real-world physical cue like this, no
+  // need for the voting phase's server-time-offset precision.
+  const [maxKillsNow, setMaxKillsNow] = useState(Date.now());
+  React.useEffect(() => {
+    if (room.gameMode !== 'maxkills' || room.status !== 'dancing') return;
+    const interval = setInterval(() => setMaxKillsNow(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [room.gameMode, room.status]);
+
   // Before showing either the "who did you kill" or "who killed you" screen,
   // every acting player must confirm their phone is hidden from other
   // couples first - re-asked every round (killers and victims alike, so the
@@ -855,6 +874,42 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         </div>
       );
     }
+    if (room.gameMode === 'maxkills') {
+      const ranking = room.maxKillsFinalRanking || [];
+      const topKills = ranking[0]?.kills ?? 0;
+      const myRank = ranking.findIndex(r => r.coupleId === myCouple?.id);
+      const iWon = myRank !== -1 && ranking[myRank].kills === topKills && topKills > 0;
+      return (
+        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
+          {playerNameTag}
+          {leaveButton}
+          {songSuggestButton}
+          <h2 className="glitch-text" style={{
+            color: iWon ? '#00ff66' : 'var(--neon-purple)',
+            fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px',
+            textShadow: iWon ? '0 0 15px rgba(0,255,102,0.5)' : '0 0 15px rgba(181,43,255,0.5)'
+          }}>
+            {t('player.maxKillsGameOverTitle')}
+          </h2>
+          <div className="couple-list" style={{ marginBottom: '20px', textAlign: 'left', maxWidth: '400px', margin: '0 auto 20px' }}>
+            {ranking.map((entry, i) => {
+              const couple = room.couples.find(c => c.id === entry.coupleId);
+              const isWinner = entry.kills === topKills && topKills > 0;
+              const isMe = entry.coupleId === myCouple?.id;
+              return (
+                <div key={entry.coupleId} className={`list-item ${isWinner ? 'list-item--active' : ''}`} style={{ borderColor: isMe ? 'var(--neon-purple)' : undefined }}>
+                  <span style={{ color: isWinner ? 'var(--neon-purple)' : 'var(--text-muted)', fontWeight: 'bold' }}>#{i + 1} {couple?.name || '?'}{isMe ? ` (${t('player.maxKillsYouLabel')})` : ''}</span>
+                  <span className="badge badge--purple">{t('player.maxKillsKillsBadge', { count: entry.kills })}</span>
+                </div>
+              );
+            })}
+          </div>
+          <p style={{ color: 'var(--text-muted)' }}>{t('player.waitNewRound')}</p>
+          {renderCurrentTrackWidget()}
+        </div>
+      );
+    }
+
     const winners = room.couples.filter(c => c.status === 'alive');
     const killersWon = winners.some(c => c.role === 'killer');
     const killerCouples = room.couples.filter(c => c.role === 'killer');
@@ -990,6 +1045,124 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           <p style={{ fontSize: '1.1rem' }}>{t(`player.puzzleRoleTask${puzzleRoleTaskIndex + 1}`)}</p>
         </div>
       )}
+
+      {/* Max Kills mode - all live, during 'dancing' itself (see the plan) -
+          this mode never uses 'silent_report'/'voting' at all, so everything
+          from claiming a kill to self-reporting one to accusing the killer
+          lives right here instead of a separate phone phase. */}
+      {room.status === 'dancing' && room.gameMode === 'maxkills' && myCouple.status === 'alive' && (() => {
+        const isKillerRound = role === 'killer';
+        const iAmOut = (room.maxKillsRoundOutIds || []).includes(myCouple.id);
+        const iWasHit = (room.maxKillsRoundVictimIds || []).includes(myCouple.id);
+        const hitAt = room.maxKillsHitAt?.[myCouple.id];
+        const secondsLeft = hitAt ? Math.max(0, 20 - Math.floor((maxKillsNow - hitAt) / 1000)) : 0;
+
+        if (!canVote) {
+          return (
+            <div className="panel" style={{ textAlign: 'center', marginTop: '15px' }}>
+              <h3 style={{ color: 'var(--text-muted)' }}>{t('player.partnerActing')}</h3>
+              <p style={{ marginTop: '10px' }}>{t('player.partnerActingBody')}</p>
+            </div>
+          );
+        }
+
+        if (iAmOut) {
+          if (iWasHit) {
+            return (
+              <div className="panel panel--danger" style={{ marginTop: '15px', textAlign: 'center' }}>
+                <h3 style={{ color: 'var(--neon-red)', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
+                  <Skull size={20} className="icon-inline" /> {t('player.maxKillsYouWereHit')}
+                </h3>
+                {room.killMode === 'silent' ? (
+                  secondsLeft > 0
+                    ? <p style={{ color: 'white' }}>{t('player.maxKillsLeaveFloorCountdown', { seconds: secondsLeft })}</p>
+                    : <p style={{ color: 'white' }}>{t('player.maxKillsLeaveFloorNow')}</p>
+                ) : (
+                  <p style={{ color: 'white' }}>{t('player.maxKillsStayOnFloor')}</p>
+                )}
+              </div>
+            );
+          }
+          return (
+            <div className="panel panel--purple" style={{ marginTop: '15px', textAlign: 'center' }}>
+              <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('player.maxKillsWrongAccusationTitle')}</h3>
+              <p style={{ color: 'white' }}>{t('player.maxKillsWrongAccusationBody')}</p>
+            </div>
+          );
+        }
+
+        if (isKillerRound) {
+          if (room.killMode !== 'silent') {
+            return (
+              <div className="panel panel--danger" style={{ marginTop: '15px', textAlign: 'center' }}>
+                <p style={{ color: 'white' }}>{t('player.maxKillsClassicKillerHint')}</p>
+              </div>
+            );
+          }
+          return (
+            <div className="panel panel--danger" style={{ marginTop: '15px' }}>
+              <h3 style={{ color: 'var(--neon-red)', marginBottom: '10px' }}>{t('player.maxKillsWhoDidYouKill')}</h3>
+              <div className="couple-list">
+                {aliveSuspectCouples.map(c => {
+                  const claimed = (room.maxKillsKillClaims || []).includes(c.id);
+                  return (
+                    <button
+                      key={c.id}
+                      className={`cyber-button ${claimed ? 'pulse-animation' : ''}`}
+                      onClick={() => socket.emit('submitMaxKillsKillClaim', { roomId: room.id, targetCoupleId: c.id })}
+                    >
+                      {claimed ? <><Check size={14} className="icon-inline" /> {c.name}</> : c.name}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        }
+
+        return (
+          <div style={{ marginTop: '15px' }}>
+            {room.killMode === 'silent' && (
+              <div className="panel panel--purple" style={{ marginBottom: '15px' }}>
+                <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('player.maxKillsWereYouHitQuestion')}</h3>
+                <button className="cyber-button" onClick={() => socket.emit('submitMaxKillsVictimSelfReport', { roomId: room.id })}>
+                  {t('player.maxKillsWereYouHitYes')}
+                </button>
+              </div>
+            )}
+            <div className="panel panel--info">
+              {!showMaxKillsAccusationPicker ? (
+                <button
+                  className="cyber-button"
+                  style={{ background: 'transparent', border: '1px solid var(--neon-blue)' }}
+                  onClick={() => setShowMaxKillsAccusationPicker(true)}
+                >
+                  {t('player.maxKillsAccuseButton')}
+                </button>
+              ) : (
+                <>
+                  <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px' }}>{t('player.maxKillsAccuseWhoTitle')}</h3>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '10px' }}>{t('player.maxKillsAccuseHint')}</p>
+                  <div className="couple-list">
+                    {aliveSuspectCouples.map(c => (
+                      <button key={c.id} className="cyber-button" onClick={() => socket.emit('submitMaxKillsAccusation', { roomId: room.id, suspectCoupleId: c.id })}>
+                        {c.name}
+                      </button>
+                    ))}
+                    <button
+                      className="cyber-button"
+                      style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
+                      onClick={() => setShowMaxKillsAccusationPicker(false)}
+                    >
+                      {t('player.maxKillsAccuseCancelBtn')}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {room.status === 'silent_report' && (
         <div className="panel panel--purple">
@@ -1134,7 +1307,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         );
       })()}
 
-      {room.status === 'kill_reveal' && (() => {
+      {room.status === 'kill_reveal' && room.gameMode !== 'maxkills' && (() => {
         const victimCouples = (room.victimIds || []).map(id => room.couples.find(c => c.id === id)).filter(Boolean);
         return (
           <div className={`panel ${victimCouples.length > 0 ? 'panel--danger' : 'panel--info'}`}>
@@ -1149,6 +1322,32 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               <p style={{ fontSize: '1.2rem', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
                 <Sparkles size={20} className="icon-inline" /> {t('player.nobodyEliminatedYet')}
               </p>
+            )}
+            <p style={{ color: 'var(--text-muted)', marginTop: '20px' }}>{t('player.waitingGm')}</p>
+          </div>
+        );
+      })()}
+
+      {/* Max Kills round summary - reuses 'kill_reveal' as this mode's own
+          round-summary phase (see gameStore.js's finishMaxKillsRound). The
+          killer's identity only becomes public knowledge here, once the
+          round is already over - see room.maxKillsRoundResult. */}
+      {room.status === 'kill_reveal' && room.gameMode === 'maxkills' && (() => {
+        const result = room.maxKillsRoundResult;
+        if (!result) return null;
+        const killerCouple = room.couples.find(c => c.id === result.killerCoupleId);
+        return (
+          <div className="panel panel--purple">
+            <h2 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('player.maxKillsRoundSummaryTitle')}</h2>
+            <p style={{ fontSize: '1.2rem', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '10px' }}>
+              <Skull size={20} className="icon-inline" style={{ color: 'var(--neon-red)' }} />
+              <strong style={{ color: 'var(--neon-red)' }}>{t('player.maxKillsRoundKillerWas', { name: killerCouple?.name || '?' })}</strong>
+            </p>
+            <p style={{ color: 'white', marginBottom: '10px' }}>{t('player.maxKillsRoundKillTotal', { count: result.kills })}</p>
+            {result.caught ? (
+              <p style={{ color: 'var(--neon-blue)' }}>{t('player.maxKillsCaughtThisTime')}</p>
+            ) : (
+              <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>{t('player.maxKillsNotCaughtThisTime')}</p>
             )}
             <p style={{ color: 'var(--text-muted)', marginTop: '20px' }}>{t('player.waitingGm')}</p>
           </div>
@@ -1240,7 +1439,10 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                 <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '15px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
                   <Skull size={28} className="icon-inline" /> {t('player.youAreKillers')} <Skull size={28} className="icon-inline" />
                 </h2>
-                <p style={{ fontSize: '1.1rem' }}>{t('player.killerInstructions')}<br/><strong style={{color: 'white', marginTop: '10px', display: 'block'}}>{t('player.killerLimit')}</strong></p>
+                <p style={{ fontSize: '1.1rem' }}>
+                  {room.gameMode === 'maxkills' ? t('player.maxKillsKillerInstructions') : t('player.killerInstructions')}
+                  {room.gameMode !== 'maxkills' && <><br/><strong style={{color: 'white', marginTop: '10px', display: 'block'}}>{t('player.killerLimit')}</strong></>}
+                </p>
                 {otherKillerCouples.length > 0 && (
                   <p style={{ fontSize: '1rem', marginTop: '15px', color: 'white' }}>
                     {t('player.otherKillers', { names: otherKillerCouples.map(c => c.name).join(', ') })}
@@ -1295,7 +1497,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>
                 <h2 style={{ color: 'var(--neon-blue)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreDancers')}</h2>
-                <p style={{ fontSize: '1.1rem' }}>{t('player.dancerInstructions')}</p>
+                <p style={{ fontSize: '1.1rem' }}>{room.gameMode === 'maxkills' ? t('player.maxKillsDancerInstructions') : t('player.dancerInstructions')}</p>
               </div>
             )
           )}

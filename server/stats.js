@@ -157,6 +157,16 @@ export async function recordGameConclusion(room, { aborted }) {
     // concludes) - a cut-short game grants none.
     if (aborted) return;
 
+    // Max Kills has no killer/dancer win/loss team at all (see the plan) -
+    // recordGameHistory above already logged the game/couples/round data.
+    // Skipping here avoids recording a bogus "win" for literally every
+    // player: couple.role is reset to 'dancer' for everyone once the
+    // tournament concludes (see gameStore.js's advanceMaxKillsRound), which
+    // would otherwise make didKillersWin() false and every 'dancer'
+    // participation row read as a win. evaluateGameAchievements has its own,
+    // identical guard for the same reason.
+    if (room.gameMode === 'maxkills') return;
+
     const killersWon = didKillersWin(room);
     for (const player of room.players) {
       if (!player.userId) continue;

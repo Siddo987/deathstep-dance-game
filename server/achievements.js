@@ -46,6 +46,15 @@ export function tierForCount(count) {
 // reconstructed here by simulating forward through the rounds in order.
 function evaluateGameAchievements(room) {
   const earnedByUser = new Map(); // userId -> Set<achievementKey>
+  // Max Kills has no permanent killer/dancer team, no win/loss, and never
+  // pushes to room.roundHistory (see the new-roles/modes plan) - none of the
+  // achievements below make sense for it. Everyone would otherwise wrongly
+  // earn 'first_win'/'survivor' every single Max Kills game, since the
+  // tournament always ends with every couple's role reset to 'dancer' and
+  // couple.status never flips away from 'alive'. A future update could add
+  // its own ranking-based achievement type; for now this mode simply awards
+  // nothing.
+  if (room.gameMode === 'maxkills') return earnedByUser;
   const award = (userId, key) => {
     if (!userId) return;
     if (!earnedByUser.has(userId)) earnedByUser.set(userId, new Set());

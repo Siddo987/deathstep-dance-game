@@ -974,9 +974,14 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startGame', ({ roomId, killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote }) => {
+  socket.on('startGame', ({ roomId, killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote, gameMode, maxKillsVariant, maxKillsSongLengthSec }) => {
     if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
-    const room = gameStore.startGame(roomId, { killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote });
+    // NOTE: gameMode itself was missing from this destructure until now -
+    // every game (including Chaos mode games) was silently starting as
+    // 'standard' server-side regardless of what the GM picked in
+    // GMDashboard.jsx, since gameStore.startGame()'s own default ('standard')
+    // always won. Found and fixed while wiring up Max Kills mode.
+    const room = gameStore.startGame(roomId, { killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote, gameMode, maxKillsVariant, maxKillsSongLengthSec });
     if (room) {
       broadcastRoom(room);
       
@@ -1078,6 +1083,59 @@ io.on('connection', (socket) => {
     const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
     if (!player) return;
     const room = gameStore.submitProtectorPick(roomId, player.id, targetCoupleId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  // --- Max Kills mode (gameMode: 'maxkills') - see the new-roles/modes plan ---
+
+  socket.on('gmMarkMaxKillsHit', ({ roomId, coupleId }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.gmMarkMaxKillsHit(roomId, coupleId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  socket.on('submitMaxKillsKillClaim', ({ roomId, targetCoupleId }) => {
+    const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
+    if (!player) return;
+    const room = gameStore.submitMaxKillsKillClaim(roomId, player.id, targetCoupleId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  socket.on('submitMaxKillsVictimSelfReport', ({ roomId }) => {
+    const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
+    if (!player) return;
+    const room = gameStore.submitMaxKillsVictimSelfReport(roomId, player.id);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  socket.on('submitMaxKillsAccusation', ({ roomId, suspectCoupleId }) => {
+    const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
+    if (!player) return;
+    const room = gameStore.submitMaxKillsAccusation(roomId, player.id, suspectCoupleId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  socket.on('endMaxKillsRoundManually', ({ roomId }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.endMaxKillsRoundManually(roomId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  socket.on('advanceMaxKillsRound', ({ roomId }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.advanceMaxKillsRound(roomId);
     if (room) {
       broadcastRoom(room);
     }
