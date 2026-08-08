@@ -1,16 +1,26 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import en from './locales/en.js';
 import de from './locales/de.js';
+import ru from './locales/ru.js';
+import uk from './locales/uk.js';
+import nl from './locales/nl.js';
+import fr from './locales/fr.js';
 
 const LANG_KEY = 'deathstep_language';
-const dictionaries = { en, de };
+const dictionaries = { en, de, ru, uk, nl, fr };
+const SUPPORTED_LANGS = Object.keys(dictionaries);
 
 export function detectLanguage() {
   try {
     const saved = localStorage.getItem(LANG_KEY);
-    if (saved === 'en' || saved === 'de') return saved;
+    if (SUPPORTED_LANGS.includes(saved)) return saved;
   } catch (e) { /* localStorage unavailable */ }
-  return (navigator.language || '').toLowerCase().startsWith('de') ? 'de' : 'en';
+  const browserLang = (navigator.language || '').toLowerCase();
+  // 'uk' (Ukrainian) is checked before the generic 'uk'-looking prefixes
+  // don't collide with anything else here; browser tags come as e.g.
+  // 'de-DE', 'uk-UA', 'fr-CA', so match on the language subtag only.
+  const prefix = browserLang.split('-')[0];
+  return SUPPORTED_LANGS.includes(prefix) ? prefix : 'en';
 }
 
 const LanguageContext = createContext({

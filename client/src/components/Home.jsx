@@ -53,10 +53,14 @@ function LanguageSwitcher() {
   );
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px', marginBottom: '20px' }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: '8px', rowGap: '6px', marginBottom: '20px' }}>
       <Globe size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
       {langButton('en', 'EN')}
       {langButton('de', 'DE')}
+      {langButton('ru', 'RU')}
+      {langButton('uk', 'UK')}
+      {langButton('nl', 'NL')}
+      {langButton('fr', 'FR')}
     </div>
   );
 }

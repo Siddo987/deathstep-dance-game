@@ -34,7 +34,7 @@ function GermanContent() {
         <li><code>deathstep_privacy_mode</code> – Anzeige-Einstellung des Spielleiters (Namen ausblenden)</li>
         <li><code>deathstep_auto_random_song</code> – Einstellung des Spielleiters zur automatischen Musikauswahl</li>
         <li><code>deathstep_ref_code</code> – falls du über einen Einladungslink gekommen bist: die Kennung des einladenden Accounts, bis du dich (optional) registrierst</li>
-        <li><code>deathstep_language</code> – deine gewählte Sprache (Deutsch/Englisch)</li>
+        <li><code>deathstep_language</code> – deine gewählte Sprache (Deutsch/Englisch/Russisch/Ukrainisch/Niederländisch/Französisch)</li>
         <li><code>deathstep_cookie_consent</code> – deine Auswahl in diesem Cookie-Banner</li>
       </ul>
 
@@ -139,7 +139,7 @@ function EnglishContent() {
         <li><code>deathstep_privacy_mode</code> – a display setting of the GM (hide names)</li>
         <li><code>deathstep_auto_random_song</code> – a GM setting for automatic music selection</li>
         <li><code>deathstep_ref_code</code> – if you arrived via an invite link: the inviting account's identifier, until you (optionally) register</li>
-        <li><code>deathstep_language</code> – your chosen language (German/English)</li>
+        <li><code>deathstep_language</code> – your chosen language (German/English/Russian/Ukrainian/Dutch/French)</li>
         <li><code>deathstep_cookie_consent</code> – your selection in the cookie banner</li>
       </ul>
 

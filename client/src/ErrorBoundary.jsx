@@ -40,17 +40,42 @@ class ErrorBoundary extends React.Component {
       lang = localStorage.getItem('deathstep_language') || 'de';
     } catch (e) { /* localStorage unavailable */ }
 
-    const text = lang === 'en'
-      ? {
+    // Kept tiny and self-contained on purpose (see note above) - not worth
+    // pulling in the full locale files just for a 3-line crash screen, so
+    // this stays a small hand-maintained lookup instead of dictionaries.
+    const texts = {
+      en: {
         title: 'Something went wrong',
         body: 'Please reload the page. If the problem persists, try again in a few minutes.',
         reload: 'Reload page',
-      }
-      : {
+      },
+      de: {
         title: 'Etwas ist schiefgelaufen',
         body: 'Bitte lade die Seite neu. Falls das Problem bestehen bleibt, versuch es in ein paar Minuten erneut.',
         reload: 'Seite neu laden',
-      };
+      },
+      ru: {
+        title: 'Что-то пошло не так',
+        body: 'Пожалуйста, перезагрузите страницу. Если проблема не исчезнет, повторите попытку через несколько минут.',
+        reload: 'Перезагрузить страницу',
+      },
+      uk: {
+        title: 'Щось пішло не так',
+        body: 'Будь ласка, перезавантажте сторінку. Якщо проблема не зникне, спробуйте ще раз через кілька хвилин.',
+        reload: 'Перезавантажити сторінку',
+      },
+      nl: {
+        title: 'Er is iets misgegaan',
+        body: 'Herlaad de pagina. Als het probleem aanhoudt, probeer het over een paar minuten opnieuw.',
+        reload: 'Pagina herladen',
+      },
+      fr: {
+        title: "Une erreur s'est produite",
+        body: "Veuillez recharger la page. Si le problème persiste, réessayez dans quelques minutes.",
+        reload: 'Recharger la page',
+      },
+    };
+    const text = texts[lang] || texts.de;
 
     return (
       <div className="app-container" style={{ padding: '20px' }}>
