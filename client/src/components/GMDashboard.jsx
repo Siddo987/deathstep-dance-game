@@ -152,7 +152,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // 'puzzle' is wired up with real behavior so far, the rest of the plan's
   // 5 roles get their own toggle here as they're built.
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
-  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false, seer: false, protector: false });
+  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false, seer: false, protector: false, toucher: false });
   const [martyrWinsOnVote, setMartyrWinsOnVote] = useState(false);
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
@@ -2753,6 +2753,18 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
                   {t('gm.specialRoleProtectorHint')}
                 </p>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!specialRoles.toucher}
+                    onChange={(e) => setSpecialRoles({ ...specialRoles, toucher: e.target.checked })}
+                  />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleToucher')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.specialRoleToucherHint')}
+                </p>
               </div>
             )}
           </div>
@@ -3411,6 +3423,29 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                     {t('gm.protectorPickLabel', { name: room.couples.find(c => c.id === room.protectorPick)?.name || '?' })}
                   </p>
                 )}
+
+                {room.couples.filter(c => c.specialRole === 'toucher' && c.status === 'alive').map(toucher => (
+                  <div key={toucher.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
+                    <span style={{ color: 'white' }}>{t('gm.toucherMarkLabel', { name: toucher.name })}</span>
+                    <div className="btn-row" style={{ gap: '6px' }}>
+                      <button
+                        className={room.toucherReports?.[toucher.id] === true ? 'cyber-button pulse-animation' : 'cyber-button'}
+                        style={{ padding: '6px 12px', fontSize: '0.85rem' }}
+                        onClick={() => socket.emit('gmMarkToucherResult', { roomId: room.id, coupleId: toucher.id, touched: true })}
+                      >
+                        {t('gm.toucherMarkYes')}
+                      </button>
+                      <button
+                        className="cyber-button"
+                        style={{ padding: '6px 12px', fontSize: '0.85rem', opacity: room.toucherReports?.[toucher.id] === false ? 1 : 0.6 }}
+                        onClick={() => socket.emit('gmMarkToucherResult', { roomId: room.id, coupleId: toucher.id, touched: false })}
+                      >
+                        {t('gm.toucherMarkNo')}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '10px', color: 'var(--text-muted)', marginBottom: '5px' }}>
                   <strong>{t('gm.markKilled')}</strong>
                   <span style={{ color: 'var(--neon-purple)', flexShrink: 0 }}>{t('gm.markedCount', { marked: markedCount, total: aliveKillerCount })}</span>

@@ -73,6 +73,7 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     victimReports: pickOwn(room.victimReports),
     votes: pickOwn(room.votes),
     seerPeeks: pickOwn(room.seerPeeks), // a Seer's peek result is personal, not shared with teammates - same treatment as their specialRole itself
+    toucherReports: pickOwn(room.toucherReports), // same pre-reveal secrecy as killClaims/victimReports above - not public until revealKill
     // Not keyed by couple id like the fields above (there's only ever one
     // current pick, not one per couple), so pickOwn doesn't apply - only the
     // Protector's own couple gets to see it, everyone else (including the
@@ -1071,6 +1072,7 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {}; // { [seerCoupleId]: { targetCoupleId, targetRole } } - see seerPeek()
+    room.toucherReports = {}; // { [toucherCoupleId]: boolean } - see gmMarkToucherResult()/submitToucherReport()/revealKill()
     // Protector special role: NOT reset at every round boundary like the
     // fields above - see submitProtectorPick()/revealKill() for why it
     // deliberately survives from one round's kill_reveal into the next
@@ -1218,6 +1220,7 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {};
+    room.toucherReports = {};
     // The previous round's track (if any) is over the moment this round
     // starts - only playQueueEntry should ever put something here again. Left
     // unset, a round started with nothing queued (the GM proceeded past the
@@ -1272,6 +1275,22 @@ class GameStore {
     return room;
   }
 
+  // Toucher special role, classic kill mode: the GM marks (from watching the
+  // floor) whether the Toucher couple touched enough other couples this
+  // round - the classic-mode counterpart to submitToucherReport() below.
+  // Consumed in revealKill(). Freely overwritable, same as reportKill.
+  gmMarkToucherResult(roomId, coupleId, touched) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'dancing') return null;
+
+    const couple = room.couples.find(c => c.id === coupleId);
+    if (!couple || couple.specialRole !== 'toucher' || couple.status !== 'alive') return room;
+
+    room.toucherReports[couple.id] = !!touched;
+    return room;
+  }
+
   // Silent-report mode: moves from the (song-only) dancing phase into the report-collection phase.
   proceedToSilentReport(roomId) {
     const room = this.rooms.get(roomId);
@@ -1313,6 +1332,23 @@ class GameStore {
     }
 
     room.victimReports[couple.id] = { feltKilled: !!feltKilled, suspectCoupleId: feltKilled ? suspectCoupleId : null };
+    return room;
+  }
+
+  // Toucher special role, silent kill mode: the couple self-reports whether
+  // they touched enough other couples this round - the silent-mode
+  // counterpart to gmMarkToucherResult() above, submitted independently of
+  // (and in addition to) this couple's own victim report. Consumed in
+  // revealKill(). Freely overwritable, same as submitVictimReport.
+  submitToucherReport(roomId, clientId, touched) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'silent_report') return null;
+
+    const couple = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!couple || couple.specialRole !== 'toucher' || couple.status !== 'alive') return null;
+
+    room.toucherReports[couple.id] = !!touched;
     return room;
   }
 
@@ -1365,6 +1401,19 @@ class GameStore {
     // handleRevealKill call sites.
     if (room.status !== 'dancing' && room.status !== 'silent_report') return null;
 
+    // Toucher special role: any alive Toucher couple that didn't confirm a
+    // touch this round (missing report, or an explicit "no") is folded into
+    // the kill list here, before the Protector's filter below - so a
+    // shielded Toucher survives a failed round exactly like it would
+    // survive an actual kill attempt. Whether/how this got reported is
+    // fundamentally an honor-system fact (GM-judged in classic mode via
+    // gmMarkToucherResult, self-reported in silent mode via
+    // submitToucherReport, both happening before this point in the flow),
+    // same trust model as a classic-mode kill itself.
+    const failedToucherIds = room.couples
+      .filter(c => c.specialRole === 'toucher' && c.status === 'alive' && room.toucherReports[c.id] !== true)
+      .map(c => c.id);
+
     // Protector special role: a couple picked during the *previous* round's
     // kill_reveal (see submitProtectorPick) cannot die to a kill this round -
     // filtered out before anything below ever sees them as a victim, so
@@ -1373,7 +1422,7 @@ class GameStore {
     // Consumed here regardless of whether it actually saved anyone, so a
     // stale pick can never silently protect a couple again next round if the
     // Protector forgets to submit a fresh one.
-    room.victimIds = [...room.pendingVictimIds].filter(id => id !== room.protectorPick);
+    room.victimIds = [...new Set([...room.pendingVictimIds, ...failedToucherIds])].filter(id => id !== room.protectorPick);
     room.protectorPick = null;
 
     room.victimIds.forEach(victimId => {
@@ -1543,6 +1592,7 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {};
+    room.toucherReports = {};
     room.nowPlaying = null;
 
     return room;
@@ -1567,6 +1617,7 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {};
+    room.toucherReports = {};
     room.voteResult = null;
     // See the identical comment in startDancing() above - same stale-display
     // bug, reachable here when nothing was queued for the new round.
@@ -1631,6 +1682,7 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {};
+    room.toucherReports = {};
     room.protectorPick = null;
     room.endReason = null;
     room.songSuggestions = [];

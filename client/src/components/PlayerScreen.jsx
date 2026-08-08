@@ -1037,6 +1037,30 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           );
         }
 
+        // Berühr-Paar special role, silent kill mode: gate the normal kill-
+        // claim/victim-report flow below behind this couple's own touch
+        // self-report first - independent of (and required in addition to)
+        // whatever they report about themselves as a potential victim.
+        if (myCouple.specialRole === 'toucher' && !Object.prototype.hasOwnProperty.call(room.toucherReports || {}, myCouple.id)) {
+          return (
+            <div className="panel panel--purple" style={{ marginTop: '20px' }}>
+              <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('player.toucherReportQuestion')}</h3>
+              <div className="couple-list">
+                <button className="cyber-button" onClick={() => socket.emit('submitToucherReport', { roomId: room.id, touched: true })}>
+                  {t('player.toucherReportYes')}
+                </button>
+                <button
+                  className="cyber-button"
+                  style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
+                  onClick={() => socket.emit('submitToucherReport', { roomId: room.id, touched: false })}
+                >
+                  {t('player.toucherReportNo')}
+                </button>
+              </div>
+            </div>
+          );
+        }
+
         if (isKiller) {
           return (
             <div className="panel panel--danger" style={{ marginTop: '20px' }}>
@@ -1259,6 +1283,14 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
                 <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreProtector')}</h2>
                 <p style={{ fontSize: '1.1rem' }}>{t('player.protectorInstructions')}</p>
+              </div>
+            ) : myCouple?.specialRole === 'toucher' ? (
+              // Sonderrolle "Berühr-Paar" - the actual report happens
+              // per-round: GM-marked (classic) during 'dancing', or
+              // self-reported (silent) during 'silent_report' below.
+              <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
+                <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreToucher')}</h2>
+                <p style={{ fontSize: '1.1rem' }}>{t('player.toucherInstructions')}</p>
               </div>
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>

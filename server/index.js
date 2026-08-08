@@ -1030,6 +1030,14 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('gmMarkToucherResult', ({ roomId, coupleId, touched }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.gmMarkToucherResult(roomId, coupleId, touched);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
   socket.on('submitKillClaim', ({ roomId, victimId }) => {
     const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
     if (!player) return;
@@ -1043,6 +1051,15 @@ io.on('connection', (socket) => {
     const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
     if (!player) return;
     const room = gameStore.submitVictimReport(roomId, player.id, feltKilled, suspectId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
+  socket.on('submitToucherReport', ({ roomId, touched }) => {
+    const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
+    if (!player) return;
+    const room = gameStore.submitToucherReport(roomId, player.id, touched);
     if (room) {
       broadcastRoom(room);
     }
