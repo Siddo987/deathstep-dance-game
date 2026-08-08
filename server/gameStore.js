@@ -1029,7 +1029,19 @@ class GameStore {
     this.roomLastActivity.delete(roomId);
   }
 
-  startGame(roomId, killerCount = 1, killMode = 'classic', deadPlayersKeepDancing = false) {
+  // Options bundled into a single object (rather than more positional
+  // params) since this list keeps growing with every new mode/setting - see
+  // the new-roles/modes plan. specialRoles is a { [key in SPECIAL_ROLE_KEYS]:
+  // boolean } map of which special roles the GM enabled this game; v1 keeps
+  // it to at most one couple per role and one role per couple (no stacking -
+  // see the assignment loop below), which is simple enough to not need an
+  // "allow multiple" override yet.
+  startGame(roomId, {
+    killerCount = 1,
+    killMode = 'classic',
+    deadPlayersKeepDancing = false,
+    specialRoles = {},
+  } = {}) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     // Only reachable from 'paired' in the UI (GMDashboard's killer-count/mode
@@ -1106,6 +1118,21 @@ class GameStore {
       }
     }
     room.killerOverridePlayerIds = []; // one-shot - the owner sets this fresh before every round
+
+    // Special-role assignment (see SPECIAL_ROLE_KEYS/couple.specialRole) -
+    // runs after killers are picked so a killer couple never doubles as a
+    // special-role holder (these are a dancer-side mechanic). One random
+    // dancer couple per GM-enabled role, one role per couple for v1 (no
+    // stacking) - if there aren't enough dancer couples left for every
+    // enabled role, the remaining ones are simply skipped rather than
+    // failing the whole game start.
+    const unassignedForSpecialRole = activeCouples.filter(c => c.role === 'dancer');
+    for (const key of SPECIAL_ROLE_KEYS) {
+      if (!specialRoles[key] || unassignedForSpecialRole.length === 0) continue;
+      const idx = Math.floor(Math.random() * unassignedForSpecialRole.length);
+      unassignedForSpecialRole[idx].specialRole = key;
+      unassignedForSpecialRole.splice(idx, 1);
+    }
 
     room.players.forEach(p => p.hasViewedRole = false);
     room.status = 'role_reveal';

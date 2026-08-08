@@ -974,9 +974,9 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startGame', ({ roomId, killerCount, killMode, deadPlayersKeepDancing }) => {
+  socket.on('startGame', ({ roomId, killerCount, killMode, deadPlayersKeepDancing, specialRoles }) => {
     if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
-    const room = gameStore.startGame(roomId, killerCount, killMode, deadPlayersKeepDancing);
+    const room = gameStore.startGame(roomId, { killerCount, killMode, deadPlayersKeepDancing, specialRoles });
     if (room) {
       broadcastRoom(room);
       

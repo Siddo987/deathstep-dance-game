@@ -342,6 +342,13 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   // accident. Re-picked deterministically per round so it doesn't flicker on
   // every re-render, same pattern as decoyPuzzle above.
   const deadTaskIndex = React.useMemo(() => Math.floor(Math.random() * 6), [room.round]);
+
+  // Rätsel-Paar special role (couple.specialRole === 'puzzle'): a real riddle/
+  // puzzle to visibly work on during the dance, as social camouflage - other
+  // couples see them occupied with their phone just like everyone else. Same
+  // unchecked, never-sent-to-server shape as decoyPuzzle above, just framed
+  // as an actual in-round task rather than filler. Re-picked once per round.
+  const puzzleRoleTaskIndex = React.useMemo(() => Math.floor(Math.random() * 6), [room.round]);
   React.useEffect(() => {
     setFeltKilledChoice(null);
     setDecoyAnswer('');
@@ -961,6 +968,13 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         </div>
       )}
 
+      {room.status === 'dancing' && myCouple.specialRole === 'puzzle' && myCouple.status === 'alive' && (
+        <div className="panel panel--purple" style={{ marginTop: '15px' }}>
+          <p style={{ color: 'var(--neon-purple)', fontWeight: 'bold', marginBottom: '8px' }}>{t('player.puzzleRoleTaskTitle')}</p>
+          <p style={{ fontSize: '1.1rem' }}>{t(`player.puzzleRoleTask${puzzleRoleTaskIndex + 1}`)}</p>
+        </div>
+      )}
+
       {room.status === 'silent_report' && (
         <div className="panel panel--purple">
           <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.5rem', letterSpacing: '2px', marginBottom: '10px' }}>
@@ -1135,6 +1149,17 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                     {t('player.otherKillers', { names: otherKillerCouples.map(c => c.name).join(', ') })}
                   </p>
                 )}
+              </div>
+            ) : myCouple?.specialRole === 'puzzle' ? (
+              // Sonderrolle "Rätsel-Paar" - still fundamentally a dancer, just
+              // with an extra explanation of the puzzle task shown during
+              // dancing (see the panel rendered above, gated on room.status
+              // === 'dancing'). No other special role has its own role-reveal
+              // panel yet - Seer/Protector/Toucher/Martyr still fall through
+              // to the plain dancer panel below until they're built.
+              <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
+                <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youArePuzzleRole')}</h2>
+                <p style={{ fontSize: '1.1rem' }}>{t('player.puzzleRoleInstructions')}</p>
               </div>
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>

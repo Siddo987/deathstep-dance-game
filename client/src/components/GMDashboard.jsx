@@ -148,6 +148,11 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [killerRatioDivisor, setKillerRatioDivisor] = useState(8);
   const [killMode, setKillMode] = useState('classic');
   const [deadPlayersKeepDancing, setDeadPlayersKeepDancing] = useState(false);
+  // Special roles (see SPECIAL_ROLE_KEYS in server/gameStore.js) - only
+  // 'puzzle' is wired up with real behavior so far, the rest of the plan's
+  // 5 roles get their own toggle here as they're built.
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [specialRoles, setSpecialRoles] = useState({ puzzle: false });
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
   // public read, no admin_users gate needed since every GM's dashboard uses
@@ -836,7 +841,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing });
+    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing, specialRoles });
   };
 
   const handleSubmitKillClaimForCouple = (killerCoupleId) => {
@@ -2680,6 +2685,29 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
             <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
               {t('gm.deadPlayersKeepDancingHint')}
             </p>
+
+            <button
+              onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+              style={{ background: 'transparent', border: 'none', padding: 0, marginTop: '18px', color: 'var(--neon-purple)', fontSize: '0.9rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              {showAdvancedSettings ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              {t('gm.advancedSettings')}
+            </button>
+            {showAdvancedSettings && (
+              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!specialRoles.puzzle}
+                    onChange={(e) => setSpecialRoles({ ...specialRoles, puzzle: e.target.checked })}
+                  />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRolePuzzle')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.specialRolePuzzleHint')}
+                </p>
+              </div>
+            )}
           </div>
 
           <div className="btn-row" style={{ marginBottom: '20px' }}>
