@@ -65,6 +65,8 @@ export default {
   'howto.step5Title': 'Wiederholen',
   'howto.step5Body': 'Tanzen und Abstimmen wiederholen sich, bis ein Team gewinnt.',
   'howto.winCondition': 'Tänzer gewinnen, sobald alle Killer enttarnt sind. Killer gewinnen, sobald sie die Hälfte der übrigen Paare stellen.',
+  'howto.rolesTitle': 'Rollen-Lexikon',
+  'howto.rolesIntro': 'Der GM kann zusätzlich zu Killer/Tänzer optionale Sonderrollen aktivieren - hier steht, was jede davon macht.',
 
   // Login/Konto
   'auth.loginOrRegister': 'Anmelden / Registrieren',

@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { HelpCircle, CheckCircle2, AlertTriangle, Skull, X } from 'lucide-react';
+import { HelpCircle, CheckCircle2, AlertTriangle, Skull, X, Music2, Puzzle, HeartCrack, Eye, Shield, Hand } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
 
 function useEscapeKey(isOpen, onEscape) {
@@ -84,6 +84,21 @@ export function HowToPlayModal({ isOpen, onClose }) {
   if (!isOpen) return null;
 
   const steps = [1, 2, 3, 4, 5];
+  // Role legend - deliberately lists every special role regardless of
+  // whether *this* room has any enabled (this modal is content-only, no
+  // game-state dependency, reachable before a room even exists - see the
+  // comment on the component above). Reuses the exact same title/instruction
+  // locale keys as the in-round Role Reveal panels (PlayerScreen.jsx) rather
+  // than duplicating the copy, so the two surfaces can never drift apart.
+  const roles = [
+    { icon: Skull, color: 'var(--neon-red)', titleKey: 'player.youAreKillers', bodyKey: 'player.killerInstructions' },
+    { icon: Music2, color: 'var(--neon-blue)', titleKey: 'player.youAreDancers', bodyKey: 'player.dancerInstructions' },
+    { icon: Puzzle, color: 'var(--neon-purple)', titleKey: 'player.youArePuzzleRole', bodyKey: 'player.puzzleRoleInstructions' },
+    { icon: HeartCrack, color: 'var(--neon-purple)', titleKey: 'player.youAreMartyr', bodyKey: 'player.martyrInstructions' },
+    { icon: Eye, color: 'var(--neon-purple)', titleKey: 'player.youAreSeer', bodyKey: 'player.seerInstructions' },
+    { icon: Shield, color: 'var(--neon-purple)', titleKey: 'player.youAreProtector', bodyKey: 'player.protectorInstructions' },
+    { icon: Hand, color: 'var(--neon-purple)', titleKey: 'player.youAreToucher', bodyKey: 'player.toucherInstructions' },
+  ];
   return createPortal(
     <div className="modal-overlay" onClick={onClose}>
       <div
@@ -118,8 +133,22 @@ export function HowToPlayModal({ isOpen, onClose }) {
           ))}
         </div>
 
-        <div className="panel panel--info" style={{ marginBottom: 0 }}>
+        <div className="panel panel--info" style={{ marginBottom: '15px' }}>
           <p style={{ margin: 0, color: 'white', fontSize: '0.9rem' }}>{t('howto.winCondition')}</p>
+        </div>
+
+        <h4 style={{ color: 'var(--neon-purple)', margin: '0 0 4px 0' }}>{t('howto.rolesTitle')}</h4>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '12px' }}>{t('howto.rolesIntro')}</p>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          {roles.map(({ icon: Icon, color, titleKey, bodyKey }) => (
+            <div key={titleKey} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+              <Icon size={18} style={{ color, flexShrink: 0, marginTop: '2px' }} />
+              <div>
+                <strong style={{ color: 'white', display: 'block', marginBottom: '2px', fontSize: '0.9rem' }}>{t(titleKey)}</strong>
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{t(bodyKey)}</span>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>,

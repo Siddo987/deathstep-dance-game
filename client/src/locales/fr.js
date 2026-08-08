@@ -65,6 +65,8 @@ export default {
   'howto.step5Title': 'Recommencez',
   'howto.step5Body': "La danse et le vote se répètent jusqu'à ce qu'un camp l'emporte.",
   'howto.winCondition': 'Les danseurs gagnent une fois que tous les tueurs ont été démasqués. Les tueurs gagnent dès qu\'ils représentent la moitié des couples restants.',
+  'howto.rolesTitle': 'Lexique des rôles',
+  'howto.rolesIntro': "Le GM peut activer en option des rôles spéciaux en plus de Tueur/Danseur - voici ce que fait chacun d'eux.",
 
   // Connexion / compte
   'auth.loginOrRegister': "Se connecter / S'inscrire",

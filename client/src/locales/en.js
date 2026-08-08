@@ -65,6 +65,8 @@ export default {
   'howto.step5Title': 'Repeat',
   'howto.step5Body': 'Dancing and voting keep repeating until one side wins.',
   'howto.winCondition': 'Dancers win once every killer has been exposed. Killers win once they make up half of the remaining couples.',
+  'howto.rolesTitle': 'Role legend',
+  'howto.rolesIntro': "The GM can optionally enable special roles on top of Killer/Dancer - here's what each one does.",
 
   // Login/account
   'auth.loginOrRegister': 'Log In / Register',

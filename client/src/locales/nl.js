@@ -65,6 +65,8 @@ export default {
   'howto.step5Title': 'Herhaal',
   'howto.step5Body': 'Dansen en stemmen blijven zich herhalen tot één kant wint.',
   'howto.winCondition': 'Dansers winnen zodra elke moordenaar ontmaskerd is. Moordenaars winnen zodra ze de helft van de overgebleven koppels uitmaken.',
+  'howto.rolesTitle': 'Rollenoverzicht',
+  'howto.rolesIntro': 'De GM kan optioneel speciale rollen inschakelen bovenop Moordenaar/Danser - hier staat wat elke rol doet.',
 
   // Inloggen/account
   'auth.loginOrRegister': 'Inloggen / Registreren',
