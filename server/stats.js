@@ -47,8 +47,8 @@ async function recordGameHistory(pool, room, { aborted }) {
   const coupleDbIdByRoomId = new Map();
   for (const couple of room.couples) {
     const [coupleResult] = await pool.query(
-      'INSERT INTO game_couples (game_id, couple_key, name, role, final_status) VALUES (?, ?, ?, ?, ?)',
-      [gameId, couple.id, couple.name, couple.role, couple.status]
+      'INSERT INTO game_couples (game_id, couple_key, name, role, final_status, special_role, eliminated_by) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [gameId, couple.id, couple.name, couple.role, couple.status, couple.specialRole || null, couple.eliminatedBy || null]
     );
     coupleDbIdByRoomId.set(couple.id, coupleResult.insertId);
 

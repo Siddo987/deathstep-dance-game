@@ -147,6 +147,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [killerCount, setKillerCount] = useState(1);
   const [killerRatioDivisor, setKillerRatioDivisor] = useState(8);
   const [killMode, setKillMode] = useState('classic');
+  const [deadPlayersKeepDancing, setDeadPlayersKeepDancing] = useState(false);
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
   // public read, no admin_users gate needed since every GM's dashboard uses
@@ -835,7 +836,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id, killerCount, killMode });
+    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing });
   };
 
   const handleSubmitKillClaimForCouple = (killerCoupleId) => {
@@ -2672,6 +2673,13 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <option value="follow">{t('gm.followsOnly')}</option>
               </select>
             </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', cursor: 'pointer' }}>
+              <input type="checkbox" checked={deadPlayersKeepDancing} onChange={(e) => setDeadPlayersKeepDancing(e.target.checked)} />
+              <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.deadPlayersKeepDancing')}</span>
+            </label>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+              {t('gm.deadPlayersKeepDancingHint')}
+            </p>
           </div>
 
           <div className="btn-row" style={{ marginBottom: '20px' }}>

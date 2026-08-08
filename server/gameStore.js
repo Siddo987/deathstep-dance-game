@@ -43,7 +43,12 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     const showRole = revealAllRoles
       || (myCouple && c.id === myCouple.id) // you already know your own role
       || (viewerIsKiller && c.role === 'killer'); // killers are told their teammates
-    return { ...c, role: showRole ? c.role : null };
+    // Unlike the killer role, a special role (Seher/Beschützer/... - see
+    // SPECIAL_ROLE_KEYS) is never shared with teammates - it's personal
+    // info, not team info, so killers don't get to see each other's (they
+    // never have one anyway) and dancer-team couples don't see each other's.
+    const showSpecialRole = revealAllRoles || (myCouple && c.id === myCouple.id);
+    return { ...c, role: showRole ? c.role : null, specialRole: showSpecialRole ? c.specialRole : null };
   });
 
   const pickOwn = (record) => {
@@ -77,6 +82,13 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
 // again). Shared by server/stats.js (win/loss participation records) and
 // server/achievements.js (the 'first_win' achievement) so both agree on
 // what "killers won" means.
+// The full set of special-role keys a dancer-team couple can hold, layered
+// on top of (never instead of) their team role - see couple.specialRole.
+// Kept as one flat list (rather than scattered string literals) so the GM
+// settings panel, DB migration, and any future validation can all iterate
+// the same source of truth instead of drifting out of sync.
+export const SPECIAL_ROLE_KEYS = ['seer', 'protector', 'toucher', 'martyr', 'puzzle'];
+
 export function didKillersWin(room) {
   const aliveCouples = room.couples.filter(c => c.status === 'alive');
   const killersAlive = aliveCouples.some(c => c.role === 'killer');
@@ -910,7 +922,9 @@ class GameStore {
       name: c.name,
       playerIds: c.playerIds,
       role: 'dancer',
+      specialRole: null, // one of SPECIAL_ROLE_KEYS, assigned in startGame - never set on a killer couple
       status: 'alive',
+      eliminatedBy: null, // 'kill' | 'vote', set when status flips to 'eliminated' - used by the Märtyrer special role
       votingPlayerId: null, // assigned below by assignVotingPlayers
     }));
     this.assignVotingPlayers(room);
@@ -1015,7 +1029,7 @@ class GameStore {
     this.roomLastActivity.delete(roomId);
   }
 
-  startGame(roomId, killerCount = 1, killMode = 'classic') {
+  startGame(roomId, killerCount = 1, killMode = 'classic', deadPlayersKeepDancing = false) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     // Only reachable from 'paired' in the UI (GMDashboard's killer-count/mode
@@ -1026,6 +1040,8 @@ class GameStore {
     room.couples.forEach(c => {
       c.status = 'alive';
       c.role = 'dancer';
+      c.specialRole = null;
+      c.eliminatedBy = null;
     });
     room.votes = {};
     room.victimIds = [];
@@ -1034,6 +1050,12 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    // Cosmetic-only setting (see PlayerScreen.jsx's isEliminated branch) - an
+    // eliminated couple gets a rotating physical task prompt instead of just
+    // "leave the floor". Never affects game logic/elimination itself, so a
+    // plain per-game flag (not reset mid-game) is enough - no server-side
+    // validation needed since nothing reads it but that one client branch.
+    room.deadPlayersKeepDancing = !!deadPlayersKeepDancing;
 
     // Filter out spectator-only couples if any exist, but normally couples don't contain spectators.
     const activeCouples = room.couples;
@@ -1302,7 +1324,7 @@ class GameStore {
 
     room.victimIds.forEach(victimId => {
       const couple = room.couples.find(c => c.id === victimId);
-      if (couple) couple.status = 'eliminated';
+      if (couple) { couple.status = 'eliminated'; couple.eliminatedBy = 'kill'; }
     });
 
     if (this.checkEndCondition(room)) {
@@ -1387,7 +1409,7 @@ class GameStore {
 
     if (suspectCoupleId) {
       const couple = room.couples.find(c => c.id === suspectCoupleId);
-      if (couple) couple.status = 'eliminated';
+      if (couple) { couple.status = 'eliminated'; couple.eliminatedBy = 'vote'; }
     }
 
     const gameEnded = this.checkEndCondition(room);

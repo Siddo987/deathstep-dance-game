@@ -333,6 +333,15 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     a: 1 + Math.floor(Math.random() * 20),
     b: 1 + Math.floor(Math.random() * 20)
   }), [room.round]);
+
+  // "Tote tanzen weiter" (room.deadPlayersKeepDancing, opt-in GM setting): once
+  // eliminated, instead of just standing at the edge, a couple gets a fresh
+  // harmless physical task each round to stay part of the dance floor. Purely
+  // cosmetic/for fun - never derived from real game state, never sent to the
+  // server, so an eliminated couple has nothing round-relevant to leak even by
+  // accident. Re-picked deterministically per round so it doesn't flicker on
+  // every re-render, same pattern as decoyPuzzle above.
+  const deadTaskIndex = React.useMemo(() => Math.floor(Math.random() * 6), [room.round]);
   React.useEffect(() => {
     setFeltKilledChoice(null);
     setDecoyAnswer('');
@@ -910,7 +919,17 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         {leaveButton}
         {songSuggestButton}
         <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '20px', marginTop: '20px' }}>{t('player.eliminatedTitle')}</h2>
-        <p style={{ color: 'var(--text-muted)' }}>{t('player.eliminatedBody')}</p>
+        {room.deadPlayersKeepDancing ? (
+          <>
+            <p style={{ color: 'var(--text-muted)' }}>{t('player.deadTaskIntro')}</p>
+            <div className="panel panel--info" style={{ padding: '20px', marginTop: '15px' }}>
+              <p style={{ color: 'var(--neon-blue)', fontWeight: 'bold', marginBottom: '8px' }}>{t('player.deadTaskTitle')}</p>
+              <p style={{ fontSize: '1.1rem' }}>{t(`player.deadTask${deadTaskIndex + 1}`)}</p>
+            </div>
+          </>
+        ) : (
+          <p style={{ color: 'var(--text-muted)' }}>{t('player.eliminatedBody')}</p>
+        )}
       </div>
     );
   }

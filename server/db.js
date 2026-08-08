@@ -194,6 +194,17 @@ async function migrate(activePool) {
       FOREIGN KEY (game_id) REFERENCES games(id) ON DELETE CASCADE
     )
   `);
+  // Added after the initial game_couples table shipped, for the special-role
+  // system (see SPECIAL_ROLE_KEYS in server/gameStore.js). special_role is a
+  // plain string rather than an ENUM on purpose - that list is expected to
+  // keep growing, and widening a MySQL ENUM needs a MODIFY COLUMN migration
+  // per addition (see playlist_tracks.sync_status above), which a free-form
+  // column validated server-side avoids. eliminated_by records whether the
+  // couple's final_status='eliminated' came from a kill or a vote - used by
+  // the Märtyrer special role's win condition; stays NULL for couples that
+  // finished 'alive' or were force-eliminated by an aborted game.
+  await activePool.query(`ALTER TABLE game_couples ADD COLUMN IF NOT EXISTS special_role VARCHAR(20) NULL`);
+  await activePool.query(`ALTER TABLE game_couples ADD COLUMN IF NOT EXISTS eliminated_by ENUM('kill','vote') NULL`);
   await activePool.query(`
     CREATE TABLE IF NOT EXISTS game_couple_members (
       id INT AUTO_INCREMENT PRIMARY KEY,
