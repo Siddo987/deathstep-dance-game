@@ -1048,6 +1048,15 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('seerPeek', ({ roomId, targetCoupleId }) => {
+    const player = getCallingPlayer(gameStore.getRoom(roomId), socket);
+    if (!player) return;
+    const room = gameStore.seerPeek(roomId, player.id, targetCoupleId);
+    if (room) {
+      broadcastRoom(room);
+    }
+  });
+
   socket.on('gmSubmitKillClaim', ({ roomId, killerCoupleId, victimId }) => {
     if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
     const room = gameStore.gmSubmitKillClaim(roomId, killerCoupleId, victimId);

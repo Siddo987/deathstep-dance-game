@@ -1130,6 +1130,34 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           </div>
         );
       })()}
+
+      {room.status === 'kill_reveal' && myCouple.specialRole === 'seer' && myCouple.status === 'alive' && (() => {
+        const myPeek = room.seerPeeks?.[myCouple.id];
+        if (myPeek) {
+          const target = room.couples.find(c => c.id === myPeek.targetCoupleId);
+          return (
+            <div className="panel panel--purple" style={{ marginTop: '20px' }}>
+              <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('player.seerResultTitle')}</h3>
+              <p style={{ fontSize: '1.1rem', color: 'white' }}>
+                {t('player.seerResult', { name: target?.name || '?', role: t(`role.${myPeek.targetRole}`) })}
+              </p>
+            </div>
+          );
+        }
+        return (
+          <div className="panel panel--purple" style={{ marginTop: '20px' }}>
+            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('player.seerPeekPrompt')}</h3>
+            <div className="couple-list">
+              {aliveSuspectCouples.map(c => (
+                <button key={c.id} className="cyber-button" onClick={() => socket.emit('seerPeek', { roomId: room.id, targetCoupleId: c.id })}>
+                  {t('player.seerPeekTarget', { name: c.name })}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {(room.status === 'role_reveal' || room.status === 'dancing' || room.status === 'kill_reveal') && (
         <div style={{ marginTop: '20px' }}>
           {room.status === 'role_reveal' && canSwitchVotingRole && (
@@ -1186,6 +1214,13 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                 {room.martyrWinsOnVote && (
                   <p style={{ fontSize: '1rem', marginTop: '10px', color: 'white' }}>{t('player.martyrInstructionsVoteNote')}</p>
                 )}
+              </div>
+            ) : myCouple?.specialRole === 'seer' ? (
+              // Sonderrolle "Seher" - the actual peek happens later, during
+              // kill_reveal (see the block rendered there below).
+              <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
+                <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreSeer')}</h2>
+                <p style={{ fontSize: '1.1rem' }}>{t('player.seerInstructions')}</p>
               </div>
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>

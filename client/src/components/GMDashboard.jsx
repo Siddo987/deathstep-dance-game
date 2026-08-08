@@ -152,7 +152,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // 'puzzle' is wired up with real behavior so far, the rest of the plan's
   // 5 roles get their own toggle here as they're built.
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
-  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false });
+  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false, seer: false });
   const [martyrWinsOnVote, setMartyrWinsOnVote] = useState(false);
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
@@ -2729,6 +2729,18 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                     <span style={{ color: 'white' }}>{t('gm.martyrWinsOnVote')}</span>
                   </label>
                 )}
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!specialRoles.seer}
+                    onChange={(e) => setSpecialRoles({ ...specialRoles, seer: e.target.checked })}
+                  />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleSeer')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.specialRoleSeerHint')}
+                </p>
               </div>
             )}
           </div>

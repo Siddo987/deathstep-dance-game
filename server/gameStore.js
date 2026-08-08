@@ -72,6 +72,7 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     killClaims: pickOwn(room.killClaims),
     victimReports: pickOwn(room.victimReports),
     votes: pickOwn(room.votes),
+    seerPeeks: pickOwn(room.seerPeeks), // a Seer's peek result is personal, not shared with teammates - same treatment as their specialRole itself
     pendingVictimIds: [], // GM's in-progress kill marking is not public until revealKill
   };
 }
@@ -1063,6 +1064,7 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    room.seerPeeks = {}; // { [seerCoupleId]: { targetCoupleId, targetRole } } - see seerPeek()
     // Cosmetic-only setting (see PlayerScreen.jsx's isEliminated branch) - an
     // eliminated couple gets a rotating physical task prompt instead of just
     // "leave the floor". Never affects game logic/elimination itself, so a
@@ -1202,6 +1204,7 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    room.seerPeeks = {};
     // The previous round's track (if any) is over the moment this round
     // starts - only playQueueEntry should ever put something here again. Left
     // unset, a round started with nothing queued (the GM proceeded past the
@@ -1366,6 +1369,33 @@ class GameStore {
     return room;
   }
 
+  // Seer special role: once per round, during 'kill_reveal' (after this
+  // round's outcome is known to everyone, before voting) - a deliberate
+  // choice over the silent-report phase, since that one only exists for
+  // killMode: 'silent' and only covers reconciling *this* round's kill, not
+  // a general phone-action moment. kill_reveal is common to both kill modes
+  // and lands at the same "round's result is settled" beat, so Protector/
+  // Toucher (once built) can reuse this exact hook without touching
+  // proceedToSilentReport's classic/silent gating at all.
+  seerPeek(roomId, clientId, targetCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'kill_reveal') return null;
+
+    const couple = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!couple || couple.specialRole !== 'seer' || couple.status !== 'alive') return null;
+    // One peek per round - room.seerPeeks is wiped at every round boundary
+    // (startGame/startDancing/executeVote/proceedFromVoteReveal), so "already
+    // used" just means this couple already has an entry in it.
+    if (Object.prototype.hasOwnProperty.call(room.seerPeeks, couple.id)) return room;
+
+    const target = room.couples.find(c => c.id === targetCoupleId);
+    if (!target || target.id === couple.id || target.status !== 'alive') return room;
+
+    room.seerPeeks[couple.id] = { targetCoupleId: target.id, targetRole: target.role };
+    return room;
+  }
+
   proceedToVoting(roomId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -1469,6 +1499,7 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    room.seerPeeks = {};
     room.nowPlaying = null;
 
     return room;
@@ -1492,6 +1523,7 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    room.seerPeeks = {};
     room.voteResult = null;
     // See the identical comment in startDancing() above - same stale-display
     // bug, reachable here when nothing was queued for the new round.
@@ -1555,6 +1587,7 @@ class GameStore {
     room.killClaims = {};
     room.victimReports = {};
     room.silentReportsResolved = false;
+    room.seerPeeks = {};
     room.endReason = null;
     room.songSuggestions = [];
     room.playedSongs = [];
