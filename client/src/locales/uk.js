@@ -170,6 +170,7 @@ export default {
   'playlists.removedOnSpotify': 'видалено на Spotify',
   'playlists.confirmToSpotify': 'Додати до Spotify зараз',
   'playlists.confirmRemoveFromSpotify': 'Видалити зі Spotify зараз',
+  'playlists.confirmReAddToSpotify': 'Знову додати до Spotify',
   'playlists.undoDelete': 'Скасувати видалення',
   'playlists.syncToSpotify': 'Синхронізувати зі Spotify',
   'playlists.syncedToSpotify': '"{name}" синхронізовано зі Spotify.',
@@ -883,4 +884,6 @@ export default {
   'achievements.survivorDesc': 'Досягнуто кінця гри живим.',
   'achievements.games_playedTitle': 'Завсідник',
   'achievements.games_playedDesc': 'Взято участь у грі Deathstep.',
+  'achievements.games_hostedTitle': 'Ведучий(а)',
+  'achievements.games_hostedDesc': 'Проведено гру Deathstep як GM до самого кінця.',
 };

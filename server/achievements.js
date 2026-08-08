@@ -19,6 +19,7 @@ export const ACHIEVEMENT_KEYS = [
   'first_win',
   'survivor',
   'games_played',
+  'games_hosted',
 ];
 
 // A count of 1-9 is just "earned"; 10/50/100 upgrade it to bronze/silver/gold
@@ -143,6 +144,14 @@ function evaluateGameAchievements(room) {
     if (couple.status === 'alive') award(player.userId, 'survivor');
     if ((couple.role === 'killer') === killersWon) award(player.userId, 'first_win');
   }
+
+  // "nur abgeschlossene [Spiele] zählen da rein" - this function is only ever
+  // called (via recordGameAchievements below) for a game that concluded
+  // naturally, never an aborted one, so every GM here already meets that bar
+  // by construction. Main GM and every co-GM each get it, same set as the
+  // gm_sessions rows stats.js writes for "games hosted" on the stats page.
+  if (room.gmUserId) award(room.gmUserId, 'games_hosted');
+  (room.coGms || []).forEach(g => { if (g.userId) award(g.userId, 'games_hosted'); });
 
   return earnedByUser;
 }

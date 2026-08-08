@@ -170,6 +170,7 @@ export default {
   'playlists.removedOnSpotify': 'удалено в Spotify',
   'playlists.confirmToSpotify': 'Добавить в Spotify сейчас',
   'playlists.confirmRemoveFromSpotify': 'Удалить из Spotify сейчас',
+  'playlists.confirmReAddToSpotify': 'Снова добавить в Spotify',
   'playlists.undoDelete': 'Отменить удаление',
   'playlists.syncToSpotify': 'Синхронизировать со Spotify',
   'playlists.syncedToSpotify': '"{name}" синхронизирован со Spotify.',
@@ -883,4 +884,6 @@ export default {
   'achievements.survivorDesc': 'Оставался(ась) в живых до конца игры.',
   'achievements.games_playedTitle': 'Завсегдатай',
   'achievements.games_playedDesc': 'Принял(а) участие в игре Deathstep.',
+  'achievements.games_hostedTitle': 'Ведущий(ая)',
+  'achievements.games_hostedDesc': 'Провёл(а) игру Deathstep как GM до самого конца.',
 };

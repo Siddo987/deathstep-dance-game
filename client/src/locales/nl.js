@@ -170,6 +170,7 @@ export default {
   'playlists.removedOnSpotify': 'verwijderd op Spotify',
   'playlists.confirmToSpotify': 'Nu toevoegen aan Spotify',
   'playlists.confirmRemoveFromSpotify': 'Nu verwijderen uit Spotify',
+  'playlists.confirmReAddToSpotify': 'Weer toevoegen aan Spotify',
   'playlists.undoDelete': 'Verwijdering ongedaan maken',
   'playlists.syncToSpotify': 'Synchroniseren met Spotify',
   'playlists.syncedToSpotify': '"{name}" is gesynchroniseerd met Spotify.',
@@ -883,4 +884,6 @@ export default {
   'achievements.survivorDesc': 'Levend gebleven tot het einde van het spel.',
   'achievements.games_playedTitle': 'Vaste gast',
   'achievements.games_playedDesc': 'Deelgenomen aan een spel Deathstep.',
+  'achievements.games_hostedTitle': 'Spelleider',
+  'achievements.games_hostedDesc': 'Een spel Deathstep als GM tot het einde geleid.',
 };

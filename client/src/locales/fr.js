@@ -170,6 +170,7 @@ export default {
   'playlists.removedOnSpotify': 'supprimée sur Spotify',
   'playlists.confirmToSpotify': 'Ajouter à Spotify maintenant',
   'playlists.confirmRemoveFromSpotify': 'Supprimer de Spotify maintenant',
+  'playlists.confirmReAddToSpotify': 'Rajouter à Spotify',
   'playlists.undoDelete': 'Annuler la suppression',
   'playlists.syncToSpotify': 'Synchroniser avec Spotify',
   'playlists.syncedToSpotify': '"{name}" a été synchronisée avec Spotify.',
@@ -883,4 +884,6 @@ export default {
   'achievements.survivorDesc': "Resté(e) en vie jusqu'à la fin de la partie.",
   'achievements.games_playedTitle': 'Habitué(e)',
   'achievements.games_playedDesc': 'Participé à une partie de Deathstep.',
+  'achievements.games_hostedTitle': 'Maître du jeu',
+  'achievements.games_hostedDesc': "A dirigé une partie de Deathstep en tant que GM jusqu'à la fin.",
 };
