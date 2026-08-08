@@ -148,6 +148,10 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [killerRatioDivisor, setKillerRatioDivisor] = useState(8);
   const [killMode, setKillMode] = useState('classic');
   const [deadPlayersKeepDancing, setDeadPlayersKeepDancing] = useState(false);
+  // 'standard' | 'chaos' - see the new-roles/modes plan. Special roles stay
+  // off in Chaos games (see the specialRoles reset in the mode switcher
+  // below) - keeps the per-round killer rotation the only moving part.
+  const [gameMode, setGameMode] = useState('standard');
   // Special roles (see SPECIAL_ROLE_KEYS in server/gameStore.js) - only
   // 'puzzle' is wired up with real behavior so far, the rest of the plan's
   // 5 roles get their own toggle here as they're built.
@@ -842,7 +846,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote });
+    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing, specialRoles: gameMode === 'chaos' ? {} : specialRoles, martyrWinsOnVote, gameMode });
   };
 
   const handleSubmitKillClaimForCouple = (killerCoupleId) => {
@@ -914,12 +918,14 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     // then too, or it would consume/start the queued track during the reveal
     // screen, before the round it belongs to has even begun. The kill-reveal
     // skip shortcut (room.status === 'kill_reveal') still goes straight to
-    // 'dancing', same as before, so it still plays immediately here.
+    // 'dancing', same as before, so it still plays immediately here - unless
+    // Chaos mode is active, in which case this lands in 'role_reveal' first
+    // instead (new killer needs revealing before anyone dances to anything).
     const wasVoting = room.status === 'voting';
 
     socket.emit('executeVote', { roomId: room.id, suspectId: suspectCoupleId });
 
-    if (!willEnd && !wasVoting) {
+    if (!willEnd && !wasVoting && room.gameMode !== 'chaos') {
       await playNextQueuedTrack();
     }
   };
@@ -1201,7 +1207,13 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     // wasVoting comment for why this was deferred out of there to here).
     proceedFromVoteReveal: async () => {
       socket.emit('proceedFromVoteReveal', { roomId: room.id });
-      await playNextQueuedTrack();
+      // Chaos mode lands in 'role_reveal' instead of 'dancing' here (new
+      // killer needs revealing first) - see gameStore.startChaosRound.
+      // handleStartDancing's own click (role_reveal -> dancing) is what
+      // actually starts the music for that round instead.
+      if (room.gameMode !== 'chaos') {
+        await playNextQueuedTrack();
+      }
     },
   };
 
@@ -2672,6 +2684,24 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               </p>
             </div>
             <div style={{ marginTop: '15px' }}>
+              <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.gameMode')}</label>
+              <select
+                className="cyber-select"
+                value={gameMode}
+                onChange={(e) => {
+                  setGameMode(e.target.value);
+                  if (e.target.value === 'chaos') setSpecialRoles({ puzzle: false, martyr: false, seer: false, protector: false, toucher: false });
+                }}
+                style={{ width: '100%' }}
+              >
+                <option value="standard">{t('gm.gameModeStandard')}</option>
+                <option value="chaos">{t('gm.gameModeChaos')}</option>
+              </select>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
+                {gameMode === 'chaos' ? t('gm.gameModeChaosDesc') : t('gm.gameModeStandardDesc')}
+              </p>
+            </div>
+            <div style={{ marginTop: '15px' }}>
               <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
               <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
                 <option value="random">{t('gm.votingRandom')}</option>
@@ -2696,6 +2726,12 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
             </button>
             {showAdvancedSettings && (
               <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+              {gameMode === 'chaos' ? (
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic', margin: 0 }}>
+                  {t('gm.specialRolesDisabledInChaos')}
+                </p>
+              ) : (
+              <>
                 <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
                   <input
                     type="checkbox"
@@ -2765,6 +2801,8 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
                   {t('gm.specialRoleToucherHint')}
                 </p>
+              </>
+              )}
               </div>
             )}
           </div>

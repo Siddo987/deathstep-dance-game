@@ -60,9 +60,16 @@ function evaluateGameAchievements(room) {
     });
   };
 
-  let aliveKillerCoupleIds = new Set(room.couples.filter(c => c.role === 'killer').map(c => c.id));
-
   for (const round of room.roundHistory) {
+    // Who actually held the killer role *this* round, snapshotted at the
+    // time (see gameStore.js's pushRoundRecord) - not derived from the
+    // room's final state, which under Chaos mode only reflects whoever was
+    // killer most recently and would misattribute every earlier round.
+    // Falls back to an empty list for any pre-existing round record from
+    // before this field existed (there shouldn't be any in practice, since
+    // room.roundHistory never outlives a single room's process lifetime).
+    const roundKillerCoupleIds = round.killerCoupleIds || [];
+
     if (round.killedCoupleIds.length > 0) {
       let attributedKillerIds = [];
       if (round.killClaims) {
@@ -71,19 +78,29 @@ function evaluateGameAchievements(room) {
         attributedKillerIds = Object.entries(round.killClaims)
           .filter(([, victimCoupleId]) => victimCoupleId && round.killedCoupleIds.includes(victimCoupleId))
           .map(([killerCoupleId]) => killerCoupleId);
-      } else if (aliveKillerCoupleIds.size === 1) {
+      } else if (roundKillerCoupleIds.length === 1) {
         // Classic mode has no per-kill attribution at all (the GM just marks
         // a victim) - only safe to credit when exactly one killer couple
         // could possibly be responsible.
-        attributedKillerIds = [...aliveKillerCoupleIds];
+        attributedKillerIds = [...roundKillerCoupleIds];
       }
       attributedKillerIds.forEach(id => awardCouple(id, 'first_kill'));
       round.killedCoupleIds.forEach(id => awardCouple(id, 'first_killed'));
     }
 
+    // Every role check below reads roundKillerCoupleIds (this round's
+    // snapshot) rather than couple.role directly - under Chaos mode, a
+    // still-alive couple's live role only reflects whoever holds it *now*,
+    // which for an earlier round in the same game would misjudge who was
+    // actually the killer back then. An eliminated couple's role happens to
+    // stay frozen at whatever it was when they died (Chaos re-assignment
+    // only ever touches alive couples), so this distinction only matters
+    // for couples that survived the whole game - but checking the snapshot
+    // uniformly is simplest, and correct for standard-mode games too (where
+    // it's always equal to the live role anyway).
     const votedOutCouple = round.votedOutCoupleId ? room.couples.find(c => c.id === round.votedOutCoupleId) : null;
     if (votedOutCouple) {
-      awardCouple(votedOutCouple.id, votedOutCouple.role === 'killer' ? 'voted_out_guilty' : 'voted_out_innocent');
+      awardCouple(votedOutCouple.id, roundKillerCoupleIds.includes(votedOutCouple.id) ? 'voted_out_guilty' : 'voted_out_innocent');
     }
 
     const suspectVoterIds = new Map(); // suspectCoupleId -> voterCoupleId[]
@@ -93,23 +110,19 @@ function evaluateGameAchievements(room) {
       const suspectCouple = room.couples.find(c => c.id === vote.suspectCoupleId);
       if (!voterCouple || !suspectCouple) continue;
 
-      if (voterCouple.role === 'killer' && suspectCouple.role === 'killer') {
+      if (roundKillerCoupleIds.includes(voterCouple.id) && roundKillerCoupleIds.includes(suspectCouple.id)) {
         awardCouple(voterCouple.id, 'voted_against_teammate');
       }
       if (votedOutCouple && vote.suspectCoupleId === votedOutCouple.id) {
-        awardCouple(voterCouple.id, votedOutCouple.role === 'killer' ? 'voted_guilty_who_got_voted_out' : 'voted_innocent_who_got_voted_out');
+        awardCouple(voterCouple.id, roundKillerCoupleIds.includes(votedOutCouple.id) ? 'voted_guilty_who_got_voted_out' : 'voted_innocent_who_got_voted_out');
       }
       if (!suspectVoterIds.has(vote.suspectCoupleId)) suspectVoterIds.set(vote.suspectCoupleId, []);
       suspectVoterIds.get(vote.suspectCoupleId).push(vote.voterCoupleId);
     }
     for (const [suspectCoupleId, voterIds] of suspectVoterIds) {
       if (voterIds.length !== 1) continue; // "als Einziger" - must be the sole accuser
-      const suspectCouple = room.couples.find(c => c.id === suspectCoupleId);
-      if (suspectCouple?.role === 'killer') awardCouple(voterIds[0], 'lone_accuser');
+      if (roundKillerCoupleIds.includes(suspectCoupleId)) awardCouple(voterIds[0], 'lone_accuser');
     }
-
-    round.killedCoupleIds.forEach(id => aliveKillerCoupleIds.delete(id));
-    if (round.votedOutCoupleId) aliveKillerCoupleIds.delete(round.votedOutCoupleId);
   }
 
   const killersWon = didKillersWin(room);

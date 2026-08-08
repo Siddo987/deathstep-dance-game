@@ -1037,6 +1037,86 @@ class GameStore {
     this.roomLastActivity.delete(roomId);
   }
 
+  // Shared killer-selection logic, extracted so both startGame() (once, at
+  // the start of a game) and startDancing()'s Chaos-mode branch (every
+  // round) go through the exact same rules instead of two copies drifting
+  // apart. excludeCoupleIds (only ever non-empty for Chaos mode's "don't
+  // immediately repeat the same killer" rule) removes couples from the
+  // *candidate pool* only - maxKillerPlayers is still computed from every
+  // alive couple, excluded or not, since the half-the-players rule cares
+  // about the real population, not who's eligible to be picked this time.
+  assignKillers(room, killerCount, excludeCoupleIds = []) {
+    const aliveCouples = room.couples.filter(c => c.status === 'alive');
+    if (aliveCouples.length === 0) return;
+
+    // Hard rule: killers must stay a strict minority of individual
+    // *players*, not just couples - a couple can be 2 or 3 people (see the
+    // odd-excess trio handling in the pairing flow), so capping by
+    // couple-count alone could let a majority of people end up killers if
+    // the couples chosen as killers happen to be the larger ones. "< half"
+    // (not "<= half"), so ceil(total/2) itself is never allowed either.
+    const totalPlayers = aliveCouples.reduce((sum, c) => sum + c.playerIds.length, 0);
+    const maxKillerPlayers = Math.ceil(totalPlayers / 2) - 1;
+    let killerPlayerCount = 0;
+    const canAssign = (couple) => killerPlayerCount + couple.playerIds.length <= maxKillerPlayers;
+    const assign = (couple) => { couple.role = 'killer'; killerPlayerCount += couple.playerIds.length; };
+
+    const candidates = aliveCouples.filter(c => !excludeCoupleIds.includes(c.id));
+
+    // Site-owner override (room.killerOverridePlayerIds, set live from
+    // /admin during this room's paired phase): whichever couple contains
+    // one of these players becomes a killer first, in priority order,
+    // before any remaining slots are filled by the normal random draw
+    // below - invisible to the GM either way, who only ever sees who the
+    // final killer(s) turned out to be. Killer selection has no manual GM
+    // path to respect (always this random draw), unlike pairing. An
+    // override that would break the half-player rule is skipped rather
+    // than honored - the rule has no manual bypass. One-shot regardless of
+    // which call site consumes it (startGame, or a later Chaos round).
+    const forcedCoupleIds = new Set();
+    for (const playerId of room.killerOverridePlayerIds) {
+      if (forcedCoupleIds.size >= killerCount) break;
+      const couple = candidates.find(c => c.playerIds.includes(playerId));
+      if (!couple || forcedCoupleIds.has(couple.id) || !canAssign(couple)) continue;
+      forcedCoupleIds.add(couple.id);
+      assign(couple);
+    }
+
+    const remainingSlots = killerCount - forcedCoupleIds.size;
+    if (remainingSlots > 0) {
+      const remainingCouples = candidates.filter(c => !forcedCoupleIds.has(c.id));
+      const shuffledIndices = Array.from({length: remainingCouples.length}, (_, i) => i).sort(() => 0.5 - Math.random());
+      let assigned = 0;
+      for (const idx of shuffledIndices) {
+        if (assigned >= remainingSlots) break;
+        const couple = remainingCouples[idx];
+        if (!canAssign(couple)) continue; // would push killers to/past half the players - skip, try the next shuffled candidate
+        assign(couple);
+        assigned++;
+      }
+    }
+    room.killerOverridePlayerIds = []; // one-shot - the owner sets this fresh before every round
+  }
+
+  // Chaos mode's per-round killer rotation: re-picks the killer (excluding
+  // whoever just held it, so the role actually rotates instead of risking
+  // an immediate repeat) and routes into 'role_reveal' again, exactly like
+  // round 1 did in startGame() - reuses 100% of the existing role-reveal UI
+  // (PlayerScreen's hold-to-reveal panel, GM's readiness checklist), no new
+  // client code needed for the reveal moment itself. Shared by
+  // startDancing()'s kill_reveal/voting branch (the "skip voting" shortcut)
+  // and proceedFromVoteReveal() (the normal post-vote path) - Chaos mode's
+  // next-round entry point can be reached from either.
+  startChaosRound(room) {
+    const previousKillerCoupleIds = room.couples.filter(c => c.role === 'killer').map(c => c.id);
+    room.couples.forEach(c => { if (c.status === 'alive') c.role = 'dancer'; });
+    this.assignKillers(room, room.killerCount, previousKillerCoupleIds);
+    room.players.forEach(p => p.hasViewedRole = false);
+    room.status = 'role_reveal';
+    room.round += 1;
+    room.voteResult = null; // harmless no-op from startDancing's branch, clears stale state from proceedFromVoteReveal's
+  }
+
   // Options bundled into a single object (rather than more positional
   // params) since this list keeps growing with every new mode/setting - see
   // the new-roles/modes plan. specialRoles is a { [key in SPECIAL_ROLE_KEYS]:
@@ -1050,6 +1130,7 @@ class GameStore {
     deadPlayersKeepDancing = false,
     specialRoles = {},
     martyrWinsOnVote = false, // GM override for the Märtyrer special role's win condition - see couple.eliminatedBy
+    gameMode = 'standard', // 'standard' | 'chaos' - see assignKillers()/startDancing()
   } = {}) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -1088,55 +1169,10 @@ class GameStore {
     room.deadPlayersKeepDancing = !!deadPlayersKeepDancing;
     room.martyrWinsOnVote = !!martyrWinsOnVote;
 
-    // Filter out spectator-only couples if any exist, but normally couples don't contain spectators.
-    const activeCouples = room.couples;
+    room.gameMode = gameMode; // 'standard' | 'chaos' - see startDancing()'s chaos branch below for the per-round re-pick
+    room.killerCount = killerCount; // persisted so Chaos mode's per-round re-pick in startDancing() reuses the same count
 
-    if (activeCouples.length > 0) {
-      // Hard rule: killers must stay a strict minority of individual
-      // *players*, not just couples - a couple can be 2 or 3 people (see the
-      // odd-excess trio handling in the pairing flow), so capping by
-      // couple-count alone could let a majority of people end up killers if
-      // the couples chosen as killers happen to be the larger ones. "< half"
-      // (not "<= half"), so ceil(total/2) itself is never allowed either.
-      const totalPlayers = activeCouples.reduce((sum, c) => sum + c.playerIds.length, 0);
-      const maxKillerPlayers = Math.ceil(totalPlayers / 2) - 1;
-      let killerPlayerCount = 0;
-      const canAssign = (couple) => killerPlayerCount + couple.playerIds.length <= maxKillerPlayers;
-      const assign = (couple) => { couple.role = 'killer'; killerPlayerCount += couple.playerIds.length; };
-
-      // Site-owner override (room.killerOverridePlayerIds, set live from
-      // /admin during this room's paired phase): whichever couple contains
-      // one of these players becomes a killer first, in priority order,
-      // before any remaining slots are filled by the normal random draw
-      // below - invisible to the GM either way, who only ever sees who the
-      // final killer(s) turned out to be. Killer selection has no manual GM
-      // path to respect (always this random draw), unlike pairing. An
-      // override that would break the half-player rule is skipped rather
-      // than honored - the rule has no manual bypass.
-      const forcedCoupleIds = new Set();
-      for (const playerId of room.killerOverridePlayerIds) {
-        if (forcedCoupleIds.size >= killerCount) break;
-        const couple = activeCouples.find(c => c.playerIds.includes(playerId));
-        if (!couple || forcedCoupleIds.has(couple.id) || !canAssign(couple)) continue;
-        forcedCoupleIds.add(couple.id);
-        assign(couple);
-      }
-
-      const remainingSlots = killerCount - forcedCoupleIds.size;
-      if (remainingSlots > 0) {
-        const remainingCouples = activeCouples.filter(c => !forcedCoupleIds.has(c.id));
-        const shuffledIndices = Array.from({length: remainingCouples.length}, (_, i) => i).sort(() => 0.5 - Math.random());
-        let assigned = 0;
-        for (const idx of shuffledIndices) {
-          if (assigned >= remainingSlots) break;
-          const couple = remainingCouples[idx];
-          if (!canAssign(couple)) continue; // would push killers to/past half the players - skip, try the next shuffled candidate
-          assign(couple);
-          assigned++;
-        }
-      }
-    }
-    room.killerOverridePlayerIds = []; // one-shot - the owner sets this fresh before every round
+    this.assignKillers(room, killerCount);
 
     // Special-role assignment (see SPECIAL_ROLE_KEYS/couple.specialRole) -
     // runs after killers are picked so a killer couple never doubles as a
@@ -1144,8 +1180,11 @@ class GameStore {
     // dancer couple per GM-enabled role, one role per couple for v1 (no
     // stacking) - if there aren't enough dancer couples left for every
     // enabled role, the remaining ones are simply skipped rather than
-    // failing the whole game start.
-    const unassignedForSpecialRole = activeCouples.filter(c => c.role === 'dancer');
+    // failing the whole game start. Chaos mode keeps this permanently empty
+    // (see the new-roles/modes plan) - GMDashboard.jsx hides/clears the
+    // special-role pickers whenever gameMode is 'chaos', so specialRoles is
+    // always {} there in practice, but this isn't re-enforced here too.
+    const unassignedForSpecialRole = room.couples.filter(c => c.role === 'dancer');
     for (const key of SPECIAL_ROLE_KEYS) {
       if (!specialRoles[key] || unassignedForSpecialRole.length === 0) continue;
       const idx = Math.floor(Math.random() * unassignedForSpecialRole.length);
@@ -1186,6 +1225,17 @@ class GameStore {
       })),
       killClaims: room.killMode === 'silent' ? { ...room.killClaims } : null,
       victimReports: room.killMode === 'silent' ? { ...room.victimReports } : null,
+      // Snapshotted fresh per round rather than derived once from the room's
+      // *final* state (as server/achievements.js used to do before Chaos
+      // mode existed) - couple.role only reflects whoever was killer in the
+      // most recently re-assigned round under Chaos mode, so a game-end-time
+      // snapshot would misattribute every earlier round's kills/votes to the
+      // wrong couple. Safe to read couple.role directly here regardless of
+      // this round's own vote outcome (only status changes on a vote-out,
+      // never role), filtered to still-alive so a killer couple eliminated
+      // in an *earlier* round doesn't stay a perpetual suspect for later
+      // rounds' classic-mode (no-per-kill-attribution) kills.
+      killerCoupleIds: room.couples.filter(c => c.role === 'killer' && c.status === 'alive').map(c => c.id),
       completed,
     });
   }
@@ -1209,7 +1259,19 @@ class GameStore {
     // silent_report, ended) is a stale/out-of-order call.
     if (!['role_reveal', 'kill_reveal', 'voting'].includes(room.status)) return null;
 
-    if (room.status === 'kill_reveal' || room.status === 'voting') {
+    const isNewRound = room.status === 'kill_reveal' || room.status === 'voting';
+
+    // Chaos mode: a new round doesn't go straight back into 'dancing' - see
+    // startChaosRound()'s own comment. The GM's "start dancing" action
+    // reaches this method a second time from 'role_reveal' to actually
+    // begin the new round's dancing - that second call falls through to the
+    // normal path below unchanged, since 'role_reveal' isn't part of isNewRound.
+    if (isNewRound && room.gameMode === 'chaos') {
+      this.startChaosRound(room);
+      return room;
+    }
+
+    if (isNewRound) {
       room.round += 1;
     }
     room.status = 'dancing';
@@ -1582,7 +1644,16 @@ class GameStore {
     }
 
     // room.status was 'kill_reveal' (the skip-voting shortcut) - never had a
-    // vote to reveal, so advance straight into the next round exactly as before.
+    // vote to reveal, so advance straight into the next round exactly as
+    // before... unless Chaos mode needs a fresh killer reveal first - see
+    // startChaosRound()'s own comment. A third call site for the same
+    // branch (alongside startDancing() and proceedFromVoteReveal()), since
+    // this shortcut is its own independent "advance to next round" path.
+    if (room.gameMode === 'chaos') {
+      this.startChaosRound(room);
+      return room;
+    }
+
     room.status = 'dancing';
     room.round += 1;
     room.victimIds = [];
@@ -1607,6 +1678,15 @@ class GameStore {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     if (room.status !== 'vote_reveal') return null;
+
+    // Chaos mode: this is the normal (non-shortcut) path every completed
+    // round actually takes, unlike startDancing()'s kill_reveal/voting
+    // branch (only reachable via the GM's "skip voting" shortcut) - see
+    // startChaosRound()'s own comment for why both need this branch.
+    if (room.gameMode === 'chaos') {
+      this.startChaosRound(room);
+      return room;
+    }
 
     room.status = 'dancing';
     room.round += 1;
