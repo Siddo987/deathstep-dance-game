@@ -1041,6 +1041,7 @@ class GameStore {
     killMode = 'classic',
     deadPlayersKeepDancing = false,
     specialRoles = {},
+    martyrWinsOnVote = false, // GM override for the Märtyrer special role's win condition - see couple.eliminatedBy
   } = {}) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -1068,6 +1069,7 @@ class GameStore {
     // plain per-game flag (not reset mid-game) is enough - no server-side
     // validation needed since nothing reads it but that one client branch.
     room.deadPlayersKeepDancing = !!deadPlayersKeepDancing;
+    room.martyrWinsOnVote = !!martyrWinsOnVote;
 
     // Filter out spectator-only couples if any exist, but normally couples don't contain spectators.
     const activeCouples = room.couples;

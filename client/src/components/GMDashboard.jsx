@@ -152,7 +152,8 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // 'puzzle' is wired up with real behavior so far, the rest of the plan's
   // 5 roles get their own toggle here as they're built.
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
-  const [specialRoles, setSpecialRoles] = useState({ puzzle: false });
+  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false });
+  const [martyrWinsOnVote, setMartyrWinsOnVote] = useState(false);
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
   // public read, no admin_users gate needed since every GM's dashboard uses
@@ -841,7 +842,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   }, [showMenu]);
 
   const handleStartGame = () => {
-    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing, specialRoles });
+    socket.emit('startGame', { roomId: room.id, killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote });
   };
 
   const handleSubmitKillClaimForCouple = (killerCoupleId) => {
@@ -2706,6 +2707,28 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
                   {t('gm.specialRolePuzzleHint')}
                 </p>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!specialRoles.martyr}
+                    onChange={(e) => setSpecialRoles({ ...specialRoles, martyr: e.target.checked })}
+                  />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleMartyr')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.specialRoleMartyrHint')}
+                </p>
+                {specialRoles.martyr && (
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '10px', marginLeft: '24px' }}>
+                    <input
+                      type="checkbox"
+                      checked={martyrWinsOnVote}
+                      onChange={(e) => setMartyrWinsOnVote(e.target.checked)}
+                    />
+                    <span style={{ color: 'white' }}>{t('gm.martyrWinsOnVote')}</span>
+                  </label>
+                )}
               </div>
             )}
           </div>

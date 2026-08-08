@@ -859,8 +859,15 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     const killersWon = winners.some(c => c.role === 'killer');
     const killerCouples = room.couples.filter(c => c.role === 'killer');
 
+    // Märtyrer-Paar (special role): a personal win condition inverted from
+    // everyone else's - they win if murdered by the killer (also counts a
+    // vote-out if the GM enabled martyrWinsOnVote), independent of who
+    // actually won the game as a team.
+    const isMartyr = myCouple?.specialRole === 'martyr';
+    const martyrObjectiveMet = isMartyr && (myCouple.eliminatedBy === 'kill' || (room.martyrWinsOnVote && myCouple.eliminatedBy === 'vote'));
+
     // Being voted out/eliminated is a personal loss even if teammates (other killer couples) go on to win.
-    const playerWon = !isEliminated && ((role === 'killer' && killersWon) || (role !== 'killer' && !killersWon));
+    const playerWon = isMartyr ? martyrObjectiveMet : (!isEliminated && ((role === 'killer' && killersWon) || (role !== 'killer' && !killersWon)));
 
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
@@ -887,6 +894,15 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         )}
 
         {(() => {
+          if (isMartyr) {
+            // Replaces the normal team-outcome narrative below entirely -
+            // that one is about who won as a team, this is the Martyr's own
+            // separate personal objective, which can disagree with it in
+            // either direction (e.g. personally "won" on a losing team).
+            return martyrObjectiveMet
+              ? <p style={{ color: '#00ff66', fontSize: '1.2rem', marginBottom: '20px' }}>{t('player.martyrObjectiveMet')}</p>
+              : <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>{t('player.martyrObjectiveMissed')}</p>;
+          }
           if (role === 'killer') {
             if (isEliminated) {
               return <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px' }}>{t('player.outExposed')}</p>;
@@ -1154,12 +1170,22 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               // Sonderrolle "Rätsel-Paar" - still fundamentally a dancer, just
               // with an extra explanation of the puzzle task shown during
               // dancing (see the panel rendered above, gated on room.status
-              // === 'dancing'). No other special role has its own role-reveal
-              // panel yet - Seer/Protector/Toucher/Martyr still fall through
-              // to the plain dancer panel below until they're built.
+              // === 'dancing'). Seer/Protector/Toucher still fall through to
+              // the plain dancer panel below until they're built.
               <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
                 <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youArePuzzleRole')}</h2>
                 <p style={{ fontSize: '1.1rem' }}>{t('player.puzzleRoleInstructions')}</p>
+              </div>
+            ) : myCouple?.specialRole === 'martyr' ? (
+              // Sonderrolle "Märtyrer-Paar" - personal win condition inverted
+              // (see the 'ended' screen below), nothing to do differently
+              // during the round itself beyond knowing the goal.
+              <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
+                <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreMartyr')}</h2>
+                <p style={{ fontSize: '1.1rem' }}>{t('player.martyrInstructions')}</p>
+                {room.martyrWinsOnVote && (
+                  <p style={{ fontSize: '1rem', marginTop: '10px', color: 'white' }}>{t('player.martyrInstructionsVoteNote')}</p>
+                )}
               </div>
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>
