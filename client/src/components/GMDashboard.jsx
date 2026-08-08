@@ -152,7 +152,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // 'puzzle' is wired up with real behavior so far, the rest of the plan's
   // 5 roles get their own toggle here as they're built.
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
-  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false, seer: false });
+  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false, seer: false, protector: false });
   const [martyrWinsOnVote, setMartyrWinsOnVote] = useState(false);
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
@@ -2741,6 +2741,18 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
                   {t('gm.specialRoleSeerHint')}
                 </p>
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
+                  <input
+                    type="checkbox"
+                    checked={!!specialRoles.protector}
+                    onChange={(e) => setSpecialRoles({ ...specialRoles, protector: e.target.checked })}
+                  />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleProtector')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.specialRoleProtectorHint')}
+                </p>
               </div>
             )}
           </div>
@@ -3394,6 +3406,11 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
                   {t('gm.observeBody')}
                 </p>
+                {room.protectorPick && (
+                  <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginBottom: '10px', fontStyle: 'italic' }}>
+                    {t('gm.protectorPickLabel', { name: room.couples.find(c => c.id === room.protectorPick)?.name || '?' })}
+                  </p>
+                )}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '10px', color: 'var(--text-muted)', marginBottom: '5px' }}>
                   <strong>{t('gm.markKilled')}</strong>
                   <span style={{ color: 'var(--neon-purple)', flexShrink: 0 }}>{t('gm.markedCount', { marked: markedCount, total: aliveKillerCount })}</span>

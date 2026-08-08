@@ -73,6 +73,12 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     victimReports: pickOwn(room.victimReports),
     votes: pickOwn(room.votes),
     seerPeeks: pickOwn(room.seerPeeks), // a Seer's peek result is personal, not shared with teammates - same treatment as their specialRole itself
+    // Not keyed by couple id like the fields above (there's only ever one
+    // current pick, not one per couple), so pickOwn doesn't apply - only the
+    // Protector's own couple gets to see it, everyone else (including the
+    // killers who'd love to know) gets null. revealAllRoles reuses the same
+    // "game's over, nothing left to hide" condition as couple roles above.
+    protectorPick: (myCouple?.specialRole === 'protector' || revealAllRoles) ? room.protectorPick : null,
     pendingVictimIds: [], // GM's in-progress kill marking is not public until revealKill
   };
 }
@@ -1065,6 +1071,13 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {}; // { [seerCoupleId]: { targetCoupleId, targetRole } } - see seerPeek()
+    // Protector special role: NOT reset at every round boundary like the
+    // fields above - see submitProtectorPick()/revealKill() for why it
+    // deliberately survives from one round's kill_reveal into the next
+    // round's revealKill before being consumed. null here just means "no
+    // pick yet" (also true for round 1, which has no preceding kill_reveal
+    // to have set one in).
+    room.protectorPick = null;
     // Cosmetic-only setting (see PlayerScreen.jsx's isEliminated branch) - an
     // eliminated couple gets a rotating physical task prompt instead of just
     // "leave the floor". Never affects game logic/elimination itself, so a
@@ -1352,7 +1365,16 @@ class GameStore {
     // handleRevealKill call sites.
     if (room.status !== 'dancing' && room.status !== 'silent_report') return null;
 
-    room.victimIds = [...room.pendingVictimIds];
+    // Protector special role: a couple picked during the *previous* round's
+    // kill_reveal (see submitProtectorPick) cannot die to a kill this round -
+    // filtered out before anything below ever sees them as a victim, so
+    // there's no separate "un-kill" step to keep in sync elsewhere (win
+    // condition, achievements, DB persistence all just see a survivor).
+    // Consumed here regardless of whether it actually saved anyone, so a
+    // stale pick can never silently protect a couple again next round if the
+    // Protector forgets to submit a fresh one.
+    room.victimIds = [...room.pendingVictimIds].filter(id => id !== room.protectorPick);
+    room.protectorPick = null;
 
     room.victimIds.forEach(victimId => {
       const couple = room.couples.find(c => c.id === victimId);
@@ -1393,6 +1415,27 @@ class GameStore {
     if (!target || target.id === couple.id || target.status !== 'alive') return room;
 
     room.seerPeeks[couple.id] = { targetCoupleId: target.id, targetRole: target.role };
+    return room;
+  }
+
+  // Protector special role: pick (or change) who cannot die to a kill *next*
+  // round - same 'kill_reveal' hook as seerPeek, but freely overwritable
+  // (no once-per-round lock, unlike the Seer) since there's no information
+  // asymmetry to protect here, just a choice the Protector might reconsider
+  // before it's consumed at the top of the next revealKill(). Only ever
+  // covers a kill, never a vote-out (see the new-roles/modes plan).
+  submitProtectorPick(roomId, clientId, targetCoupleId) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (room.status !== 'kill_reveal') return null;
+
+    const couple = room.couples.find(c => c.playerIds.includes(clientId));
+    if (!couple || couple.specialRole !== 'protector' || couple.status !== 'alive') return null;
+
+    const target = room.couples.find(c => c.id === targetCoupleId);
+    if (!target || target.status !== 'alive') return room;
+
+    room.protectorPick = target.id;
     return room;
   }
 
@@ -1588,6 +1631,7 @@ class GameStore {
     room.victimReports = {};
     room.silentReportsResolved = false;
     room.seerPeeks = {};
+    room.protectorPick = null;
     room.endReason = null;
     room.songSuggestions = [];
     room.playedSongs = [];

@@ -1158,6 +1158,35 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         );
       })()}
 
+      {room.status === 'kill_reveal' && myCouple.specialRole === 'protector' && myCouple.status === 'alive' && (() => {
+        // Includes the Protector's own couple as a pickable target (self-
+        // protection is allowed) - aliveSuspectCouples excludes self, so the
+        // full alive-couples list is built here instead.
+        const allAliveCouples = room.couples.filter(c => c.status === 'alive');
+        const currentPick = room.couples.find(c => c.id === room.protectorPick);
+        return (
+          <div className="panel panel--purple" style={{ marginTop: '20px' }}>
+            <h3 style={{ color: 'var(--neon-purple)', marginBottom: '10px' }}>{t('player.protectorPickPrompt')}</h3>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginBottom: '15px' }}>{t('player.protectorPickHint')}</p>
+            {currentPick && (
+              <p style={{ color: 'white', marginBottom: '15px' }}>{t('player.protectorCurrentPick', { name: currentPick.name })}</p>
+            )}
+            <div className="couple-list">
+              {allAliveCouples.map(c => (
+                <button
+                  key={c.id}
+                  className="cyber-button"
+                  style={c.id === room.protectorPick ? { borderColor: 'var(--neon-blue)', color: 'var(--neon-blue)' } : undefined}
+                  onClick={() => socket.emit('submitProtectorPick', { roomId: room.id, targetCoupleId: c.id })}
+                >
+                  {t('player.protectorPickTarget', { name: c.name })}
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })()}
+
       {(room.status === 'role_reveal' || room.status === 'dancing' || room.status === 'kill_reveal') && (
         <div style={{ marginTop: '20px' }}>
           {room.status === 'role_reveal' && canSwitchVotingRole && (
@@ -1221,6 +1250,15 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
                 <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreSeer')}</h2>
                 <p style={{ fontSize: '1.1rem' }}>{t('player.seerInstructions')}</p>
+              </div>
+            ) : myCouple?.specialRole === 'protector' ? (
+              // Sonderrolle "Beschützer" - the actual pick happens later,
+              // during kill_reveal (see the block rendered there below), and
+              // protects the *next* round, not this one (round 1 has nobody
+              // protected yet).
+              <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
+                <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreProtector')}</h2>
+                <p style={{ fontSize: '1.1rem' }}>{t('player.protectorInstructions')}</p>
               </div>
             ) : (
               <div className="panel panel--info" style={{ padding: '30px', marginBottom: 0 }}>
