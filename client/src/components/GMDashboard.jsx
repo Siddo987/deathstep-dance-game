@@ -2778,21 +2778,33 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 </p>
               </div>
             )}
-            <div style={{ marginTop: '15px' }}>
-              <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
-              <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
-                <option value="random">{t('gm.votingRandom')}</option>
-                <option value="lead">{t('gm.leadsOnly')}</option>
-                <option value="follow">{t('gm.followsOnly')}</option>
-              </select>
-            </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', cursor: 'pointer' }}>
-              <input type="checkbox" checked={deadPlayersKeepDancing} onChange={(e) => setDeadPlayersKeepDancing(e.target.checked)} />
-              <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.deadPlayersKeepDancing')}</span>
-            </label>
-            <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-              {t('gm.deadPlayersKeepDancingHint')}
-            </p>
+            {/* Max Kills has no voting phase at all (proceedToVoting/executeVote
+                both reject it server-side - see the plan) and couple.status
+                never leaves 'alive' (elimination is round-scoped only), so
+                both settings below would be dead configuration with no effect
+                in this mode - hidden here the same way killerCount already is
+                above, rather than left visible and silently ignored. */}
+            {gameMode !== 'maxkills' && (
+              <div style={{ marginTop: '15px' }}>
+                <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
+                <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
+                  <option value="random">{t('gm.votingRandom')}</option>
+                  <option value="lead">{t('gm.leadsOnly')}</option>
+                  <option value="follow">{t('gm.followsOnly')}</option>
+                </select>
+              </div>
+            )}
+            {gameMode !== 'maxkills' && (
+              <>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={deadPlayersKeepDancing} onChange={(e) => setDeadPlayersKeepDancing(e.target.checked)} />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.deadPlayersKeepDancing')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.deadPlayersKeepDancingHint')}
+                </p>
+              </>
+            )}
 
             <button
               onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
@@ -3354,7 +3366,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                             style={{ width: 'auto', padding: '4px 10px', fontSize: '0.8rem', margin: 0 }}
                             onClick={() => handleGmMarkCoupleRoleViewed(couple.id)}
                           >
-                            Als bereit markieren (GM)
+                            {t('gm.markReadyGm')}
                           </button>
                         )}
                         <span className={`badge ${hasViewed ? 'badge--blue' : 'badge--red'}`}>
@@ -3537,10 +3549,18 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                     const isVictim = room.maxKillsRoundVictimIds?.includes(couple.id);
                     const claimed = room.killMode === 'silent' && room.maxKillsKillClaims?.includes(couple.id);
                     const selfReported = room.killMode === 'silent' && room.maxKillsVictimSelfReports?.includes(couple.id);
+                    // A wrong-accusation "out" (isOut but not isVictim) is a
+                    // dead end server-side (markMaxKillsHit only ever
+                    // undoes an actual confirmed victim, see its own
+                    // comment) - disabled here too instead of leaving a
+                    // button that looks tappable but silently does nothing.
+                    const isWrongGuessOut = isOut && !isVictim;
                     return (
                       <button
                         key={couple.id}
                         className={`kill-option-btn ${isOut ? 'selected' : ''}`}
+                        disabled={isWrongGuessOut}
+                        style={isWrongGuessOut ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
                         onClick={() => socket.emit('gmMarkMaxKillsHit', { roomId: room.id, coupleId: couple.id })}
                       >
                         <span style={{ flexShrink: 0, minWidth: '110px', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -4154,7 +4174,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               </div>
               <p style={{ color: 'var(--text-muted)', marginBottom: '20px' }}>{t('gm.gameEnded')}</p>
               <button className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '20px' }} onClick={handleResetGame}>
-                ZURÜCK ZUR LOBBY / NEUE RUNDE
+                {t('gm.backToLobby')}
               </button>
             </div>
           );
@@ -4182,7 +4202,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               {t('gm.gameEnded')}
             </p>
             <button className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '20px' }} onClick={handleResetGame}>
-              ZURÜCK ZUR LOBBY / NEUE RUNDE
+              {t('gm.backToLobby')}
             </button>
           </div>
         );

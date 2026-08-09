@@ -1363,6 +1363,37 @@ class GameStore {
   // understand this mode's round-scoped elimination at all and would
   // misfire the moment only 2 couples remain in the room, tournament-wide.
   handleMaxKillsCoupleLeft(room) {
+    if (room.status === 'role_reveal') {
+      // The couple assigned as *this* round's killer (set the moment
+      // role_reveal started - see startGame/advanceMaxKillsRound) just left
+      // before dancing even began. Nothing else in the flow would ever
+      // notice: 'dancing' doesn't gate on a killer existing, so the round
+      // would otherwise proceed with no killer at all, none of the maxkills
+      // action panels would let anyone actually be a killer, and the only
+      // way out would be the GM manually hitting "End Round". Skip forward
+      // in the tournament order right here instead - the exact same skip
+      // advanceMaxKillsRound already does for a departure landing on a
+      // *future* turn (see the plan), just covering the current one too.
+      if (this.getMaxKillsKillerCouple(room)) return; // killer couple still present - nothing to do
+      let nextIndex = room.maxKillsRoundIndex + 1;
+      while (nextIndex < room.maxKillsOrder.length && !room.couples.some(c => c.id === room.maxKillsOrder[nextIndex].coupleId)) {
+        nextIndex++;
+      }
+      if (nextIndex >= room.maxKillsOrder.length) {
+        const rankedCoupleIds = [...new Set(room.maxKillsOrder.filter(e => e.counted).map(e => e.coupleId))];
+        room.maxKillsFinalRanking = rankedCoupleIds
+          .map(coupleId => ({ coupleId, kills: room.killCounts[coupleId] || 0 }))
+          .sort((a, b) => b.kills - a.kills);
+        room.status = 'ended';
+        room.endReason = 'maxkills_complete';
+        return;
+      }
+      room.maxKillsRoundIndex = nextIndex;
+      const killerCouple = room.couples.find(c => c.id === room.maxKillsOrder[nextIndex].coupleId);
+      if (killerCouple) killerCouple.role = 'killer';
+      room.players.forEach(p => p.hasViewedRole = false);
+      return;
+    }
     if (room.status !== 'dancing') return;
     const killer = this.getMaxKillsKillerCouple(room);
     if (!killer) {

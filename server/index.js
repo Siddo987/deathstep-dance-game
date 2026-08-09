@@ -1135,9 +1135,20 @@ io.on('connection', (socket) => {
 
   socket.on('advanceMaxKillsRound', ({ roomId }) => {
     if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    // This is the ONLY path a Max Kills tournament ever reaches 'ended'
+    // through naturally (see gameStore.advanceMaxKillsRound) - unlike every
+    // other mode, which always ends via revealKill/executeVote/endGame, all
+    // three of which already call recordGameConclusion below. Missing this
+    // meant a fully-played Max Kills game was never written to the database
+    // at all (no games/game_couples/game_rounds rows, no gm_sessions "hosted"
+    // row) - only manually aborting one early (via endGame) got recorded.
+    const wasAlreadyEnded = gameStore.getRoom(roomId)?.status === 'ended';
     const room = gameStore.advanceMaxKillsRound(roomId);
     if (room) {
       broadcastRoom(room);
+      if (!wasAlreadyEnded && room.status === 'ended') {
+        recordGameConclusion(room, { aborted: room.endReason === 'aborted' });
+      }
     }
   });
 
