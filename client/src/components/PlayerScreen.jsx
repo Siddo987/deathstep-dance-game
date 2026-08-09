@@ -944,7 +944,10 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
         {killersWon && killerCouples.length > 0 && (
           <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '20px', textShadow: '0 0 10px rgba(255, 42, 85, 0.5)' }}>
-            {t('player.killerLabel')} <strong>{killerCouples.map(c => c.name).join(' & ')}</strong>
+            {/* ', ' not ' & ' - killerCount can be >1, and " & " already
+                separates a couple's own two members (see the matching
+                comment on GMDashboard.jsx's kill_reveal panel). */}
+            {t('player.killerLabel')} <strong>{killerCouples.map(c => c.name).join(', ')}</strong>
           </p>
         )}
 
@@ -1316,7 +1319,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             </h2>
             {victimCouples.length > 0 ? (
               <p style={{ fontSize: '1.2rem', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                <Skull size={20} className="icon-inline" style={{ color: 'var(--neon-red)' }} /> <strong style={{ color: 'var(--neon-red)' }}>{t('player.wereEliminated', { names: victimCouples.map(c => c.name).join(' & ') })}</strong>
+                {/* ', ' not ' & ' - see the matching comment in GMDashboard.jsx's
+                    kill_reveal panel; same ambiguity, same fix. */}
+                <Skull size={20} className="icon-inline" style={{ color: 'var(--neon-red)' }} /> <strong style={{ color: 'var(--neon-red)' }}>{t('player.wereEliminated', { names: victimCouples.map(c => c.name).join(', ') })}</strong>
               </p>
             ) : (
               <p style={{ fontSize: '1.2rem', color: 'white', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
@@ -1511,7 +1516,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           {victimCouples.length > 0 ? (
             <div className="panel panel--danger">
               <h3 style={{ color: 'var(--neon-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                <Skull size={18} className="icon-inline" /> {t('player.wasKilled', { names: victimCouples.map(c => c.name).join(' & ') })}
+                {/* ', ' not ' & ' - see the matching comment above/in
+                    GMDashboard.jsx's kill_reveal panel; same ambiguity. */}
+                <Skull size={18} className="icon-inline" /> {t('player.wasKilled', { names: victimCouples.map(c => c.name).join(', ') })}
               </h3>
             </div>
           ) : (

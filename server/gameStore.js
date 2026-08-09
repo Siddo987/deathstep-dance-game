@@ -26,6 +26,17 @@ export function sanitizeRoomForGM(room) {
     ...rest,
     players: room.players.map(({ socketId, sessionSecret, ...r }) => r),
     coGms: room.coGms.map(({ socketId, sessionSecret, ...r }) => r),
+    // GMDashboard.jsx reads room.maxKillsTotalRounds (both for the "Runde X
+    // von Y" label and the last-round -> "ENDWERTUNG ANZEIGEN" button-text
+    // check) - mirrors sanitizeRoomForPlayer's same computed field below.
+    // Without this, the GM's room object never had it at all (only players
+    // did), so both reads silently evaluated against undefined: the round
+    // label showed "Runde X von undefined", and the last-round check
+    // (roundIndex+1 >= undefined) was always false, so the GM's advance
+    // button kept saying "NÄCHSTE RUNDE" even on the actual final round
+    // (harmless functionally - advanceMaxKillsRound() still correctly ends
+    // the tournament server-side - but confirmed live as a real, visible bug).
+    maxKillsTotalRounds: room.maxKillsOrder.length,
   };
 }
 

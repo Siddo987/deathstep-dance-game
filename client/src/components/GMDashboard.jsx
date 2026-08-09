@@ -3930,7 +3930,15 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
             <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.killRevealed')}</h3>
             {victimCouples.length > 0 ? (
               <p style={{ color: 'var(--neon-red)', fontSize: '1.2rem', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
-                <Skull size={20} className="icon-inline" /> <strong>{t('player.wereEliminated', { names: victimCouples.map(c => maskName(c.name)).join(' & ') })}</strong>
+                {/* ', ' not ' & ' - a couple's own combined name already uses
+                    " & " between its two members (see maskName above), so
+                    joining *multiple* victim couples with the same separator
+                    made 2 couples read as one indistinguishable group of 4
+                    names (confirmed live: Toucher's auto-elimination-on-no-
+                    report regularly produces exactly this 2-couple case).
+                    Matches the already-unambiguous convention used for
+                    Max Kills' victims/wrong-accusers lists below. */}
+                <Skull size={20} className="icon-inline" /> <strong>{t('player.wereEliminated', { names: victimCouples.map(c => maskName(c.name)).join(', ') })}</strong>
               </p>
             ) : (
               <p style={{ color: 'var(--neon-blue)', fontSize: '1.2rem', marginBottom: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px' }}>
