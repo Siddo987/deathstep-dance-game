@@ -8,7 +8,11 @@ import fr from './locales/fr.js';
 
 const LANG_KEY = 'deathstep_language';
 const dictionaries = { en, de, ru, uk, nl, fr };
-const SUPPORTED_LANGS = Object.keys(dictionaries);
+// Exported so every in-app language switcher (Home.jsx's own-screen picker,
+// Modal.jsx's LanguageModal reused from GMDashboard/PlayerScreen's kebab
+// menus) draws from one list - a language added here shows up everywhere
+// without also needing to be hand-added to each switcher's button row.
+export const SUPPORTED_LANGS = Object.keys(dictionaries);
 
 export function detectLanguage() {
   try {

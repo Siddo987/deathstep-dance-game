@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
-import { ConfirmModal, AlertModal, HowToPlayModal } from './Modal.jsx';
+import { ConfirmModal, AlertModal, HowToPlayModal, LanguageModal } from './Modal.jsx';
 import {
   loginWithSpotify, loginWithSpotifyForAccountLink, searchTracks, playTrack, logoutSpotify,
   getBestAvailableToken, SPOTIFY_SESSION_EXPIRED_EVENT,
@@ -15,7 +15,7 @@ import {
   MessageCircle, Crown, X, PhoneOff, Repeat, Scissors, AlertTriangle, Lightbulb,
   Music2, Skull, Sparkles, EyeOff, Eye, Check, Plus, Minus, LogOut, Flag,
   Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone,
-  ChevronUp, ChevronDown, RotateCcw, Info, HelpCircle, Trophy
+  ChevronUp, ChevronDown, RotateCcw, Info, HelpCircle, Trophy, Globe
 } from 'lucide-react';
 
 function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated, gmChatMessages, onSendGMChatMessage, currentUser }) {
@@ -36,6 +36,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [confirmState, setConfirmState] = useState(null);
   const [alertState, setAlertState] = useState(null);
   const [showHowTo, setShowHowTo] = useState(false);
+  const [showLanguageModal, setShowLanguageModal] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(() => {
     return localStorage.getItem('deathstep_privacy_mode') === 'true';
   });
@@ -225,6 +226,16 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     if (next.has(coupleId)) next.delete(coupleId); else next.add(coupleId);
     return next;
   });
+  // Collapse every box again at the start of each new round - this state
+  // otherwise lives for the whole game (GMDashboard never remounts between
+  // rounds), so without this a box expanded once would stay expanded in
+  // every later round's voting phase too. Confirmed live: intended behavior
+  // is "collapsed every round", not "stays expanded across rounds".
+  // room.round is bumped by every mode's round-advance path (Standard,
+  // Chaos, Max Kills), so this fires exactly once per round regardless of mode.
+  React.useEffect(() => {
+    setExpandedVoteCoupleIds(new Set());
+  }, [room.round]);
 
   // GM submit-on-behalf selections during the silent-report dancing phase, keyed by couple's id
   const [gmKillClaimSelections, setGmKillClaimSelections] = useState({});
@@ -2457,18 +2468,23 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               above (not its own row below the title) so everything GM-status-
               related lives in one place. */}
       <div className="icon-toolbar" style={{ zIndex: 100 }} ref={menuRef}>
-        {(useSpotify || room.nowPlaying || room.songQueue.length > 0) && (() => {
+        {useSpotify && (() => {
           // Actually playing right now takes priority (white) over the
           // "still needs a song" warning (red, pulsing) - a track already
           // spinning obviously means one doesn't need to be added. Anything
           // in between (something's queued/ready but not playing this
           // instant, e.g. mid-lobby with next round's pick already made)
           // keeps the existing quieter green "ready" hint.
+          // Gated on useSpotify alone (not also room.nowPlaying/songQueue
+          // like before) - in an own-audio-mode room the GM runs their own
+          // music entirely outside the app, so there's nothing for this icon
+          // to manage or warn about; showing it (red or otherwise) would be
+          // nagging the GM about a responsibility that was never the app's.
           const isActuallyPlaying = room.status === 'dancing' && isPlaying;
           const needsSong = !isActuallyPlaying && !hasMusicReady;
           return (
             <button
-              className={`kebab-menu-btn ${needsSong ? 'pulse-animation' : ''}`}
+              className={`kebab-menu-btn ${needsSong ? 'pulse-animation-red' : ''}`}
               onClick={() => setShowMusicModal(true)}
               title={t('gm.musicPanelTitle')}
               style={{ color: isActuallyPlaying ? 'white' : needsSong ? 'var(--neon-red)' : (room.nowPlaying ? 'var(--neon-green)' : undefined) }}
@@ -2504,6 +2520,9 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
           <div className="dropdown-menu">
             <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowHowTo(true); setShowMenu(false); }}>
               <HelpCircle size={16} className="icon-inline" /> {t('howto.linkLabel')}
+            </button>
+            <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowLanguageModal(true); setShowMenu(false); }}>
+              <Globe size={16} className="icon-inline" /> {t('common.languageMenuItem')}
             </button>
             {useSpotify && (
               <button className="dropdown-item" style={{ display: 'flex', alignItems: 'center', gap: '10px' }} onClick={() => { setShowSpotifyModal(true); setShowMenu(false); }}>
@@ -4452,6 +4471,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
       />
 
       <HowToPlayModal isOpen={showHowTo} onClose={() => setShowHowTo(false)} />
+      <LanguageModal isOpen={showLanguageModal} onClose={() => setShowLanguageModal(false)} />
 
       {showSpotifyModal && createPortal(
         <div className="modal-overlay" onClick={() => setShowSpotifyModal(false)}>

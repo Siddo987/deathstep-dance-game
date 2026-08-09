@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { socket } from '../socket.js';
-import { X, Music2, Skull, Sparkles, Timer, Smartphone, Search, Send, Plus, Share2, Link2, HelpCircle } from 'lucide-react';
+import { X, Music2, Skull, Sparkles, Timer, Smartphone, Search, Send, Plus, Share2, Link2, HelpCircle, Globe } from 'lucide-react';
 
-import { ConfirmModal, HowToPlayModal } from './Modal.jsx';
+import { ConfirmModal, HowToPlayModal, LanguageModal } from './Modal.jsx';
 import { useLanguage } from '../i18n.jsx';
 import { fetchMyPlaylists, fetchPlaylist, createPlaylist, addTrackToPlaylist, searchTracksInRoom, fetchSpotifyStatus } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
@@ -22,6 +22,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   const [confirmState, setConfirmState] = useState(null);
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [showHowTo, setShowHowTo] = useState(false);
+  const [showLanguageModal, setShowLanguageModal] = useState(false);
   const [votingTimeLeft, setVotingTimeLeft] = useState(0);
 
   // Song suggestions - three ways to suggest, gated by what the player has
@@ -471,6 +472,23 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           <div className="kebab-dot"></div>
         </button>
       )}
+      {/* General settings/language menu - for every player, not just the
+          super-admin (whose kebab above opens a different, hidden thing).
+          Just a direct icon+modal (matching songSuggestButton/spotify share's
+          own pattern below) rather than a real dropdown, since language is
+          the only item in it so far - a one-item menu would just be an extra
+          click. Sits at top:54/right:50, the one icon slot in this corner
+          nothing else claims (top:10 has leave/admin, top:10-98/right:10 has
+          song-suggest/spotify-share), so it's always in the same place
+          regardless of which of those are visible in a given room. */}
+      <button
+        onClick={() => setShowLanguageModal(true)}
+        className="icon-btn"
+        style={{ position: 'absolute', top: '54px', right: '50px', zIndex: 10 }}
+        title={t('common.languageMenuItem')}
+      >
+        <Globe size={20} />
+      </button>
       <button
         onClick={handleLeaveClick}
         className="icon-btn"
@@ -486,6 +504,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         onCancel={() => setConfirmState(null)}
       />
       {showAdminModal && <AdminOverridesModal room={room} onClose={() => setShowAdminModal(false)} />}
+      <LanguageModal isOpen={showLanguageModal} onClose={() => setShowLanguageModal(false)} />
     </>
   );
 

@@ -1181,12 +1181,32 @@ class GameStore {
     const remainingSlots = killerCount - forcedCoupleIds.size;
     if (remainingSlots > 0) {
       const remainingCouples = candidates.filter(c => !forcedCoupleIds.has(c.id));
-      const shuffledIndices = Array.from({length: remainingCouples.length}, (_, i) => i).sort(() => 0.5 - Math.random());
+      // Shuffle first (for which same-size couples end up picked), THEN
+      // stable-sort that shuffled order by couple size ascending, so smaller
+      // couples are always tried before larger ones. Picking in a purely
+      // random order (no size sort - the previous version) could burn the
+      // player budget on a large couple early and then run out of room for
+      // the smaller couples that would actually have fit, silently landing
+      // on fewer killer couples than killerCount - even when killerCount was
+      // achievable and GMDashboard.jsx's own stepper had already confirmed
+      // that (its maxKillerCouples calc *does* sort smallest-first, so it
+      // promises a count this function wasn't actually guaranteed to reach).
+      // Confirmed live 2026-08-09: a killer couple's "who else is in on it"
+      // reveal came up completely empty in a Standard-mode game with a mixed
+      // 2-and-3-person couple, killerCount=2 - reproduced in isolation, one
+      // couple ate the whole budget alone and the second slot silently never
+      // filled. Sorting smallest-first (matching the client's own promise)
+      // guarantees reaching the maximum achievable count; the initial
+      // shuffle keeps *which* equally-sized couples get picked random.
+      const orderedCouples = remainingCouples
+        .map((c, i) => ({ c, r: Math.random() }))
+        .sort((a, b) => a.r - b.r)
+        .map(({ c }) => c)
+        .sort((a, b) => a.playerIds.length - b.playerIds.length);
       let assigned = 0;
-      for (const idx of shuffledIndices) {
+      for (const couple of orderedCouples) {
         if (assigned >= remainingSlots) break;
-        const couple = remainingCouples[idx];
-        if (!canAssign(couple)) continue; // would push killers to/past half the players - skip, try the next shuffled candidate
+        if (!canAssign(couple)) continue; // would push killers to/past half the players - skip, try the next candidate
         assign(couple);
         assigned++;
       }
@@ -1205,7 +1225,18 @@ class GameStore {
   // next-round entry point can be reached from either.
   startChaosRound(room) {
     const previousKillerCoupleIds = room.couples.filter(c => c.role === 'killer').map(c => c.id);
-    room.couples.forEach(c => { if (c.status === 'alive') c.role = 'dancer'; });
+    // Reset EVERY couple's role, not just alive ones. An eliminated ex-killer
+    // from an earlier Chaos round must not keep a stale role: 'killer' on
+    // their couple record forever after, or two things go wrong once a new
+    // couple is picked below - sanitizeRoomForPlayer's teammate reveal
+    // ("killers are told their teammates") doesn't filter by alive status,
+    // so the round's real (new) killer would see that long-dead couple
+    // listed alongside/instead of their actual current teammate; and the
+    // 'ended' screen's "the killers were" roster (also unfiltered by alive
+    // status) would list them again despite having nothing to do with the
+    // round the game actually ended on. Confirmed live 2026-08-09: a killer
+    // was told about a couple that hadn't been their teammate for rounds.
+    room.couples.forEach(c => { c.role = 'dancer'; });
     this.assignKillers(room, room.killerCount, previousKillerCoupleIds);
     room.players.forEach(p => p.hasViewedRole = false);
     room.status = 'role_reveal';

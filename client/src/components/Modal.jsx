@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { HelpCircle, CheckCircle2, AlertTriangle, Skull, X, Music2, Puzzle, HeartCrack, Eye, Shield, Hand } from 'lucide-react';
-import { useLanguage } from '../i18n.jsx';
+import { HelpCircle, CheckCircle2, AlertTriangle, Skull, X, Music2, Puzzle, HeartCrack, Eye, Shield, Hand, Globe } from 'lucide-react';
+import { useLanguage, SUPPORTED_LANGS } from '../i18n.jsx';
 
 function useEscapeKey(isOpen, onEscape) {
   useEffect(() => {
@@ -65,6 +65,61 @@ export function AlertModal({ isOpen, message, onClose, isSuccess = false, action
         ) : (
           <button className={btnClass} onClick={onClose} style={btnStyle}>{t('common.ok')}</button>
         )}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// In-room language switcher - reachable from GMDashboard's and PlayerScreen's
+// kebab ("three-dot") menus, so switching language no longer requires leaving
+// the room back to Home.jsx (the only place this used to be possible; see
+// Home.jsx's own LanguageSwitcher, which stays as the pre-room picker). Both
+// draw from the same SUPPORTED_LANGS list and the same setLang() from
+// useLanguage(), so a language picked here takes effect immediately for
+// every t() call in the room, GM and player alike - there's nothing
+// room/server-side to sync, this is purely local display language.
+export function LanguageModal({ isOpen, onClose }) {
+  const { t, lang, setLang } = useLanguage();
+  useEscapeKey(isOpen, onClose || (() => {}));
+  if (!isOpen) return null;
+
+  const langButton = (code) => (
+    <button
+      key={code}
+      onClick={() => { setLang(code); onClose(); }}
+      style={{
+        background: lang === code ? 'rgba(0,240,255,0.12)' : 'transparent',
+        border: lang === code ? '1px solid var(--neon-blue)' : '1px solid rgba(136,146,176,0.4)',
+        color: lang === code ? 'var(--neon-blue)' : 'var(--text-muted)',
+        padding: '10px 12px',
+        borderRadius: '4px',
+        cursor: 'pointer',
+        fontSize: '0.9rem',
+        letterSpacing: '1px',
+        fontWeight: lang === code ? 'bold' : 'normal',
+      }}
+    >
+      {code.toUpperCase()}
+    </button>
+  );
+
+  return createPortal(
+    <div className="modal-overlay" onClick={onClose}>
+      <div
+        className="modal-card cyber-card"
+        style={{ maxWidth: '360px', border: '1px solid var(--neon-blue)', textAlign: 'center' }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
+          <h3 style={{ color: 'var(--neon-blue)', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Globe size={20} className="icon-inline" /> {t('common.languageMenuItem')}
+          </h3>
+          <button className="icon-btn" onClick={onClose}><X size={20} /></button>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+          {SUPPORTED_LANGS.map(langButton)}
+        </div>
       </div>
     </div>,
     document.body

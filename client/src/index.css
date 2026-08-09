@@ -330,6 +330,21 @@ h1, h2, h3, .glitch-text {
   animation: pulse 2s infinite;
 }
 
+/* Red variant - for pulses that warn of something actually missing/wrong
+   (e.g. GMDashboard's music icon when no song is ready) rather than the
+   default purple "here's your next action" pulse .pulse-animation already
+   means everywhere else in the app. Keep those two meanings visually
+   distinct instead of overloading one class for both. */
+@keyframes pulse-red {
+  0% { box-shadow: 0 0 0 0 rgba(255, 42, 85, 0.4); }
+  70% { box-shadow: 0 0 0 15px rgba(255, 42, 85, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 42, 85, 0); }
+}
+
+.pulse-animation-red {
+  animation: pulse-red 2s infinite;
+}
+
 /* Status Colors */
 .status-alive {
   color: var(--neon-blue);

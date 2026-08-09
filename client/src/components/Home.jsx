@@ -3,7 +3,7 @@ import { Users, Crown, LogIn, LogOut, Repeat, ArrowLeft, Globe, UserCircle2, Tro
 import { openCookieSettings } from './CookieBanner.jsx';
 import { fetchMyStats } from '../auth.js';
 import { fetchUnreadFeedbackCount } from '../admin.js';
-import { useLanguage } from '../i18n.jsx';
+import { useLanguage, SUPPORTED_LANGS } from '../i18n.jsx';
 import { HowToPlayModal } from './Modal.jsx';
 
 // "Wie funktioniert's?" trigger - a plain underlined text link (not a
@@ -55,12 +55,7 @@ function LanguageSwitcher() {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', alignItems: 'center', gap: '8px', rowGap: '6px', marginBottom: '20px' }}>
       <Globe size={16} className="icon-inline" style={{ color: 'var(--text-muted)' }} />
-      {langButton('en', 'EN')}
-      {langButton('de', 'DE')}
-      {langButton('ru', 'RU')}
-      {langButton('uk', 'UK')}
-      {langButton('nl', 'NL')}
-      {langButton('fr', 'FR')}
+      {SUPPORTED_LANGS.map(code => langButton(code, code.toUpperCase()))}
     </div>
   );
 }

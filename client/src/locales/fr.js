@@ -15,6 +15,7 @@ export default {
   'common.waiting': 'En attente...',
   'common.backToGame': 'Retour au jeu',
   'common.loading': 'Chargement...',
+  'common.languageMenuItem': 'Langue',
 
   // Phases du jeu (room.status)
   'phase.lobby': 'SALON',
@@ -205,6 +206,7 @@ export default {
   'admin.error.player_not_found': "Ce joueur n'est plus dans ce salon.",
   'admin.error.already_paired': "Au moins un de ces joueurs est déjà assigné à un autre couple.",
   'admin.error.generic': "Un problème est survenu. Réessaie.",
+  'admin.error.room_not_found': 'Salon introuvable.',
 
   // Dev Dashboard (menu caché réservé au propriétaire sur l'écran d'accueil, non lié nulle part)
   'dev.pageLink': 'Dev Dashboard',
@@ -303,6 +305,8 @@ export default {
   'server.playerNotFound': 'Joueur introuvable.',
   'server.coGmNotFound': "Ce co-GM n'est plus dans ce salon.",
   'server.spotifyNotConnected': "Aucun compte Spotify actif n'est lié. Connecte d'abord ton compte Spotify dans les Paramètres.",
+  'server.gmAlreadyConnected': 'Le GM a déjà sa propre connexion Spotify.',
+  'server.shareAlreadyActive': "Quelqu'un d'autre partage déjà sa connexion Spotify pour cette salle.",
   'server.partnerLeftSpectating': 'Ton/ta partenaire ({name}) a quitté la partie. Tu observes maintenant cette manche depuis la touche.',
   'server.groupmateLeftContinuing': '{name} a quitté votre groupe. Vous continuez à danser à deux.',
   'server.rejoinPlayerNotFound': 'Aucun joueur avec ce nom trouvé dans cette manche.',

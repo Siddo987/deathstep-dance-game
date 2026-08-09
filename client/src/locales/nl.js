@@ -15,6 +15,7 @@ export default {
   'common.waiting': 'Wachten...',
   'common.backToGame': 'Terug naar het spel',
   'common.loading': 'Laden...',
+  'common.languageMenuItem': 'Taal',
 
   // Spelfases (room.status)
   'phase.lobby': 'LOBBY',
@@ -205,6 +206,7 @@ export default {
   'admin.error.player_not_found': 'Deze speler zit niet meer in deze kamer.',
   'admin.error.already_paired': 'Minstens één van deze spelers is al aan een andere koppeling toegewezen.',
   'admin.error.generic': 'Er is iets misgegaan. Probeer het opnieuw.',
+  'admin.error.room_not_found': 'Kamer niet gevonden.',
 
   // Dev Dashboard (verborgen menu, alleen voor de eigenaar, op het startscherm, nergens gelinkt)
   'dev.pageLink': 'Dev Dashboard',
@@ -303,6 +305,8 @@ export default {
   'server.playerNotFound': 'Speler niet gevonden.',
   'server.coGmNotFound': 'Deze co-GM zit niet meer in deze kamer.',
   'server.spotifyNotConnected': 'Geen actief Spotify-account gekoppeld. Verbind eerst je Spotify-account bij Instellingen.',
+  'server.gmAlreadyConnected': 'De GM heeft al een eigen Spotify-verbinding.',
+  'server.shareAlreadyActive': 'Iemand anders deelt al zijn/haar Spotify-verbinding voor deze kamer.',
   'server.partnerLeftSpectating': 'Je partner ({name}) heeft het spel verlaten. Je kijkt nu toe voor deze ronde.',
   'server.groupmateLeftContinuing': '{name} heeft jullie groep verlaten. Jullie dansen verder als paar.',
   'server.rejoinPlayerNotFound': 'Er is geen speler met deze naam gevonden in deze ronde.',

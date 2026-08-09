@@ -15,6 +15,7 @@ export default {
   'common.waiting': 'Warten...',
   'common.backToGame': 'Zurück zum Spiel',
   'common.loading': 'Lade...',
+  'common.languageMenuItem': 'Sprache',
 
   // Spielphasen (room.status)
   'phase.lobby': 'LOBBY',
@@ -205,6 +206,7 @@ export default {
   'admin.error.player_not_found': 'Dieser Spieler ist nicht mehr in diesem Raum.',
   'admin.error.already_paired': 'Mindestens einer dieser Spieler ist bereits einer anderen Paarung zugeordnet.',
   'admin.error.generic': 'Etwas ist schiefgelaufen. Bitte versuche es erneut.',
+  'admin.error.room_not_found': 'Raum nicht gefunden.',
 
   // Dev Dashboard (verstecktes Owner-only Menü auf der Startseite, nicht verlinkt)
   'dev.pageLink': 'Dev-Dashboard',
@@ -303,6 +305,8 @@ export default {
   'server.playerNotFound': 'Spieler nicht gefunden.',
   'server.coGmNotFound': 'Dieser Co-GM ist nicht mehr in diesem Raum.',
   'server.spotifyNotConnected': 'Kein aktives Spotify-Konto verknüpft. Verbinde zuerst dein Spotify-Konto in den Einstellungen.',
+  'server.gmAlreadyConnected': 'Der Spielleiter hat bereits eine eigene Spotify-Verbindung.',
+  'server.shareAlreadyActive': 'Jemand anderes teilt bereits seine Spotify-Verbindung für diesen Raum.',
   'server.partnerLeftSpectating': 'Dein Partner ({name}) hat das Spiel verlassen. Du bist ab jetzt Zuschauer:in für diese Runde.',
   'server.groupmateLeftContinuing': '{name} hat eure Gruppe verlassen. Ihr tanzt zu zweit weiter.',
   'server.rejoinPlayerNotFound': 'Kein Spieler mit diesem Namen in dieser Runde gefunden.',

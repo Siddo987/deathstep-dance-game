@@ -15,6 +15,7 @@ export default {
   'common.waiting': 'Ожидание...',
   'common.backToGame': 'Вернуться к игре',
   'common.loading': 'Загрузка...',
+  'common.languageMenuItem': 'Язык',
 
   // Фазы игры (room.status)
   'phase.lobby': 'ЛОББИ',
@@ -205,6 +206,7 @@ export default {
   'admin.error.player_not_found': 'Этого игрока больше нет в этой комнате.',
   'admin.error.already_paired': 'По крайней мере один из этих игроков уже назначен в другую пару.',
   'admin.error.generic': 'Что-то пошло не так. Попробуйте снова.',
+  'admin.error.room_not_found': 'Комната не найдена.',
 
   // Dev Dashboard (скрытое меню только для владельца на главном экране, нигде не отображается ссылкой)
   'dev.pageLink': 'Dev Dashboard',
@@ -303,6 +305,8 @@ export default {
   'server.playerNotFound': 'Игрок не найден.',
   'server.coGmNotFound': 'Этого со-GM больше нет в этой комнате.',
   'server.spotifyNotConnected': 'Активный аккаунт Spotify не привязан. Сначала подключи аккаунт Spotify в настройках.',
+  'server.gmAlreadyConnected': 'У GM уже есть своё подключение Spotify.',
+  'server.shareAlreadyActive': 'Кто-то другой уже делится своим подключением Spotify для этой комнаты.',
   'server.partnerLeftSpectating': 'Твой партнёр ({name}) покинул игру. Теперь ты наблюдаешь за этим раундом со стороны.',
   'server.groupmateLeftContinuing': '{name} покинул(а) вашу группу. Вы продолжаете танцевать вдвоём.',
   'server.rejoinPlayerNotFound': 'Игрок с этим именем не найден в этом раунде.',
