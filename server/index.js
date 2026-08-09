@@ -270,17 +270,36 @@ async function importDeathstepPlaylistsForDelegate(delegate) {
 // Sends each socket in the room its own view of the state instead of one shared
 // broadcast - the GM gets everything, each player gets their own redacted copy
 // (see sanitizeRoomForPlayer) so secret data never reaches a socket that shouldn't have it.
+// Every emit below is wrapped so a bug in sanitizeRoomForGM/ForPlayer for
+// this one room can't crash the whole process (an uncaught exception inside
+// a socket-event handler is fatal to the whole Node process by default,
+// which - via the container's restart-always policy - would wipe every
+// other in-memory room too, not just this one). Confirmed to actually happen
+// live on 2026-08-09 (see createRoom's comment on seerPeeks/toucherReports/
+// protectorPick): every real game crashed the entire server the moment
+// pairs were released, because sanitizeRoomForPlayer threw for every real
+// (non-manual) player in the room. That specific bug is fixed now, but this
+// stays as defense-in-depth against the same class of bug recurring for a
+// field nobody thought to initialize everywhere it's read.
 function broadcastRoom(room) {
   gameStore.touchRoom(room.id);
   const serverTime = Date.now();
 
   getGmSocketIds(room).forEach(sid => {
-    io.to(sid).emit('roomUpdated', { ...sanitizeRoomForGM(room), serverTime });
+    try {
+      io.to(sid).emit('roomUpdated', { ...sanitizeRoomForGM(room), serverTime });
+    } catch (err) {
+      console.error(`broadcastRoom: failed to sanitize/send GM view for room ${room.id}:`, err);
+    }
   });
 
   room.players.forEach(p => {
     if (!p.socketId) return;
-    io.to(p.socketId).emit('roomUpdated', { ...sanitizeRoomForPlayer(room, p.id), serverTime });
+    try {
+      io.to(p.socketId).emit('roomUpdated', { ...sanitizeRoomForPlayer(room, p.id), serverTime });
+    } catch (err) {
+      console.error(`broadcastRoom: failed to sanitize/send player view (room ${room.id}, player ${p.id}):`, err);
+    }
   });
 }
 

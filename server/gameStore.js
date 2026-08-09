@@ -51,7 +51,21 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     return { ...c, role: showRole ? c.role : null, specialRole: showSpecialRole ? c.specialRole : null };
   });
 
+  // record can be undefined here for seerPeeks/toucherReports specifically -
+  // those two (unlike killClaims/victimReports/votes) aren't initialized
+  // until startGame() runs (see createRoom's own comment on this), so any
+  // broadcast that reaches a real player during 'paired' (couples already
+  // exist, game not started yet) would otherwise crash the whole process on
+  // `Object.prototype.hasOwnProperty.call(undefined, ...)` - confirmed live
+  // on 2026-08-09: this took down the server (and every in-memory room with
+  // it, via the container's restart-always policy) the instant a real
+  // player was in the room when pairs got released. record ??= {} is the
+  // actual belt-and-suspenders fix; createRoom now also initializes both
+  // fields directly so this defensive fallback is never actually needed in
+  // practice, just cheap insurance against the same class of bug recurring
+  // for a future field that's only initialized in startGame()/resetRoom().
   const pickOwn = (record) => {
+    record ??= {};
     if (!myCouple || !Object.prototype.hasOwnProperty.call(record, myCouple.id)) return {};
     return { [myCouple.id]: record[myCouple.id] };
   };
@@ -198,6 +212,18 @@ class GameStore {
       killClaims: {}, // silent mode: { killerCoupleId: victimCoupleId | null }
       victimReports: {}, // silent mode: { coupleId: { feltKilled: boolean, suspectCoupleId: string | null } }
       silentReportsResolved: false, // silent mode: whether this round's reports have been matched into pendingVictimIds yet
+      // Special roles (see SPECIAL_ROLE_KEYS) - normally (re-)initialized in
+      // startGame()/resetRoom(), but MUST also exist here: sanitizeRoomForPlayer's
+      // pickOwn() reads these for every real player on every broadcast, including
+      // during 'paired' (after releasePairs populates room.couples, before
+      // startGame ever runs) - leaving them undefined here crashed the whole
+      // process on Object.prototype.hasOwnProperty.call(undefined, ...) the
+      // instant a real player was in a room whose pairs had just been released,
+      // confirmed live on 2026-08-09 (every real game hit this - manual/phoneless
+      // players never triggered it, since they have no socket to broadcast to).
+      seerPeeks: {}, // { [seerCoupleId]: { targetCoupleId, targetRole } } - see seerPeek()
+      toucherReports: {}, // { [toucherCoupleId]: boolean } - see gmMarkToucherResult()/submitToucherReport()/revealKill()
+      protectorPick: null, // coupleId | null - see submitProtectorPick()/revealKill()
       songSuggestions: [], // { id, playerId, playerName, track, createdAt } - track is a raw Spotify track object, players can suggest any time
       playedSongs: [], // { uri, name, artist, playedAt, round } - reported by the GM's client whenever it actually starts a track; own-audio mode never reports anything since the app has no visibility into what plays on an external device/speaker
       songQueue: [], // { id, type: 'spotify'|'text', uri, name, artist, text } - ordered, GM-managed upcoming picks (see addToSongQueue etc.). Persists across rounds AND across games in this room - only destroyRoom() clears it, resetRoom() deliberately leaves it alone.
