@@ -77,3 +77,33 @@ export const deleteFallbackSong = (id) => request(`/api/admin/fallback-songs/${i
 export const fetchGamesList = (limit, offset) => request(`/api/admin/games?limit=${limit}&offset=${offset}`);
 
 export const fetchGameDetail = (id) => request(`/api/admin/games/${id}`);
+
+// News posts (see server/db.js's news_posts) - written and optionally
+// emailed to every registered account from the Dev Dashboard. The list
+// response also embeds each post's per-recipient send log (news_recipients:
+// email/success/sentAt) for later review.
+export const fetchNewsList = () => request('/api/admin/news');
+
+export const sendNewsPost = (title, body, sendEmail) =>
+  request('/api/admin/news', { method: 'POST', body: JSON.stringify({ title, body, sendEmail }) });
+
+export const deleteNewsPost = (id) => request(`/api/admin/news/${id}`, { method: 'DELETE' });
+
+// Roadmap items (see server/db.js's roadmap_items) - the dev-panel editor.
+// The public /roadmap page reads the same data back through an
+// unauthenticated route (fetchPublicRoadmap below), not this one.
+export const fetchRoadmapItems = () => request('/api/admin/roadmap-items');
+
+export const addRoadmapItem = (title, description, status) =>
+  request('/api/admin/roadmap-items', { method: 'POST', body: JSON.stringify({ title, description, status }) });
+
+export const updateRoadmapItem = (id, title, description, status) =>
+  request(`/api/admin/roadmap-items/${id}`, { method: 'PUT', body: JSON.stringify({ title, description, status }) });
+
+export const deleteRoadmapItem = (id) => request(`/api/admin/roadmap-items/${id}`, { method: 'DELETE' });
+
+export const moveRoadmapItem = (id, direction) =>
+  request(`/api/admin/roadmap-items/${id}/move`, { method: 'POST', body: JSON.stringify({ direction }) });
+
+// Public (no admin_users gate) - the /roadmap page anyone can view.
+export const fetchPublicRoadmap = () => request('/api/roadmap');

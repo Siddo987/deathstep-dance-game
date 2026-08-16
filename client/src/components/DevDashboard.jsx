@@ -1,7 +1,15 @@
 import React, { useEffect, useState } from 'react';
-import { Trash2, Check, Skull, Music2, Plus, History, ArrowLeft, Users, ExternalLink, MessageSquare, ChevronDown, ChevronUp } from 'lucide-react';
+import { Trash2, Check, Skull, Music2, Plus, History, ArrowLeft, Users, ExternalLink, MessageSquare, ChevronDown, ChevronUp, Mail, Send, Map, ArrowUp, ArrowDown, Pencil, X } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
-import { fetchFeedbackList, markFeedbackRead, deleteFeedbackEntry, fetchDevSettings, updateDevSettings, fetchFallbackSongs, addFallbackSong, importFallbackPlaylist, deleteFallbackSong, fetchGamesList, fetchGameDetail } from '../admin.js';
+import {
+  fetchFeedbackList, markFeedbackRead, deleteFeedbackEntry, fetchDevSettings, updateDevSettings,
+  fetchFallbackSongs, addFallbackSong, importFallbackPlaylist, deleteFallbackSong, fetchGamesList, fetchGameDetail,
+  fetchNewsList, sendNewsPost, deleteNewsPost,
+  fetchRoadmapItems, addRoadmapItem, updateRoadmapItem, deleteRoadmapItem, moveRoadmapItem,
+} from '../admin.js';
+
+const ROADMAP_STATUSES = ['planned', 'in_progress', 'done'];
+const roadmapStatusLabelKey = (status) => ({ planned: 'dev.roadmapStatusPlanned', in_progress: 'dev.roadmapStatusInProgress', done: 'dev.roadmapStatusDone' }[status]);
 
 const GAMES_PAGE_SIZE = 20;
 
@@ -54,6 +62,26 @@ function DevDashboard({ currentUser, authLoading }) {
   const [gamesListOpen, setGamesListOpen] = useState(false);
   const [feedbackListOpen, setFeedbackListOpen] = useState(false);
 
+  // News (see server/db.js's news_posts) - composer plus a collapsed history
+  // of what's already been written/sent, same collapsed-by-default pattern
+  // as the lists above.
+  const [news, setNews] = useState(null);
+  const [newsTitle, setNewsTitle] = useState('');
+  const [newsBody, setNewsBody] = useState('');
+  const [newsSendEmail, setNewsSendEmail] = useState(true);
+  const [newsStatus, setNewsStatus] = useState(null); // { key, params? }
+  const [newsListOpen, setNewsListOpen] = useState(false);
+  const [expandedNewsRecipientIds, setExpandedNewsRecipientIds] = useState(() => new Set());
+
+  // Roadmap (see server/db.js's roadmap_items) - editor for the public
+  // /roadmap page. editingItemId null means the form below adds a new item;
+  // set means it's editing that item in place instead.
+  const [roadmapItems, setRoadmapItems] = useState(null);
+  const [roadmapTitle, setRoadmapTitle] = useState('');
+  const [roadmapDescription, setRoadmapDescription] = useState('');
+  const [roadmapStatus, setRoadmapStatus] = useState('planned');
+  const [editingItemId, setEditingItemId] = useState(null);
+
   const load = () => {
     fetchFeedbackList().then(r => { if (!r.error) setFeedback(r.feedback); });
     fetchDevSettings().then(r => {
@@ -69,6 +97,8 @@ function DevDashboard({ currentUser, authLoading }) {
       setGamesTotal(r.total);
       setGamesOffset(r.games.length);
     });
+    fetchNewsList().then(r => { if (!r.error) setNews(r.news); });
+    fetchRoadmapItems().then(r => { if (!r.error) setRoadmapItems(r.items); });
   };
 
   const handleLoadMoreGames = async () => {
@@ -174,6 +204,72 @@ function DevDashboard({ currentUser, authLoading }) {
     setFallbackSongs(prev => [...result.songs, ...(prev || [])]);
     setFallbackPlaylistUrl('');
     setFallbackPlaylistStatus({ key: 'dev.fallbackPlaylistImported', params: { added: result.addedCount, skipped: result.skippedCount } });
+  };
+
+  const handleSendNews = async (e) => {
+    e.preventDefault();
+    if (!newsTitle.trim() || !newsBody.trim()) return;
+    setNewsStatus({ key: newsSendEmail ? 'dev.newsSending' : 'dev.saving' });
+    const result = await sendNewsPost(newsTitle.trim(), newsBody.trim(), newsSendEmail);
+    if (result.error) { setNewsStatus({ key: 'dev.newsError' }); return; }
+    setNews(prev => [result.news, ...(prev || [])]);
+    setNewsTitle('');
+    setNewsBody('');
+    setNewsStatus(result.news.recipientCount != null
+      ? { key: 'dev.newsSent', params: { count: result.news.recipientCount } }
+      : { key: 'dev.saved' });
+  };
+
+  const toggleNewsRecipients = (id) => {
+    setExpandedNewsRecipientIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const handleDeleteNews = async (id) => {
+    await deleteNewsPost(id);
+    setNews(prev => prev.filter(n => n.id !== id));
+  };
+
+  const resetRoadmapForm = () => {
+    setEditingItemId(null);
+    setRoadmapTitle('');
+    setRoadmapDescription('');
+    setRoadmapStatus('planned');
+  };
+
+  const handleEditRoadmapItem = (item) => {
+    setEditingItemId(item.id);
+    setRoadmapTitle(item.title);
+    setRoadmapDescription(item.description || '');
+    setRoadmapStatus(item.status);
+  };
+
+  const handleSubmitRoadmapItem = async (e) => {
+    e.preventDefault();
+    if (!roadmapTitle.trim()) return;
+    if (editingItemId) {
+      await updateRoadmapItem(editingItemId, roadmapTitle.trim(), roadmapDescription.trim(), roadmapStatus);
+    } else {
+      await addRoadmapItem(roadmapTitle.trim(), roadmapDescription.trim(), roadmapStatus);
+    }
+    resetRoadmapForm();
+    const r = await fetchRoadmapItems();
+    if (!r.error) setRoadmapItems(r.items);
+  };
+
+  const handleDeleteRoadmapItem = async (id) => {
+    await deleteRoadmapItem(id);
+    if (editingItemId === id) resetRoadmapForm();
+    setRoadmapItems(prev => prev.filter(i => i.id !== id));
+  };
+
+  const handleMoveRoadmapItem = async (id, direction) => {
+    await moveRoadmapItem(id, direction);
+    const r = await fetchRoadmapItems();
+    if (!r.error) setRoadmapItems(r.items);
   };
 
   return (
@@ -464,6 +560,182 @@ function DevDashboard({ currentUser, authLoading }) {
               )}
             </div>
           )}
+        </div>
+
+        <div className="panel panel--purple" style={{ marginBottom: '25px' }}>
+          <div className="panel-title" style={{ color: 'var(--neon-purple)' }}>
+            <Mail size={16} className="icon-inline" />
+            {t('dev.newsTitle')}
+          </div>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '0 0 10px 0' }}>{t('dev.newsHint')}</p>
+          <form onSubmit={handleSendNews} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <input
+              type="text"
+              className="cyber-input"
+              style={{ marginBottom: 0 }}
+              placeholder={t('dev.newsTitlePlaceholder')}
+              value={newsTitle}
+              onChange={(e) => { setNewsTitle(e.target.value); setNewsStatus(null); }}
+            />
+            <textarea
+              className="cyber-input"
+              style={{ marginBottom: 0, minHeight: '100px', resize: 'vertical' }}
+              placeholder={t('dev.newsBodyPlaceholder')}
+              value={newsBody}
+              onChange={(e) => { setNewsBody(e.target.value); setNewsStatus(null); }}
+            />
+            <label className="check-row">
+              <input type="checkbox" checked={newsSendEmail} onChange={(e) => setNewsSendEmail(e.target.checked)} />
+              <span style={{ color: 'white', fontSize: '0.9rem' }}>{t('dev.newsSendEmailLabel')}</span>
+            </label>
+            <button
+              type="submit"
+              className="cyber-button"
+              style={{ width: 'auto', padding: '0 20px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', alignSelf: 'flex-start' }}
+            >
+              <Send size={16} className="icon-inline" />
+              {t(newsSendEmail ? 'dev.newsSendButton' : 'dev.save')}
+            </button>
+          </form>
+          {newsStatus && (
+            <p style={{ color: newsStatus.key === 'dev.newsError' ? 'var(--neon-red)' : 'var(--neon-green)', fontSize: '0.85rem', marginTop: '8px' }}>
+              {t(newsStatus.key, newsStatus.params)}
+            </p>
+          )}
+
+          {news === null && <p style={{ color: 'var(--text-muted)', marginTop: '10px' }}>{t('common.loading')}</p>}
+          {news && news.length === 0 && (
+            <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', marginTop: '10px' }}>{t('dev.newsEmpty')}</p>
+          )}
+          {news && news.length > 0 && (
+            <>
+              <button onClick={() => setNewsListOpen(v => !v)} className="collapse-toggle" style={{ marginTop: '10px' }}>
+                {newsListOpen ? <ChevronUp size={14} className="icon-inline" /> : <ChevronDown size={14} className="icon-inline" />}
+                {t('dev.newsToggle', { count: news.length })}
+              </button>
+              {newsListOpen && (
+                <div className="couple-list" style={{ marginTop: '10px' }}>
+                  {news.map(n => (
+                    <div key={n.id} className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ color: 'white', fontWeight: 600 }}>{n.title}</span>
+                        {n.sentAt ? (
+                          <span className="badge badge--green">{t('dev.newsSentBadge', { count: n.recipientCount })}</span>
+                        ) : (
+                          <span className="badge badge--muted">{t('dev.newsNotSentBadge')}</span>
+                        )}
+                        <button className="icon-btn danger" title={t('admin.remove')} onClick={() => handleDeleteNews(n.id)} style={{ marginLeft: 'auto' }}>
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                      <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '0.85rem', whiteSpace: 'pre-wrap' }}>{n.body}</p>
+                      {n.recipients && n.recipients.length > 0 && (
+                        <>
+                          <button onClick={() => toggleNewsRecipients(n.id)} className="collapse-toggle" style={{ alignSelf: 'flex-start' }}>
+                            {expandedNewsRecipientIds.has(n.id) ? <ChevronUp size={14} className="icon-inline" /> : <ChevronDown size={14} className="icon-inline" />}
+                            {t('dev.newsRecipientsToggle', { count: n.recipients.length })}
+                          </button>
+                          {expandedNewsRecipientIds.has(n.id) && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', paddingLeft: '4px' }}>
+                              {n.recipients.map((r, i) => (
+                                <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.8rem' }}>
+                                  <span style={{ color: r.success ? 'var(--text-muted)' : 'var(--neon-red)' }}>{r.email}</span>
+                                  <span style={{ color: 'var(--text-muted)', opacity: 0.7 }}>{formatFeedbackDate(r.sentAt)}</span>
+                                  {!r.success && <span className="badge badge--muted" style={{ color: 'var(--neon-red)' }}>{t('dev.newsRecipientFailed')}</span>}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+
+        <div className="panel panel--purple" style={{ marginBottom: '25px' }}>
+          <div className="panel-title" style={{ color: 'var(--neon-purple)' }}>
+            <Map size={16} className="icon-inline" />
+            {t('dev.roadmapTitle')}
+          </div>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '0 0 10px 0' }}>{t('dev.roadmapHint')}</p>
+          <form onSubmit={handleSubmitRoadmapItem} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <input
+              type="text"
+              className="cyber-input"
+              style={{ marginBottom: 0 }}
+              placeholder={t('dev.roadmapItemTitlePlaceholder')}
+              value={roadmapTitle}
+              onChange={(e) => setRoadmapTitle(e.target.value)}
+            />
+            <textarea
+              className="cyber-input"
+              style={{ marginBottom: 0, minHeight: '70px', resize: 'vertical' }}
+              placeholder={t('dev.roadmapItemDescriptionPlaceholder')}
+              value={roadmapDescription}
+              onChange={(e) => setRoadmapDescription(e.target.value)}
+            />
+            <select className="cyber-input" style={{ marginBottom: 0 }} value={roadmapStatus} onChange={(e) => setRoadmapStatus(e.target.value)}>
+              {ROADMAP_STATUSES.map(s => <option key={s} value={s}>{t(roadmapStatusLabelKey(s))}</option>)}
+            </select>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <button type="submit" className="cyber-button" style={{ width: 'auto', padding: '0 20px' }}>
+                {t(editingItemId ? 'dev.roadmapSaveButton' : 'dev.roadmapAddButton')}
+              </button>
+              {editingItemId && (
+                <button
+                  type="button"
+                  className="cyber-button"
+                  style={{ width: 'auto', padding: '0 20px', background: 'transparent', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}
+                  onClick={resetRoadmapForm}
+                >
+                  <X size={14} className="icon-inline" />
+                  {t('common.cancel')}
+                </button>
+              )}
+            </div>
+          </form>
+
+          {roadmapItems === null && <p style={{ color: 'var(--text-muted)', marginTop: '10px' }}>{t('common.loading')}</p>}
+          {roadmapItems && roadmapItems.length === 0 && (
+            <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', marginTop: '10px' }}>{t('dev.roadmapEmpty')}</p>
+          )}
+          {ROADMAP_STATUSES.map(status => {
+            const items = (roadmapItems || []).filter(i => i.status === status);
+            if (items.length === 0) return null;
+            return (
+              <div key={status} style={{ marginTop: '15px' }}>
+                <h4 style={{ color: 'var(--text-muted)', marginBottom: '8px' }}>{t(roadmapStatusLabelKey(status))}</h4>
+                <div className="couple-list">
+                  {items.map((item, idx) => (
+                    <div key={item.id} className="list-item" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                        <span style={{ color: 'white', fontWeight: 600, flex: 1, minWidth: 0 }}>{item.title}</span>
+                        <button className="icon-btn" title={t('dev.roadmapMoveUp')} disabled={idx === 0} onClick={() => handleMoveRoadmapItem(item.id, 'up')}>
+                          <ArrowUp size={15} />
+                        </button>
+                        <button className="icon-btn" title={t('dev.roadmapMoveDown')} disabled={idx === items.length - 1} onClick={() => handleMoveRoadmapItem(item.id, 'down')}>
+                          <ArrowDown size={15} />
+                        </button>
+                        <button className="icon-btn" title={t('dev.roadmapEdit')} onClick={() => handleEditRoadmapItem(item)}>
+                          <Pencil size={15} />
+                        </button>
+                        <button className="icon-btn danger" title={t('admin.remove')} onClick={() => handleDeleteRoadmapItem(item.id)}>
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
+                      {item.description && (
+                        <p style={{ color: 'var(--text-muted)', margin: 0, fontSize: '0.85rem', whiteSpace: 'pre-wrap' }}>{item.description}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
         </div>
 
         <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '10px' }}>

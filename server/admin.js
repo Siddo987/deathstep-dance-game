@@ -4,6 +4,11 @@ import { getUserIdFromRequest } from './authToken.js';
 import gameStore from './gameStore.js';
 import { fetchSpotifyOEmbed, SPOTIFY_TRACK_URL_RE, SPOTIFY_PLAYLIST_URL_RE } from './playlists.js';
 import { getValidAccessToken, fetchPlaylistTracksWithToken, asyncRoute } from './spotify.js';
+import { sendMail } from './mailer.js';
+
+function escapeHtml(str) {
+  return String(str ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
 
 // Deliberately answers 404 (not 401/403) to anyone who isn't listed in
 // admin_users (see server/db.js) - this endpoint is only ever called from a
@@ -371,6 +376,197 @@ router.get('/games/:id', asyncRoute(async (req, res) => {
       })),
     },
   });
+}));
+
+// News posts (see server/db.js's news_posts) - written and optionally
+// emailed from here; no public listing route, this is a one-way
+// announcement, not a changelog visitors browse (that's /roadmap below).
+// Wrapped in asyncRoute (like /games and /roadmap-items below) now that this
+// runs two sequential queries instead of one - an unhandled rejection from
+// either would otherwise crash the whole process (Express 4 doesn't catch
+// async route errors on its own, and there's no process-level
+// unhandledRejection handler), same crash class as the 2026-08-09 incident
+// even though this specific route is superadmin-gated.
+router.get('/news', asyncRoute(async (req, res) => {
+  const [rows] = await req.db.query(
+    'SELECT id, title, body, sent_at, recipient_count, created_at FROM news_posts ORDER BY created_at DESC LIMIT 100'
+  );
+  // Recipients are fetched in one extra query and grouped in JS rather than
+  // joined - a JOIN would repeat title/body once per recipient row, and at
+  // this deployment's scale (small friend group, a handful of posts) that's
+  // not worth the extra parsing complexity over just two queries.
+  const postIds = rows.map(r => r.id);
+  const recipientsByPost = new Map();
+  if (postIds.length > 0) {
+    const [recipientRows] = await req.db.query(
+      'SELECT news_post_id, email, success, sent_at FROM news_recipients WHERE news_post_id IN (?) ORDER BY sent_at ASC',
+      [postIds]
+    );
+    for (const r of recipientRows) {
+      if (!recipientsByPost.has(r.news_post_id)) recipientsByPost.set(r.news_post_id, []);
+      recipientsByPost.get(r.news_post_id).push({ email: r.email, success: !!r.success, sentAt: r.sent_at });
+    }
+  }
+  res.json({
+    news: rows.map(r => ({
+      id: r.id,
+      title: r.title,
+      body: r.body,
+      sentAt: r.sent_at,
+      recipientCount: r.recipient_count,
+      createdAt: r.created_at,
+      recipients: recipientsByPost.get(r.id) || [],
+    })),
+  });
+}));
+
+// sendEmail is opt-in per post - a dev can also just save an entry for the
+// record without mailing anyone. Sent to every account with an email on
+// file, sequentially (this is a small friend-group deployment, not a mailing
+// list at any scale where that would matter) - one failed address (bounced,
+// typo'd during registration, whatever) must not stop the rest from going
+// out, so failures are only reflected in recipientCount coming back lower
+// than the total user count, never thrown.
+router.post('/news', asyncRoute(async (req, res) => {
+  const title = (req.body?.title || '').trim();
+  const body = (req.body?.body || '').trim();
+  const sendEmail = !!req.body?.sendEmail;
+  if (!title || !body) return res.status(400).json({ error: 'missing_fields' });
+
+  let sentAt = null;
+  let recipientCount = null;
+  const recipients = [];
+  if (sendEmail) {
+    const [users] = await req.db.query('SELECT email FROM users WHERE email IS NOT NULL');
+    recipientCount = 0;
+    const html = `
+      <div style="font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 480px; margin: 0 auto; color: #111;">
+        <h2 style="margin-bottom: 8px;">${escapeHtml(title)}</h2>
+        <p style="white-space: pre-wrap;">${escapeHtml(body)}</p>
+      </div>
+    `;
+    for (const u of users) {
+      const ok = await sendMail({ to: u.email, subject: title, text: body, html });
+      if (ok) recipientCount++;
+      recipients.push({ email: u.email, success: ok, sentAt: new Date() });
+    }
+    sentAt = new Date();
+  }
+
+  const [result] = await req.db.query(
+    'INSERT INTO news_posts (title, body, sent_at, recipient_count) VALUES (?, ?, ?, ?)',
+    [title, body, sentAt, recipientCount]
+  );
+  // Per-recipient log for later review (see server/db.js's news_recipients) -
+  // written even for failed sends so a bounced/typo'd address stays visible
+  // instead of just quietly missing from recipientCount.
+  if (recipients.length > 0) {
+    await req.db.query(
+      'INSERT INTO news_recipients (news_post_id, email, success, sent_at) VALUES ?',
+      [recipients.map(r => [result.insertId, r.email, r.success, r.sentAt])]
+    );
+  }
+  res.json({ news: { id: result.insertId, title, body, sentAt, recipientCount, createdAt: new Date(), recipients } });
+}));
+
+router.delete('/news/:id', asyncRoute(async (req, res) => {
+  // Also clears this post's news_recipients rows (see server/db.js's table
+  // comment) - there's no FK/cascade, so without this the recipient log
+  // would just orphan silently: no route ever queries news_recipients
+  // independent of news_posts, so those rows would become permanently
+  // invisible dead data instead of any kind of surviving history.
+  await req.db.query('DELETE FROM news_recipients WHERE news_post_id = ?', [req.params.id]);
+  await req.db.query('DELETE FROM news_posts WHERE id = ?', [req.params.id]);
+  res.json({ success: true });
+}));
+
+// Roadmap items (see server/db.js's roadmap_items) - the dev-panel editor
+// behind this admin_users gate; the public-facing read is the unauthenticated
+// GET /api/roadmap in server/index.js.
+router.get('/roadmap-items', async (req, res) => {
+  const [rows] = await req.db.query('SELECT id, title, description, status, sort_order FROM roadmap_items ORDER BY status, sort_order');
+  res.json({ items: rows.map(r => ({ id: r.id, title: r.title, description: r.description, status: r.status, sortOrder: r.sort_order })) });
+});
+
+const ROADMAP_STATUSES = ['planned', 'in_progress', 'done'];
+
+// Wrapped in asyncRoute (see the /news comment above) - both routes below
+// run 2-3 sequential queries, more failure surface than a single-query
+// route, so an unhandled rejection here would otherwise crash the process.
+router.post('/roadmap-items', asyncRoute(async (req, res) => {
+  const title = (req.body?.title || '').trim();
+  const description = (req.body?.description || '').trim() || null;
+  const status = ROADMAP_STATUSES.includes(req.body?.status) ? req.body.status : 'planned';
+  if (!title) return res.status(400).json({ error: 'missing_title' });
+
+  const [[{ maxOrder }]] = await req.db.query(
+    'SELECT COALESCE(MAX(sort_order), -1) AS maxOrder FROM roadmap_items WHERE status = ?',
+    [status]
+  );
+  const sortOrder = maxOrder + 1;
+  const [result] = await req.db.query(
+    'INSERT INTO roadmap_items (title, description, status, sort_order) VALUES (?, ?, ?, ?)',
+    [title, description, status, sortOrder]
+  );
+  res.json({ item: { id: result.insertId, title, description, status, sortOrder } });
+}));
+
+router.put('/roadmap-items/:id', asyncRoute(async (req, res) => {
+  const title = (req.body?.title || '').trim();
+  const description = (req.body?.description || '').trim() || null;
+  const status = ROADMAP_STATUSES.includes(req.body?.status) ? req.body.status : null;
+  if (!title || !status) return res.status(400).json({ error: 'missing_fields' });
+
+  const [[existing]] = await req.db.query('SELECT status FROM roadmap_items WHERE id = ?', [req.params.id]);
+  if (!existing) return res.status(404).json({ error: 'not_found' });
+
+  // Moving to a different status column drops it to the end of the new one
+  // (a dev can then use the move buttons to place it precisely) rather than
+  // trying to preserve a sort_order that was only ever meaningful within its
+  // old column.
+  let sortOrder;
+  if (existing.status !== status) {
+    const [[{ maxOrder }]] = await req.db.query(
+      'SELECT COALESCE(MAX(sort_order), -1) AS maxOrder FROM roadmap_items WHERE status = ?',
+      [status]
+    );
+    sortOrder = maxOrder + 1;
+  }
+  if (sortOrder === undefined) {
+    await req.db.query('UPDATE roadmap_items SET title = ?, description = ?, status = ? WHERE id = ?', [title, description, status, req.params.id]);
+  } else {
+    await req.db.query('UPDATE roadmap_items SET title = ?, description = ?, status = ?, sort_order = ? WHERE id = ?', [title, description, status, sortOrder, req.params.id]);
+  }
+  res.json({ success: true });
+}));
+
+router.delete('/roadmap-items/:id', async (req, res) => {
+  await req.db.query('DELETE FROM roadmap_items WHERE id = ?', [req.params.id]);
+  res.json({ success: true });
+});
+
+// Swaps this item's sort_order with its immediate neighbor within the same
+// status column (direction: 'up' or 'down') - the only reordering operation
+// the dev-panel needs, so a full drag-and-drop reorder endpoint would be
+// more machinery than the actual use case (a handful of items per column).
+router.post('/roadmap-items/:id/move', asyncRoute(async (req, res) => {
+  const direction = req.body?.direction;
+  if (direction !== 'up' && direction !== 'down') return res.status(400).json({ error: 'invalid_direction' });
+
+  const [[item]] = await req.db.query('SELECT id, status, sort_order FROM roadmap_items WHERE id = ?', [req.params.id]);
+  if (!item) return res.status(404).json({ error: 'not_found' });
+
+  const [[neighbor]] = await req.db.query(
+    direction === 'up'
+      ? 'SELECT id, sort_order FROM roadmap_items WHERE status = ? AND sort_order < ? ORDER BY sort_order DESC LIMIT 1'
+      : 'SELECT id, sort_order FROM roadmap_items WHERE status = ? AND sort_order > ? ORDER BY sort_order ASC LIMIT 1',
+    [item.status, item.sort_order]
+  );
+  if (!neighbor) return res.json({ success: true }); // already at the edge, nothing to swap
+
+  await req.db.query('UPDATE roadmap_items SET sort_order = ? WHERE id = ?', [neighbor.sort_order, item.id]);
+  await req.db.query('UPDATE roadmap_items SET sort_order = ? WHERE id = ?', [item.sort_order, neighbor.id]);
+  res.json({ success: true });
 }));
 
 export default router;

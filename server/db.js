@@ -362,6 +362,93 @@ async function migrate(activePool) {
       added_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+  // News posts written from the hidden Dev Dashboard (see server/admin.js) -
+  // optionally emailed out to every registered account with an email on file
+  // at write time. sent_at/recipient_count stay NULL for a post saved
+  // without emailing anyone; once set they're a permanent record of what
+  // actually went out, not recomputed later even if the user list changes.
+  // No public listing route - this is a one-way announcement channel, not a
+  // changelog visitors browse (that's what roadmap_items below is for).
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS news_posts (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      title VARCHAR(200) NOT NULL,
+      body TEXT NOT NULL,
+      sent_at DATETIME NULL,
+      recipient_count INT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Per-recipient send log for the news post above - lets a dev look back
+  // later at exactly who a given announcement went to and when (the post's
+  // own recipient_count is just a total, this is the actual list). One row
+  // per address attempted; success reflects sendMail()'s own result so a
+  // bounce/typo'd address is visible here instead of silently vanishing into
+  // the aggregate count. No FK: deleting a news_posts row (see the
+  // /news/:id DELETE route) explicitly deletes its news_recipients rows too
+  // in application code instead - nothing ever queries this table
+  // independent of news_posts, so leaving them behind would just orphan
+  // them as permanently invisible dead rows, not any kind of surviving
+  // history.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS news_recipients (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      news_post_id INT NOT NULL,
+      email VARCHAR(255) NOT NULL,
+      success TINYINT(1) NOT NULL DEFAULT 0,
+      sent_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_news_recipients_post (news_post_id)
+    )
+  `);
+
+  // Public roadmap (see the /roadmap page and its dev-panel editor in
+  // DevDashboard.jsx). status drives which of the three columns an item
+  // renders under; sort_order is a plain integer position within its own
+  // status column (0-based, reassigned in bulk by the dev-panel's move-up/
+  // move-down buttons - see the /roadmap-items/:id/move route) rather than
+  // needing gaps or fractional inserts.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS roadmap_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      title VARCHAR(200) NOT NULL,
+      description TEXT NULL,
+      status ENUM('planned','in_progress','done') NOT NULL DEFAULT 'planned',
+      sort_order INT NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )
+  `);
+
+  // One-time seed of everything already shipped before the roadmap page
+  // existed to record it, so /roadmap isn't empty-looking on first deploy.
+  // Guarded on the table being completely empty, not on some separate
+  // "already seeded" flag - if a dev clears every item out via the editor
+  // later, that's a deliberate reset, not a signal to seed again.
+  const [[{ roadmapCount }]] = await activePool.query('SELECT COUNT(*) AS roadmapCount FROM roadmap_items');
+  if (roadmapCount === 0) {
+    const seedItems = [
+      ['News & Roadmap', 'Der Dev-Bereich kann jetzt Neuigkeiten per E-Mail verschicken, und diese Seite hier zeigt, woran gearbeitet wurde und wird.'],
+      ['Faire Songlängen im Max-Kills-Modus', 'Zu kurze Songs benachteiligen kein Paar mehr - sie werden im Max-Kills-Modus gar nicht erst zur Auswahl angeboten.'],
+      ['Mehrere Spezialrollen gleichzeitig', 'Die Anzahl jeder Spezialrolle (Wächter, Seher, Berührer, Märtyrer, Rätsel) lässt sich jetzt einzeln einstellen, statt nur an/aus.'],
+      ['Sprachumschalter im Spiel', 'Deathstep ist jetzt auf Deutsch, Englisch, Russisch, Ukrainisch, Niederländisch und Französisch spielbar - umschaltbar direkt während des Spiels.'],
+      ['Achievements', 'Für besondere Leistungen (z. B. viele Siege, viele gehostete Spiele) gibt es jetzt Bronze-, Silber- und Gold-Erfolge auf der eigenen Profilseite.'],
+      ['Chaos- und Max-Kills-Modus', 'Zwei neue Spielmodi neben dem Standard-Modus: Chaos verteilt Rollen jede Runde neu, Max Kills ist ein rundenbasiertes Killer-Turnier.'],
+      ['Spezialrollen', 'Fünf neue Rollen mit eigenen Fähigkeiten (Wächter, Seher, Berührer, Märtyrer, Rätsel) bringen mehr Abwechslung ins Standard-Spiel.'],
+      ['Mehrere Spielleiter gleichzeitig', 'Ein Raum kann jetzt von mehreren Personen gemeinsam geleitet werden, inklusive Übergabe der Leitung.'],
+      ['Passwort vergessen & optionale E-Mail', 'Registrierung braucht nur noch einen Benutzernamen, die E-Mail-Adresse ist optional - wer eine hinterlegt, kann sein Passwort selbst zurücksetzen.'],
+      ['Songvorschläge & Playlist-Freigabe', 'Spieler können während des Spiels Songs vorschlagen, und Spielleiter können ihre Spotify-Playlist mit anderen teilen.'],
+      ['Bestenliste & Statistiken', 'Vergangene Spiele fließen jetzt in eine Bestenliste und persönliche Statistiken ein.'],
+      ['Feedback direkt im Spiel', 'Über einen Feedback-Knopf können Fehler und Wünsche jederzeit direkt aus der App heraus gemeldet werden.'],
+      ['Stabilere Verbindung', 'Wer die Verbindung verliert (z. B. schwaches WLAN), kann jetzt zuverlässig wieder ins laufende Spiel zurückfinden.'],
+      ['Schnellere Ladezeiten', 'Die App lädt beim Start jetzt deutlich schneller, da nur noch der gerade benötigte Teil nachgeladen wird.'],
+    ];
+    await activePool.query(
+      'INSERT INTO roadmap_items (title, description, status, sort_order) VALUES ?',
+      [seedItems.map(([title, description], i) => [title, description, 'done', i])]
+    );
+  }
+
   // Lifetime per-account achievement counters (see server/achievements.js) -
   // one row per (user, achievement type) ever earned, bumped by exactly 1
   // per concluded game that earned it. count alone derives the bronze/silver/
