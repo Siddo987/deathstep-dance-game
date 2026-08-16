@@ -34,6 +34,36 @@ async function migrate(activePool) {
   // from a since-changed account is harmless: it just never matches anyone's
   // own "how many people I invited" count.
   await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_user_id INT NULL`);
+  // Login handle for password accounts now that email is optional at
+  // registration (see server/auth.js's /register and /login) - stored
+  // lowercase like email, unique, but nullable since every account that
+  // existed before this shipped has none and keeps logging in via email/
+  // Google as before. New password registrations always set one; login
+  // matches on either this or email. Not shown anywhere in the app (the
+  // public-facing name is still display_name) so it never needs to change.
+  await activePool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS username VARCHAR(50) NULL`);
+  await activePool.query(`ALTER TABLE users ADD UNIQUE INDEX IF NOT EXISTS idx_username (username)`);
+  // "Forgot password" tokens (see server/auth.js's /forgot-password and
+  // /reset-password) - only ever issued for an account with an email on
+  // file (there's nowhere to send one otherwise). token_hash stores a SHA-256
+  // digest, never the raw token itself, same reasoning as password_hash -
+  // the raw token only ever exists in the emailed link and the requesting
+  // browser's memory, so a DB read alone can never be used to reset someone's
+  // password. used_at marks a token spent (checked, never deleted, so a
+  // replay attempt is distinguishable from an unknown token in logs); expired/
+  // spent rows are cheap enough to just leave rather than sweeping.
+  await activePool.query(`
+    CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      token_hash VARCHAR(64) NOT NULL,
+      expires_at DATETIME NOT NULL,
+      used_at DATETIME NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      INDEX idx_password_reset_token_hash (token_hash)
+    )
+  `);
   // Account-wide default: when set, a player with their own linked Spotify
   // connection automatically requests to share it into any room they join as
   // a player (still subject to the GM's explicit accept - see

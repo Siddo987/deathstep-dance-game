@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, LogIn, UserPlus } from 'lucide-react';
+import { X, LogIn, UserPlus, KeyRound } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
-import { login, register, loginWithGoogle } from '../auth.js';
+import { login, register, loginWithGoogle, forgotPassword } from '../auth.js';
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID;
 const GOOGLE_SCRIPT_SRC = 'https://accounts.google.com/gsi/client';
@@ -60,10 +60,14 @@ function GoogleButton({ onCredential }) {
 
 export function AuthModal({ isOpen, onClose, onAuthenticated }) {
   const { t } = useLanguage();
-  const [mode, setMode] = useState('login'); // 'login' | 'register'
-  const [email, setEmail] = useState('');
+  const [mode, setMode] = useState('login'); // 'login' | 'register' | 'forgot'
+  const [identifier, setIdentifier] = useState(''); // login: email or username
+  const [email, setEmail] = useState(''); // register: optional
+  const [username, setUsername] = useState(''); // register: required login handle
   const [password, setPassword] = useState('');
   const [displayName, setDisplayName] = useState('');
+  const [forgotIdentifier, setForgotIdentifier] = useState('');
+  const [forgotSent, setForgotSent] = useState(false);
   const [errorKey, setErrorKey] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
@@ -78,9 +82,13 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }) {
   if (!isOpen) return null;
 
   const resetAndClose = () => {
+    setIdentifier('');
     setEmail('');
+    setUsername('');
     setPassword('');
     setDisplayName('');
+    setForgotIdentifier('');
+    setForgotSent(false);
     setErrorKey('');
     setMode('login');
     setIsSubmitting(false);
@@ -103,14 +111,32 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }) {
     setIsSubmitting(true);
     try {
       const result = mode === 'login'
-        ? await login(email, password)
-        : await register(email, password, displayName, localStorage.getItem('deathstep_ref_code'));
+        ? await login(identifier, password)
+        : await register(email, username, password, displayName, localStorage.getItem('deathstep_ref_code'));
       if (!result.error) localStorage.removeItem('deathstep_ref_code');
       handleResult(result);
     } catch (err) {
       setErrorKey('auth.error.unknown_error');
       setIsSubmitting(false);
     }
+  };
+
+  // Always resolves to success - the server deliberately never reveals
+  // whether forgotIdentifier matched an account (see server/auth.js's
+  // /forgot-password), so this only ever shows the same generic
+  // "check your inbox" state, never an error tied to a specific account.
+  const handleForgotSubmit = async (e) => {
+    e.preventDefault();
+    setErrorKey('');
+    setIsSubmitting(true);
+    try {
+      await forgotPassword(forgotIdentifier);
+    } catch (err) {
+      // Even a network hiccup shouldn't leak anything - just show the same
+      // generic confirmation as a real success.
+    }
+    setIsSubmitting(false);
+    setForgotSent(true);
   };
 
   const handleGoogleCredential = async (credential) => {
@@ -139,68 +165,138 @@ export function AuthModal({ isOpen, onClose, onAuthenticated }) {
         </button>
 
         <h3 style={{ color: 'var(--neon-blue)', marginBottom: '20px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
-          {mode === 'login' ? <LogIn size={22} /> : <UserPlus size={22} />}
-          {mode === 'login' ? t('auth.loginTitle') : t('auth.registerTitle')}
+          {mode === 'login' && <LogIn size={22} />}
+          {mode === 'register' && <UserPlus size={22} />}
+          {mode === 'forgot' && <KeyRound size={22} />}
+          {mode === 'login' && t('auth.loginTitle')}
+          {mode === 'register' && t('auth.registerTitle')}
+          {mode === 'forgot' && t('auth.forgotPasswordTitle')}
         </h3>
 
-        <div style={{ position: 'relative' }}>
-          <GoogleButton onCredential={handleGoogleCredential} />
-          {isGoogleSubmitting && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)', borderRadius: '4px' }}>
-              <span style={{ color: 'var(--text-main)', fontSize: '0.85rem' }}>{t('auth.processing')}</span>
+        {mode !== 'forgot' && (
+          <>
+            <div style={{ position: 'relative' }}>
+              <GoogleButton onCredential={handleGoogleCredential} />
+              {isGoogleSubmitting && (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.55)', borderRadius: '4px' }}>
+                  <span style={{ color: 'var(--text-main)', fontSize: '0.85rem' }}>{t('auth.processing')}</span>
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <div style={{ margin: '15px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '0.85rem' }}>
-          <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
-          {t('home.or')}
-          <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
-        </div>
+            <div style={{ margin: '15px 0', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '12px', fontSize: '0.85rem' }}>
+              <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
+              {t('home.or')}
+              <span style={{ flex: 1, height: '1px', background: 'rgba(136,146,176,0.25)' }} />
+            </div>
+          </>
+        )}
 
-        <form onSubmit={handleSubmit}>
-          <input
-            type="email"
-            className="cyber-input"
-            placeholder={t('auth.emailPlaceholder')}
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-          />
-          {mode === 'register' && (
+        {mode === 'forgot' ? (
+          forgotSent ? (
+            <p style={{ color: 'var(--neon-green)', fontSize: '0.9rem', textAlign: 'center' }}>{t('auth.forgotPasswordSent')}</p>
+          ) : (
+            <form onSubmit={handleForgotSubmit}>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '10px' }}>{t('auth.forgotPasswordHint')}</p>
+              <input
+                type="text"
+                className="cyber-input"
+                placeholder={t('auth.identifierPlaceholder')}
+                value={forgotIdentifier}
+                onChange={(e) => setForgotIdentifier(e.target.value)}
+                required
+              />
+
+              {errorKey && (
+                <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', marginTop: '5px' }}>{t(errorKey)}</p>
+              )}
+
+              <button type="submit" className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '15px' }} disabled={isSubmitting}>
+                {t('auth.forgotPasswordSubmit')}
+              </button>
+            </form>
+          )
+        ) : (
+          <form onSubmit={handleSubmit}>
+            {mode === 'login' ? (
+              <input
+                type="text"
+                className="cyber-input"
+                placeholder={t('auth.identifierPlaceholder')}
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                required
+              />
+            ) : (
+              <>
+                <input
+                  type="text"
+                  className="cyber-input"
+                  placeholder={t('auth.usernamePlaceholder')}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  minLength={3}
+                  maxLength={30}
+                  required
+                />
+                <input
+                  type="email"
+                  className="cyber-input"
+                  placeholder={t('auth.emailOptionalPlaceholder')}
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+                <input
+                  type="text"
+                  className="cyber-input"
+                  placeholder={t('auth.displayNamePlaceholder')}
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  required
+                />
+              </>
+            )}
             <input
-              type="text"
+              type="password"
               className="cyber-input"
-              placeholder={t('auth.displayNamePlaceholder')}
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder={t('auth.passwordPlaceholder')}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              minLength={8}
               required
             />
-          )}
-          <input
-            type="password"
-            className="cyber-input"
-            placeholder={t('auth.passwordPlaceholder')}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            minLength={8}
-            required
-          />
 
-          {errorKey && (
-            <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', marginTop: '5px' }}>{t(errorKey)}</p>
-          )}
+            {mode === 'login' && (
+              <button
+                type="button"
+                onClick={() => { setMode('forgot'); setErrorKey(''); }}
+                style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', textDecoration: 'underline', cursor: 'pointer', marginTop: '8px', fontSize: '0.8rem', padding: 0 }}
+              >
+                {t('auth.forgotPasswordLink')}
+              </button>
+            )}
 
-          <button type="submit" className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '15px' }} disabled={isSubmitting}>
-            {mode === 'login' ? t('auth.loginSubmit') : t('auth.registerSubmit')}
-          </button>
-        </form>
+            {errorKey && (
+              <p style={{ color: 'var(--neon-red)', fontSize: '0.85rem', marginTop: '5px' }}>{t(errorKey)}</p>
+            )}
+
+            <button type="submit" className="cyber-button pulse-animation" style={{ width: '100%', marginTop: '15px' }} disabled={isSubmitting}>
+              {mode === 'login' ? t('auth.loginSubmit') : t('auth.registerSubmit')}
+            </button>
+          </form>
+        )}
 
         <button
-          onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setErrorKey(''); }}
+          onClick={() => {
+            setErrorKey('');
+            setForgotSent(false);
+            setMode(mode === 'register' ? 'login' : (mode === 'forgot' ? 'login' : 'register'));
+          }}
           style={{ background: 'transparent', border: 'none', color: 'var(--text-muted)', textDecoration: 'underline', cursor: 'pointer', marginTop: '15px', width: '100%', fontSize: '0.85rem' }}
         >
-          {mode === 'login' ? t('auth.switchToRegister') : t('auth.switchToLogin')}
+          {mode === 'login' && t('auth.switchToRegister')}
+          {mode === 'register' && t('auth.switchToLogin')}
+          {mode === 'forgot' && t('auth.backToLogin')}
         </button>
       </div>
     </div>,
