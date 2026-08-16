@@ -1,23 +1,27 @@
 import React, { useEffect, useState } from 'react';
-import { Skull } from 'lucide-react';
+import logo from './logo.png';
 
 // Brief logo/name splash shown once per browser tab - this module only ever
-// mounts once, from main.jsx, and switching between Home/GM/Player views
-// afterwards never remounts it (this app has no client-side router). Purely
-// cosmetic and non-blocking: `pointerEvents: none` + the short timers below
-// mean it never delays the app underneath from loading/rendering, it just
-// visually covers it for a moment.
+// mounts once, from main.jsx, and nothing about router.jsx's client-side
+// navigation (see App.jsx's usePathname) ever remounts it either, since that
+// only swaps which branch renders *inside* the already-mounted App tree.
+// Only an actual full reload (typing/bookmarking a URL, hitting refresh, or
+// the one deliberate window.location.href left in Settings.jsx's account
+// deletion) re-runs this module at all. Purely cosmetic and non-blocking:
+// `pointerEvents: none` + the short timers below mean it never delays the
+// app underneath from loading/rendering, it just visually covers it for a
+// moment.
 //
 // "Once per tab" == sessionStorage. Two throttling schemes were tried and
 // both turned out wrong for this app specifically, in opposite directions:
 //
 // - v1 (localStorage timestamp, 2h cooldown): meant to allow re-showing
 //   after real time had passed, but every one of this site's "other pages"
-//   (Settings/Datenschutz/Feedback/etc. - see App.jsx's pathname checks) is a
-//   plain <a href> to a different path, i.e. a genuine full page reload, not
-//   client-side routing. Reported as "wird nie angezeigt": anyone clicking
-//   between pages, or just reloading, more than once in 2h - which in
-//   practice is everyone - landed inside the cooldown almost every time.
+//   (Settings/Datenschutz/Feedback/etc.) was, at the time, a plain <a href>
+//   to a different path - a genuine full page reload, before router.jsx
+//   existed. Reported as "wird nie angezeigt": anyone clicking between
+//   pages, or just reloading, more than once in 2h - which in practice is
+//   everyone - landed inside the cooldown almost every time.
 // - v2 (no storage at all, unconditional): fixed that, but then showed on
 //   *every single* page load again, including the exact same-tab page-to-
 //   page navigations above and plain refreshes - reported as "wird jetzt
@@ -97,7 +101,13 @@ function Splash() {
         pointerEvents: 'none',
       }}
     >
-      <Skull size={60} style={{ color: 'var(--neon-purple)', filter: 'drop-shadow(0 0 14px var(--neon-purple))' }} />
+      <img
+        src={logo}
+        alt=""
+        width={96}
+        height={100}
+        style={{ filter: 'drop-shadow(0 0 14px var(--neon-purple))' }}
+      />
       <h1 className="glitch-text" style={{ fontSize: '2rem', margin: 0, color: 'var(--text-main)' }}>Deathstep</h1>
     </div>
   );
