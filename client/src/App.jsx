@@ -6,6 +6,7 @@ import { AlertModal, ConfirmModal } from './components/Modal.jsx';
 import { AuthModal } from './components/Auth.jsx';
 import { fetchMe, logout as logoutRequest } from './auth.js';
 import { useLanguage } from './i18n.jsx';
+import { usePathname, navigate } from './router.jsx';
 
 // A dynamic import() rejects if the chunk fails to load - by far the most
 // common real-world cause is a tab that's been open since before the last
@@ -94,6 +95,25 @@ let handledOAuthCode = null;
 
 function App() {
   const { t } = useLanguage();
+  // The 11 flat standalone pages below (/feedback, /settings, /stats, ...)
+  // branch on this instead of reading window.location.pathname directly, so
+  // that navigate()ing between them (see router.jsx) actually re-renders
+  // this component into the new branch instead of just silently changing the
+  // URL underneath a still-mounted old page. The main '/'-vs-'/game' view
+  // switch further down deliberately doesn't use this (see its own comment) -
+  // it's a one-way mirror of internal state into the URL, never the other
+  // direction, so it has no need to react to pathname changes itself.
+  //
+  // Each of those 11 branches' root <div key={pathname}> matters, not just
+  // decoration: every branch renders the exact same tag/className at the
+  // exact same position in the tree, so without a key that changes per route,
+  // React would read a Settings->Stats navigation as "the same DOM node, new
+  // children" and patch in place - leaving it mounted the whole time instead
+  // of unmounting/remounting it. That would silently kill two things: the
+  // .phase-enter fade/slide-in animation (a CSS animation only plays on
+  // insertion, not on an already-mounted node's children changing) and each
+  // page's own component-local state actually resetting between visits.
+  const pathname = usePathname();
   const [alertMessage, setAlertMessage] = useState(null); // { key, params, success }
   // Only trust a restored 'gm'/'player' view if there's actually a room id to
   // reconnect to - without this check, a browser whose deathstep_view was
@@ -116,8 +136,12 @@ function App() {
   // land on the start screen; only "/game" (or explicitly rejoining via the
   // start screen's "Spiel wieder beitreten" button, see hasActiveGame below)
   // shows the dashboard. Read once at mount, same pattern as `view` above -
-  // nothing here ever listens for pathname changes afterwards, this app has
-  // no router and only ever navigates between these two paths itself.
+  // nothing here ever listens for pathname changes afterwards. Deliberately
+  // not wired through router.jsx's usePathname like the 11 standalone pages
+  // below are: this pair is never reached by clicking a Link (nothing ever
+  // links to "/game"), only by the replaceState mirroring effect further
+  // down and by a fresh/bookmarked load, so there's nothing for it to react
+  // to that this initializer doesn't already cover.
   const [inGameView, setInGameView] = useState(() => window.location.pathname === '/game');
   const [room, setRoom] = useState(null);
   const [playerRole, setPlayerRole] = useState(null);
@@ -528,9 +552,9 @@ function App() {
   const hasActiveGame = (view === 'gm' || view === 'player') && !!room;
   const showGameScreen = inGameView && hasActiveGame;
 
-  if (window.location.pathname === '/feedback') {
+  if (pathname === '/feedback') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -540,9 +564,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/datenschutz') {
+  if (pathname === '/datenschutz') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -552,9 +576,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/impressum') {
+  if (pathname === '/impressum') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -564,9 +588,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/stats') {
+  if (pathname === '/stats') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -579,9 +603,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/dev') {
+  if (pathname === '/dev') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -593,9 +617,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/settings') {
+  if (pathname === '/settings') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -608,9 +632,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/reset-password') {
+  if (pathname === '/reset-password') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -622,9 +646,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/leaderboard') {
+  if (pathname === '/leaderboard') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -637,9 +661,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/playlists') {
+  if (pathname === '/playlists') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -652,9 +676,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/roadmap') {
+  if (pathname === '/roadmap') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>
@@ -664,9 +688,9 @@ function App() {
     );
   }
 
-  if (window.location.pathname === '/achievements') {
+  if (pathname === '/achievements') {
     return (
-      <div className="app-container">
+      <div className="app-container phase-enter" key={pathname}>
         <div className="header">
           <h1 className="glitch-text">Deathstep</h1>
         </div>

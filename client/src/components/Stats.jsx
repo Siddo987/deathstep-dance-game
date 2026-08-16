@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Trophy, Crown, Skull, Sparkles, LogIn, UserPlus, Link2 } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { fetchMyStats } from '../auth.js';
 
 function StatRow({ icon, label, value }) {
@@ -71,7 +72,7 @@ function Stats({ currentUser, authLoading, onLoginClick }) {
             <LogIn size={20} className="icon-inline" />
             {t('auth.loginOrRegister')}
           </button>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     );
@@ -122,7 +123,7 @@ function Stats({ currentUser, authLoading, onLoginClick }) {
         )}
 
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

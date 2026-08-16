@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Map, Clock, Hammer, CheckCircle2 } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { fetchPublicRoadmap } from '../admin.js';
 
 // One column per status, in a fixed display order regardless of what order
@@ -65,7 +66,7 @@ function Roadmap() {
         })}
 
         <div style={{ textAlign: 'center', marginTop: '10px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

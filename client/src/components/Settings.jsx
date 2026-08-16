@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { LogIn, Repeat, Save, Trophy, Music2, Trash2, AlertTriangle } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { updateSettings, deleteAccount } from '../auth.js';
 
 function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
@@ -58,7 +59,7 @@ function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
             <LogIn size={20} className="icon-inline" />
             {t('auth.loginOrRegister')}
           </button>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     );
@@ -251,7 +252,7 @@ function Settings({ currentUser, authLoading, onUserUpdated, onLoginClick }) {
         </div>
 
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

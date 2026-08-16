@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Trophy, Crown, LogIn } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { fetchLeaderboard } from '../auth.js';
 
 const RANK_COLORS = { 1: '#FFD700', 2: '#C0C0C0', 3: '#CD7F32' };
@@ -126,13 +127,13 @@ function Leaderboard({ currentUser, onLoginClick }) {
           {currentUser && !currentUser.leaderboardOptIn && (
             <p style={{ color: 'var(--text-muted)' }}>
               {t('leaderboard.joinPromptLoggedIn')}{' '}
-              <a href="/settings" style={{ color: 'var(--neon-blue)', textDecoration: 'underline' }}>{t('settings.pageLink')}</a>
+              <Link to="/settings" style={{ color: 'var(--neon-blue)', textDecoration: 'underline' }}>{t('settings.pageLink')}</Link>
             </p>
           )}
         </div>
 
         <div style={{ textAlign: 'center', marginTop: '10px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

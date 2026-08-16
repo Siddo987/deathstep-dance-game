@@ -1,5 +1,6 @@
 import React from 'react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 
 function Impressum() {
   const { lang, t } = useLanguage();
@@ -38,7 +39,7 @@ function Impressum() {
         </p>
 
         <div style={{ textAlign: 'center', marginTop: '30px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

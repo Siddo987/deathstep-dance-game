@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { KeyRound } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { resetPassword } from '../auth.js';
 
 // Standalone page for the link emailed by "Passwort vergessen" (see
@@ -84,7 +85,7 @@ function ResetPassword({ onAuthenticated }) {
         )}
 
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

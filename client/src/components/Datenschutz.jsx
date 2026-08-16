@@ -1,6 +1,7 @@
 import React from 'react';
 import { openCookieSettings } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 
 const h3Style = { color: 'var(--text-main)', marginTop: '20px', marginBottom: '10px' };
 const pStyle = { color: 'var(--text-muted)', lineHeight: 1.6 };
@@ -235,7 +236,7 @@ function Datenschutz() {
         {lang === 'de' ? <GermanContent /> : <EnglishContent />}
 
         <div style={{ textAlign: 'center', marginTop: '30px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

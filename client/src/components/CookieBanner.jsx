@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 
 const CONSENT_KEY = 'deathstep_cookie_consent';
 const REOPEN_EVENT = 'deathstep-open-cookie-settings';
@@ -78,7 +79,7 @@ function CookieBanner() {
 
         <p className="cookie-banner-text" style={{ paddingRight: consent && forceOpen ? '26px' : 0 }}>
           {t('cookie.textBefore')}
-          <a href="/datenschutz" style={{ color: 'var(--neon-blue)' }}>{t('cookie.privacyPolicy')}</a>
+          <Link to="/datenschutz" style={{ color: 'var(--neon-blue)' }}>{t('cookie.privacyPolicy')}</Link>
           {t('cookie.textAfter')}
         </p>
 

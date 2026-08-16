@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Trash2, Check, Skull, Music2, Plus, History, ArrowLeft, Users, ExternalLink, MessageSquare, ChevronDown, ChevronUp, Mail, Send, Map, ArrowUp, ArrowDown, Pencil, X } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link, navigate } from '../router.jsx';
 import {
   fetchFeedbackList, markFeedbackRead, deleteFeedbackEntry, fetchDevSettings, updateDevSettings,
   fetchFallbackSongs, addFallbackSong, importFallbackPlaylist, deleteFallbackSong, fetchGamesList, fetchGameDetail,
@@ -128,7 +129,7 @@ function DevDashboard({ currentUser, authLoading }) {
 
   useEffect(() => {
     if (!authLoading && !currentUser?.isSuperAdmin) {
-      window.location.href = '/';
+      navigate('/');
     }
   }, [authLoading, currentUser?.isSuperAdmin]);
 
@@ -788,7 +789,7 @@ function DevDashboard({ currentUser, authLoading }) {
         </div>
 
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

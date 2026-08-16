@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Music2, Plus, Trash2, Download, LogIn, Search, X, Link2, Unlink, RotateCcw, Info } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { loginWithSpotifyForAccountLink } from '../spotify.js';
 import {
   fetchSpotifyStatus, disconnectSpotify, fetchSpotifyPlaylists, searchSpotifyTracks,
@@ -140,7 +141,7 @@ function Playlists({ currentUser, authLoading, onLoginClick }) {
             <LogIn size={20} className="icon-inline" />
             {t('auth.loginOrRegister')}
           </button>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     );
@@ -599,7 +600,7 @@ function Playlists({ currentUser, authLoading, onLoginClick }) {
         )}
 
         <div style={{ textAlign: 'center', marginTop: '25px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     </div>

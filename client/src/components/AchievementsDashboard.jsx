@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Award, Lock, LogIn, Users, X } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
+import { Link } from '../router.jsx';
 import { fetchMyAchievements, fetchAchievementPlayers } from '../achievements.js';
 
 const TIER_COLORS = {
@@ -144,7 +145,7 @@ function AchievementsDashboard({ currentUser, authLoading, onLoginClick }) {
             <LogIn size={20} className="icon-inline" />
             {t('auth.loginOrRegister')}
           </button>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
     );
@@ -168,7 +169,7 @@ function AchievementsDashboard({ currentUser, authLoading, onLoginClick }) {
         )}
 
         <div style={{ textAlign: 'center', marginTop: '20px' }}>
-          <a href="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</a>
+          <Link to="/" style={{ color: 'var(--text-muted)', textDecoration: 'underline' }}>{t('common.backToGame')}</Link>
         </div>
       </div>
 

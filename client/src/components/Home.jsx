@@ -5,6 +5,7 @@ import { fetchMyStats } from '../auth.js';
 import { fetchUnreadFeedbackCount } from '../admin.js';
 import { useLanguage, SUPPORTED_LANGS } from '../i18n.jsx';
 import { HowToPlayModal } from './Modal.jsx';
+import { Link } from '../router.jsx';
 
 // "Wie funktioniert's?" trigger - a plain underlined text link (not a
 // cyber-button) so it reads as secondary to the actual join/create actions,
@@ -131,31 +132,31 @@ function AccountBar({ currentUser, authLoading, onLoginClick, onLogout }) {
 
       {currentUser && (
         <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '6px' }}>
-          <a href="/stats" className="nav-pill">
+          <Link to="/stats" className="nav-pill">
             <BarChart3 size={14} className="icon-inline" />
             {t('stats.pageLink')}
-          </a>
-          <a href="/settings" className="nav-pill">
+          </Link>
+          <Link to="/settings" className="nav-pill">
             <SettingsIcon size={14} className="icon-inline" />
             {t('settings.pageLink')}
-          </a>
-          <a href="/playlists" className="nav-pill">
+          </Link>
+          <Link to="/playlists" className="nav-pill">
             <Music2 size={14} className="icon-inline" />
             {t('playlists.pageLink')}
-          </a>
-          <a href="/achievements" className="nav-pill">
+          </Link>
+          <Link to="/achievements" className="nav-pill">
             <Award size={14} className="icon-inline" />
             {t('achievements.pageLink')}
-          </a>
+          </Link>
           {currentUser.isSuperAdmin && (
-            <a
-              href="/dev"
+            <Link
+              to="/dev"
               className="nav-pill"
               style={unreadFeedback > 0 ? { color: 'var(--neon-red)', borderColor: 'var(--neon-red)', fontWeight: 'bold' } : undefined}
             >
               <Wrench size={14} className="icon-inline" />
               {t('dev.pageLink')}{unreadFeedback > 0 ? ` (${unreadFeedback})` : ''}
-            </a>
+            </Link>
           )}
         </div>
       )}
@@ -242,36 +243,36 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick
         </button>
 
         <div style={{ marginTop: '30px', display: 'flex', flexWrap: 'wrap', gap: '8px 15px', justifyContent: 'center' }}>
-          <a
-            href="/leaderboard"
+          <Link
+            to="/leaderboard"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
             {t('leaderboard.pageLink')}
-          </a>
-          <a
-            href="/roadmap"
+          </Link>
+          <Link
+            to="/roadmap"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
             {t('roadmap.pageLink')}
-          </a>
-          <a
-            href="/feedback"
+          </Link>
+          <Link
+            to="/feedback"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
             {t('home.feedbackLink')}
-          </a>
-          <a
-            href="/datenschutz"
+          </Link>
+          <Link
+            to="/datenschutz"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
             {t('home.privacyLink')}
-          </a>
-          <a
-            href="/impressum"
+          </Link>
+          <Link
+            to="/impressum"
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
             {t('home.imprintLink')}
-          </a>
+          </Link>
           <button
             onClick={openCookieSettings}
             style={{ background: 'transparent', border: 'none', padding: 0, color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', cursor: 'pointer', whiteSpace: 'nowrap' }}
