@@ -721,6 +721,7 @@ export default {
   'gm.gameModeStandardDesc': 'Klassische Regeln - der/die Killer bleiben für das ganze Spiel gleich.',
   'gm.gameModeChaosDesc': 'Jede Runde wird ein neuer Killer bestimmt - niemand kann sich je sicher sein, wer es gerade ist.',
   'gm.gameModeMaxKills': 'Max Kills',
+  'gm.gameModeMaxKillsMinCouples': 'Ab {count} Paaren verfügbar.',
   'gm.gameModeMaxKillsDesc': 'Rundenturnier: jedes Paar ist einmal Killer und versucht, möglichst viele Kills zu sammeln, ohne aufzufliegen. Am Ende gewinnt das Paar mit den meisten Kills.',
   'gm.maxKillsVariant': 'Rundenmodell',
   'gm.maxKillsVariantShortened': 'Verkürzt (Paarzahl − 2)',
@@ -953,6 +954,8 @@ export default {
   'spotify.statusNoDevice': 'Kein aktives Wiedergabegerät gefunden.',
   'spotify.sessionExpired': 'Deine Spotify-Verbindung ist abgelaufen. Bitte verbinde dich erneut mit Spotify.',
   'spotify.reconnectNow': 'Jetzt erneut verbinden',
+  'spotify.notConnectedAlert': 'Spotify ist nicht verbunden. Ohne Verbindung kann keine Musik abgespielt werden.',
+  'spotify.connectNow': 'Jetzt verbinden',
   'spotify.inviteOnlyNotice': 'Die Spotify-Anmeldung ist aktuell nur für Konten möglich, die der Entwickler freigeschaltet hat. Bitte bei Bedarf um Zugriff bitten.',
 
   // Cookie-Banner

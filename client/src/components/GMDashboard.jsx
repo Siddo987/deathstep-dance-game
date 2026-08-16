@@ -283,12 +283,14 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // fallback as totalPairedPlayers above - needed for the Max Kills variant
   // gate below, which cares about couple count, not player headcount.
   const estimatedCoupleCount = room.couples.length > 0 ? room.couples.length : Math.floor(room.players.length / 2);
-  // 'shortened' leaves (couples - 2) never drawn at all (see
-  // buildMaxKillsOrder) - with 3 couples that's a single real round with 2
-  // of the 3 left over, not genuinely ambiguous, and with fewer than that
-  // there's effectively no tournament left. 4 is the first size where two
-  // held-back couples still leave a real multi-round game.
-  const MAX_KILLS_SHORTENED_MIN_COUPLES = 4;
+  // Max Kills mode's own minimum, both variants - below this even
+  // 'doubleTurn' (the variant with no held-back couples at all) is too small
+  // a group for a real multi-round tournament, and 'shortened' on top of
+  // that (see buildMaxKillsOrder's own comment: it leaves couples-2 never
+  // drawn at all) would leave almost nothing. Mirrors server/gameStore.js's
+  // own MAX_KILLS_MIN_COUPLES - authoritative there too, this is just the
+  // matching UI gate.
+  const MAX_KILLS_MIN_COUPLES = 4;
   const suggestedKillerCount = Math.max(1, Math.round(totalPairedPlayers / killerRatioDivisor));
   // Hard rule (also enforced server-side in gameStore.startGame, which is
   // authoritative): killers must stay a strict minority of individual
@@ -404,14 +406,27 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [estimatedCoupleCount, killerCount]);
 
-  // 'shortened' needs at least MAX_KILLS_SHORTENED_MIN_COUPLES couples (see
-  // its own comment) - if the room shrinks below that after the GM already
-  // picked it (players leaving, or the real couple count coming in smaller
-  // than the lobby's plain-pairs estimate), fall back to 'doubleTurn' rather
-  // than let the GM start a game whose "tournament" is one round with the
-  // group instantly able to deduce the last two couples anyway.
+  // Max Kills itself needs at least MAX_KILLS_MIN_COUPLES couples (see its
+  // own comment) - if the room shrinks below that after the GM already chose
+  // the mode (players leaving, or the real couple count coming in smaller
+  // than the lobby's plain-pairs estimate), fall back to Standard entirely
+  // rather than let the GM start a "tournament" too small to be one. Mirrors
+  // the killer-count clamp above: only ever corrects *down* out of a mode
+  // that's become unreachable, never overrides a deliberate choice that's
+  // still valid.
   React.useEffect(() => {
-    if (maxKillsVariant === 'shortened' && estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_SHORTENED_MIN_COUPLES) {
+    if (gameMode === 'maxkills' && estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_MIN_COUPLES) {
+      setGameMode('standard');
+    }
+  }, [estimatedCoupleCount, gameMode]);
+
+  // Sub-case of the above: even once the mode-level gate guarantees at least
+  // MAX_KILLS_MIN_COUPLES couples, 'shortened' specifically still drops 2 of
+  // them from ranking entirely (see buildMaxKillsOrder) - keep this fallback
+  // too as cheap defense-in-depth rather than trusting that invariant to
+  // never change out from under it.
+  React.useEffect(() => {
+    if (maxKillsVariant === 'shortened' && estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_MIN_COUPLES) {
       setMaxKillsVariant('doubleTurn');
     }
   }, [estimatedCoupleCount, maxKillsVariant]);
@@ -833,6 +848,28 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     onAction: handleReconnectSpotify,
   });
 
+  // A GM who bypasses the song-ready lock (see handleBypassSongReady) without
+  // ever having connected Spotify at all still gets a real track queued (the
+  // dev-curated fallback list, fetched with no auth needed) - so the actual
+  // play attempt fails the same way an expired session would
+  // (playTrack/getPlaybackToken resolve no token, same as a dead one), but
+  // "your session expired, reconnect" is a wrong, confusing framing for
+  // someone who was never connected to begin with. handleReconnectSpotify
+  // still does the right thing either way (it's already just "start the
+  // connect flow"), only the copy needs to differ.
+  const notConnectedAlert = () => ({
+    message: t('spotify.notConnectedAlert'),
+    actionLabel: t('spotify.connectNow'),
+    onAction: handleReconnectSpotify,
+  });
+
+  // Whether this room has ever actually established a Spotify connection
+  // (the GM's own, or a lent delegate one) - the one signal that
+  // distinguishes "was connected, now broken" (sessionExpiredAlert - a real
+  // problem to fix) from "never connected in the first place" (a deliberate
+  // or overlooked choice, not a broken connection to "expire").
+  const hasEverConnectedSpotify = !!spotifyToken || !!room.spotifyDelegate;
+
   // Shared failure handling for every playTrack() call below - surfaces the
   // two cases a GM can actually act on (no active playback device; the
   // Spotify session expired and getValidToken() couldn't refresh it) with a
@@ -852,7 +889,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     if (e.message === 'NO_ACTIVE_DEVICE') {
       setPlayerStatus({ key: 'spotify.statusNoDevice', detail: '', isError: true });
     } else if (e.message === 'SPOTIFY_NOT_CONNECTED') {
-      setAlertState(sessionExpiredAlert());
+      setAlertState(hasEverConnectedSpotify ? sessionExpiredAlert() : notConnectedAlert());
     } else {
       console.error(fallbackLog, e);
     }
@@ -3022,11 +3059,22 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               >
                 <option value="standard">{t('gm.gameModeStandard')}</option>
                 <option value="chaos">{t('gm.gameModeChaos')}</option>
-                <option value="maxkills">{t('gm.gameModeMaxKills')}</option>
+                <option
+                  value="maxkills"
+                  disabled={estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_MIN_COUPLES}
+                >
+                  {t('gm.gameModeMaxKills')}
+                </option>
               </select>
               <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
                 {gameMode === 'chaos' ? t('gm.gameModeChaosDesc') : gameMode === 'maxkills' ? t('gm.gameModeMaxKillsDesc') : t('gm.gameModeStandardDesc')}
               </p>
+              {estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_MIN_COUPLES && (
+                <p style={{ color: 'var(--neon-blue)', fontSize: '0.85rem', margin: '6px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Lightbulb size={14} className="icon-inline" />
+                  {t('gm.gameModeMaxKillsMinCouples', { count: MAX_KILLS_MIN_COUPLES })}
+                </p>
+              )}
             </div>
 
             {/* Advanced settings - Kill Mode, Voting Right, and (Standard
@@ -3178,7 +3226,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               <div style={{ marginTop: '18px', paddingTop: '15px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
                 <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.maxKillsVariant')}</label>
                 <select className="cyber-select" value={maxKillsVariant} onChange={(e) => setMaxKillsVariant(e.target.value)} style={{ width: '100%' }}>
-                  <option value="shortened" disabled={estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_SHORTENED_MIN_COUPLES}>
+                  <option value="shortened" disabled={estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_MIN_COUPLES}>
                     {t('gm.maxKillsVariantShortened')}
                   </option>
                   <option value="doubleTurn">{t('gm.maxKillsVariantDoubleTurn')}</option>
@@ -3186,10 +3234,10 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
                   {maxKillsVariant === 'doubleTurn' ? t('gm.maxKillsVariantDoubleTurnDesc') : t('gm.maxKillsVariantShortenedDesc')}
                 </p>
-                {estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_SHORTENED_MIN_COUPLES && (
+                {estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_MIN_COUPLES && (
                   <p style={{ color: 'var(--neon-blue)', fontSize: '0.85rem', margin: '6px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <Lightbulb size={14} className="icon-inline" />
-                    {t('gm.maxKillsVariantShortenedMinCouples', { count: MAX_KILLS_SHORTENED_MIN_COUPLES })}
+                    {t('gm.maxKillsVariantShortenedMinCouples', { count: MAX_KILLS_MIN_COUPLES })}
                   </p>
                 )}
 
@@ -3522,38 +3570,62 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
               {pendingCouples.length === 0 && (
                 <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', textAlign: 'center', padding: '10px 0' }}>{t('gm.noCouplesYet')}</p>
               )}
-              <div className="couple-list">
-                {pendingCouples.map((c, i) => {
+              {(() => {
+                // Split into two groups instead of interleaving them in one
+                // list - a fully-phoneless couple needs the GM to act on its
+                // behalf for the entire game (see isCoupleFullyPhoneless's
+                // every later call site), so it's a fundamentally different
+                // kind of row, not just a couple that happens to be flagged.
+                // Grouped together, they read as their own checklist instead
+                // of being easy to miss scattered between ordinary couples.
+                const withPhoneCouples = [];
+                const phonelessCouples = [];
+                pendingCouples.forEach((c, i) => {
                   const members = c.playerIds.map(id => room.players.find(p => p.id === id)).filter(Boolean);
                   const allNoPhone = members.length > 0 && members.every(p => p.hasNoPhone);
-                  return (
-                    <div key={i} className={`list-item ${allNoPhone ? 'list-item--danger' : 'list-item--active'}`}>
-                      <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', minWidth: 0, flex: 1, gap: '5px' }}>
-                        {members.map((p, idx) => (
-                          <React.Fragment key={p.id}>
-                            {idx > 0 && <span style={{ opacity: 0.5, flexShrink: 0 }}>&amp;</span>}
-                            <span style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
-                              {maskName(p.name)} {p.hasNoPhone && <PhoneOff size={13} className="icon-inline" title={t('gm.noPhoneTitle')} />}
-                            </span>
-                          </React.Fragment>
-                        ))}
-                        {allNoPhone && (
-                          <span style={{ color: 'var(--neon-red)', fontSize: '0.8rem', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            <AlertTriangle size={13} className="icon-inline" /> {t('gm.noPhoneInCouple')}
+                  (allNoPhone ? phonelessCouples : withPhoneCouples).push({ c, i, members, allNoPhone });
+                });
+
+                const renderRow = ({ c, i, members, allNoPhone }) => (
+                  <div key={i} className={`list-item ${allNoPhone ? 'list-item--danger' : 'list-item--active'}`}>
+                    <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', minWidth: 0, flex: 1, gap: '5px' }}>
+                      {members.map((p, idx) => (
+                        <React.Fragment key={p.id}>
+                          {idx > 0 && <span style={{ opacity: 0.5, flexShrink: 0 }}>&amp;</span>}
+                          <span style={{ display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
+                            {maskName(p.name)} {p.hasNoPhone && <PhoneOff size={13} className="icon-inline" title={t('gm.noPhoneTitle')} />}
                           </span>
-                        )}
-                      </div>
-                      <button
-                        onClick={() => handleDissolvePendingCouple(i)}
-                        className="icon-btn"
-                        title={t('gm.dissolveCoupleTitle')}
-                      >
-                        <Scissors size={18} />
-                      </button>
+                        </React.Fragment>
+                      ))}
                     </div>
-                  );
-                })}
-              </div>
+                    <button
+                      onClick={() => handleDissolvePendingCouple(i)}
+                      className="icon-btn"
+                      title={t('gm.dissolveCoupleTitle')}
+                    >
+                      <Scissors size={18} />
+                    </button>
+                  </div>
+                );
+
+                return (
+                  <>
+                    <div className="couple-list">
+                      {withPhoneCouples.map(renderRow)}
+                    </div>
+                    {phonelessCouples.length > 0 && (
+                      <div style={{ marginTop: '15px' }}>
+                        <h4 style={{ color: 'var(--neon-red)', marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <AlertTriangle size={14} className="icon-inline" /> {t('gm.noPhoneInCouple')}
+                        </h4>
+                        <div className="couple-list">
+                          {phonelessCouples.map(renderRow)}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </div>
 

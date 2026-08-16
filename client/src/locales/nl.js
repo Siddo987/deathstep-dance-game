@@ -721,6 +721,7 @@ export default {
   'gm.gameModeStandardDesc': 'Klassieke regels - de moordenaar(s) blijven het hele spel hetzelfde.',
   'gm.gameModeChaosDesc': 'Elke ronde wordt een nieuwe moordenaar gekozen - niemand kan ooit zeker weten wie het nu is.',
   'gm.gameModeMaxKills': 'Max Kills',
+  'gm.gameModeMaxKillsMinCouples': 'Beschikbaar vanaf {count} koppels.',
   'gm.gameModeMaxKillsDesc': 'Rondetoernooi: elk koppel is één keer moordenaar en probeert zoveel mogelijk moorden te scoren zonder betrapt te worden. Het koppel met de meeste moorden wint.',
   'gm.maxKillsVariant': 'Rondeformaat',
   'gm.maxKillsVariantShortened': 'Verkort (aantal koppels − 2)',
@@ -935,6 +936,8 @@ export default {
   'spotify.statusNoDevice': 'Geen actief afspeelapparaat gevonden.',
   'spotify.sessionExpired': 'Je Spotify-verbinding is verlopen. Verbind opnieuw met Spotify.',
   'spotify.reconnectNow': 'Nu opnieuw verbinden',
+  'spotify.notConnectedAlert': 'Spotify is niet verbonden. Zonder verbinding kan er geen muziek worden afgespeeld.',
+  'spotify.connectNow': 'Nu verbinden',
   'spotify.inviteOnlyNotice': 'Inloggen met Spotify werkt momenteel alleen voor accounts die door de ontwikkelaar zijn goedgekeurd. Vraag toegang aan als je dit nodig hebt.',
 
   // Cookiebanner

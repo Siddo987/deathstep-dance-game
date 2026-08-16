@@ -721,6 +721,7 @@ export default {
   'gm.gameModeStandardDesc': 'Classic rules - the killer(s) stay the same for the whole game.',
   'gm.gameModeChaosDesc': "A new killer is picked every round - nobody can ever be sure who it is right now.",
   'gm.gameModeMaxKills': 'Max Kills',
+  'gm.gameModeMaxKillsMinCouples': 'Available from {count} couples on.',
   'gm.gameModeMaxKillsDesc': 'Round-robin tournament: every couple is killer once and tries to score as many kills as possible without getting caught. The couple with the most kills wins.',
   'gm.maxKillsVariant': 'Round format',
   'gm.maxKillsVariantShortened': 'Shortened (couples − 2)',
@@ -935,6 +936,8 @@ export default {
   'spotify.statusNoDevice': 'No active playback device found.',
   'spotify.sessionExpired': 'Your Spotify connection has expired. Please connect to Spotify again.',
   'spotify.reconnectNow': 'Reconnect now',
+  'spotify.notConnectedAlert': "Spotify isn't connected. No music can play without a connection.",
+  'spotify.connectNow': 'Connect now',
   'spotify.inviteOnlyNotice': "Spotify login currently only works for accounts the developer has approved. Ask for access if you need it.",
 
   // Cookie banner

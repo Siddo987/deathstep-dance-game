@@ -721,6 +721,7 @@ export default {
   'gm.gameModeStandardDesc': 'Règles classiques - le(s) tueur(s) reste(nt) le(s) même(s) pendant toute la partie.',
   'gm.gameModeChaosDesc': "Un nouveau tueur est choisi à chaque manche - personne ne peut jamais être sûr de qui c'est en ce moment.",
   'gm.gameModeMaxKills': 'Max Kills',
+  'gm.gameModeMaxKillsMinCouples': 'Disponible à partir de {count} couples.',
   'gm.gameModeMaxKillsDesc': "Tournoi par manches : chaque couple est tueur une fois et essaie de faire un maximum de victimes sans se faire repérer. Le couple avec le plus de victimes gagne.",
   'gm.maxKillsVariant': 'Format des manches',
   'gm.maxKillsVariantShortened': 'Raccourci (nombre de couples − 2)',
@@ -935,6 +936,8 @@ export default {
   'spotify.statusNoDevice': "Aucun appareil de lecture actif trouvé.",
   'spotify.sessionExpired': "Ta connexion Spotify a expiré. Merci de te reconnecter à Spotify.",
   'spotify.reconnectNow': 'Se reconnecter maintenant',
+  'spotify.notConnectedAlert': "Spotify n'est pas connecté. Aucune musique ne peut être jouée sans connexion.",
+  'spotify.connectNow': 'Se connecter maintenant',
   'spotify.inviteOnlyNotice': "La connexion via Spotify ne fonctionne actuellement que pour les comptes approuvés par le développeur. Demande un accès si tu en as besoin.",
 
   // Bandeau de cookies

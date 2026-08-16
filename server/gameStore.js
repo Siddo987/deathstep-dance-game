@@ -161,6 +161,14 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
 // the same source of truth instead of drifting out of sync.
 export const SPECIAL_ROLE_KEYS = ['seer', 'protector', 'toucher', 'martyr', 'puzzle'];
 
+// Max Kills mode's own minimum couple count (see startGame's authoritative
+// check and GMDashboard.jsx's matching gameMode-dropdown gate) - below this,
+// even 'doubleTurn' (the variant with no held-back couples at all) is too
+// small a group for a real multi-round tournament, and 'shortened' on top of
+// that would leave almost nothing. Exported so GMDashboard.jsx's UI gate and
+// this file's own enforcement can never drift apart on the actual number.
+export const MAX_KILLS_MIN_COUPLES = 4;
+
 export function didKillersWin(room) {
   const aliveCouples = room.couples.filter(c => c.status === 'alive');
   const killersAlive = aliveCouples.some(c => c.role === 'killer');
@@ -1668,6 +1676,18 @@ class GameStore {
     // race between two GMs can't re-trigger role assignment mid-round.
     if (room.status !== 'paired') return null;
 
+    // Max Kills needs at least MAX_KILLS_MIN_COUPLES couples for either
+    // variant to be a real tournament rather than one round that instantly
+    // gives away the last couple or two by elimination (see
+    // buildMaxKillsOrder's own comment) - authoritative check, same
+    // defense-in-depth as every other GM-picked setting this method
+    // validates, in case a stale client still offers the option below that
+    // count. GMDashboard.jsx's mode dropdown already disables/auto-resets
+    // away from 'maxkills' the same way client-side.
+    if (gameMode === 'maxkills' && room.couples.length < MAX_KILLS_MIN_COUPLES) {
+      gameMode = 'standard';
+    }
+
     room.couples.forEach(c => {
       c.status = 'alive';
       c.role = 'dancer';
@@ -1709,11 +1729,12 @@ class GameStore {
       // too, same as Chaos) and buildMaxKillsOrder()/advanceMaxKillsRound()
       // for the per-round killer rotation this sets up.
       //
-      // 'shortened' needs at least 4 couples (see buildMaxKillsOrder's own
-      // comment and GMDashboard.jsx's matching UI gate) - authoritative check
-      // here too, same defense-in-depth as every other GM-picked setting this
-      // method validates, in case a stale client still offers it.
-      room.maxKillsVariant = (maxKillsVariant === 'shortened' && room.couples.length < 4) ? 'doubleTurn' : maxKillsVariant;
+      // Mode-level MAX_KILLS_MIN_COUPLES above already guarantees at least 4
+      // couples by this point, but 'shortened' specifically still drops 2 of
+      // them from ranking entirely (see buildMaxKillsOrder) - keep the
+      // fallback anyway as cheap defense-in-depth rather than trusting that
+      // invariant to never change out from under this line.
+      room.maxKillsVariant = (maxKillsVariant === 'shortened' && room.couples.length < MAX_KILLS_MIN_COUPLES) ? 'doubleTurn' : maxKillsVariant;
       room.maxKillsSongLengthSec = Math.max(20, Math.min(300, Number(maxKillsSongLengthSec) || 150));
       room.killCounts = {};
       room.maxKillsOrder = this.buildMaxKillsOrder(room, room.maxKillsVariant);

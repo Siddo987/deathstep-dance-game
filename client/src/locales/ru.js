@@ -721,6 +721,7 @@ export default {
   'gm.gameModeStandardDesc': 'Классические правила - убийца(ы) остаются теми же на всю игру.',
   'gm.gameModeChaosDesc': 'Каждый раунд выбирается новый убийца - никто никогда не может быть уверен, кто это сейчас.',
   'gm.gameModeMaxKills': 'Max Kills',
+  'gm.gameModeMaxKillsMinCouples': 'Доступно с {count} пар.',
   'gm.gameModeMaxKillsDesc': 'Турнир по раундам: каждая пара один раз становится убийцей и старается набрать как можно больше убийств, не попавшись. Побеждает пара с наибольшим числом убийств.',
   'gm.maxKillsVariant': 'Формат раундов',
   'gm.maxKillsVariantShortened': 'Сокращённый (число пар − 2)',
@@ -935,6 +936,8 @@ export default {
   'spotify.statusNoDevice': 'Активное устройство воспроизведения не найдено.',
   'spotify.sessionExpired': 'Срок действия твоего подключения Spotify истёк. Пожалуйста, подключи Spotify заново.',
   'spotify.reconnectNow': 'Переподключить сейчас',
+  'spotify.notConnectedAlert': 'Spotify не подключён. Без подключения музыка воспроизводиться не может.',
+  'spotify.connectNow': 'Подключить сейчас',
   'spotify.inviteOnlyNotice': 'Вход через Spotify сейчас работает только для аккаунтов, одобренных разработчиком. Если тебе это нужно, запроси доступ.',
 
   // Баннер cookie
