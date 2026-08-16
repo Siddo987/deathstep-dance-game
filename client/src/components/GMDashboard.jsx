@@ -10,13 +10,65 @@ import { fetchMyPlaylists, fetchPlaylist, addTrackToPlaylist, createPlaylist, fe
 import { fetchKillerRatio } from '../admin.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import { useLanguage } from '../i18n.jsx';
+import { phaseBodyKeyFor, gmExplainPhaseBodyKeyFor } from '../phaseExplanations.js';
+import { buildMaxKillsRanks } from '../maxKillsRanking.js';
 import coupleIcon from './couple_icon.png';
 import {
   MessageCircle, Crown, X, PhoneOff, Repeat, Scissors, AlertTriangle, Lightbulb,
   Music2, Skull, Sparkles, EyeOff, Eye, Check, Plus, Minus, LogOut, Flag,
   Send, UserPlus, QrCode, Play, Pause, Search, ChevronRight, Timer, Smartphone,
-  ChevronUp, ChevronDown, RotateCcw, Info, HelpCircle, Trophy, Globe
+  ChevronUp, ChevronDown, RotateCcw, Info, HelpCircle, Trophy, Globe, Settings, Mic
 } from 'lucide-react';
+
+// Order/labels/hints shared between the special-roles summary line and the
+// gear-icon count-distribution modal below - one place to add a future
+// special role to both instead of two lists that can drift apart.
+const SPECIAL_ROLE_ORDER = ['puzzle', 'martyr', 'seer', 'protector', 'toucher'];
+const SPECIAL_ROLE_LABEL_KEYS = {
+  puzzle: 'gm.specialRolePuzzle', martyr: 'gm.specialRoleMartyr', seer: 'gm.specialRoleSeer',
+  protector: 'gm.specialRoleProtector', toucher: 'gm.specialRoleToucher',
+};
+const SPECIAL_ROLE_HINT_KEYS = {
+  puzzle: 'gm.specialRolePuzzleHint', martyr: 'gm.specialRoleMartyrHint', seer: 'gm.specialRoleSeerHint',
+  protector: 'gm.specialRoleProtectorHint', toucher: 'gm.specialRoleToucherHint',
+};
+// Purely a sane UI ceiling for the stepper - actual assignment (see
+// gameStore.js's startGame) already gracefully caps at however many dancer
+// couples are actually in the room, so this never needs to track room size.
+const SPECIAL_ROLE_MAX_COUNT = 5;
+
+// M:SS display for a track's duration_ms - used next to search/playlist
+// results so a GM can see at a glance why a track is greyed out in Max
+// Kills mode (see isTooShortForMaxKills), not just guess from clicking it.
+const formatTrackDuration = (ms) => {
+  const totalSec = Math.round(ms / 1000);
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
+};
+
+// Builds the lobby "read aloud" paragraph (see gm.readAloud* keys) from the
+// GM's current settings selection - mode body + kill-mode note always, a
+// special-roles note only when standard mode actually has any configured
+// (chaos/maxkills never carry specialRoles - see handleStartGame). Each
+// piece is a complete sentence/paragraph in the locale files rather than
+// fragments glued together here, so word order stays correct per language.
+function buildReadAloudText(t, { gameMode, killerCount, killMode, specialRolesEnabled, specialRoles }) {
+  const modeBodyKey = gameMode === 'chaos' ? 'gm.readAloudChaosBody'
+    : gameMode === 'maxkills' ? 'gm.readAloudMaxKillsBody'
+    : 'gm.readAloudStandardBody';
+  const parts = [t(modeBodyKey, { killerCount })];
+  parts.push(t(killMode === 'silent' ? 'gm.readAloudKillModeSilentNote' : 'gm.readAloudKillModeClassicNote'));
+  if (gameMode === 'standard' && specialRolesEnabled) {
+    const activeRoles = SPECIAL_ROLE_ORDER.filter(key => specialRoles[key] > 0).map(key => t(SPECIAL_ROLE_LABEL_KEYS[key]));
+    // No counts configured means the app draws the roles itself at start
+    // (see specialRolesAutoActive / gameStore.buildAutoSpecialRoleDraw), so
+    // there's no list to name here - but "special roles are in play" is
+    // still exactly what the group needs to be told.
+    parts.push(activeRoles.length > 0
+      ? t('gm.readAloudSpecialRolesNote', { roles: activeRoles.join(', ') })
+      : t('gm.readAloudSpecialRolesAutoNote'));
+  }
+  return parts.join('\n\n');
+}
 
 function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated, gmChatMessages, onSendGMChatMessage, currentUser }) {
   const { t } = useLanguage();
@@ -33,6 +85,35 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [showChatModal, setShowChatModal] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [seenChatCount, setSeenChatCount] = useState(0);
+  const [showReadAloudModal, setShowReadAloudModal] = useState(false);
+  // The room.status this GM last opened the read-aloud popup at - lets the
+  // toolbar button glow (same pulse styling as the music button's "needs a
+  // song" hint) whenever the phase has moved on since they last checked, so
+  // they know there's something fresh to read without it forcing itself open.
+  const [readAloudSeenStatus, setReadAloudSeenStatus] = useState(null);
+  // Opt-in per-phase tutorial popup for the GM (see gm.explanationsEnable) -
+  // auto-opens once, the very first time each explainable phase occurs in
+  // this room, with what the GM needs to do/watch for (gmExplainPhaseBodyKeyFor -
+  // GM action copy, distinct from the read-aloud popup's group narration).
+  // Dedupes on the resolved *content key* rather than raw room.status:
+  // 'paired'/'role_reveal' share one body, so deduping on status alone would
+  // still pop the identical text up twice back-to-back as the room moves
+  // from one to the other. Tracked client-side only (a ref, reset whenever
+  // room.id changes) - doesn't need to survive a reload, just avoid nagging
+  // the same GM again and again within one sitting.
+  const [autoExplainPhase, setAutoExplainPhase] = useState(null);
+  const autoExplainedRef = React.useRef({ roomId: null, seen: new Set() });
+  React.useEffect(() => {
+    if (!room.explanationsEnabled) return;
+    const phaseKey = gmExplainPhaseBodyKeyFor(room.status, room.gameMode, room.killMode);
+    if (!phaseKey) return;
+    if (autoExplainedRef.current.roomId !== room.id) {
+      autoExplainedRef.current = { roomId: room.id, seen: new Set() };
+    }
+    if (autoExplainedRef.current.seen.has(phaseKey)) return;
+    autoExplainedRef.current.seen.add(phaseKey);
+    setAutoExplainPhase(room.status);
+  }, [room.id, room.status, room.gameMode, room.killMode, room.explanationsEnabled]);
   const [confirmState, setConfirmState] = useState(null);
   const [alertState, setAlertState] = useState(null);
   const [showHowTo, setShowHowTo] = useState(false);
@@ -149,6 +230,10 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [killerRatioDivisor, setKillerRatioDivisor] = useState(8);
   const [killMode, setKillMode] = useState('classic');
   const [deadPlayersKeepDancing, setDeadPlayersKeepDancing] = useState(false);
+  // Opt-in per-phase tutorial popups for players - see PlayerScreen.jsx's
+  // auto-explain effect. Off by default: a returning group that already
+  // knows the game doesn't need this nagging them every round.
+  const [explanationsEnabled, setExplanationsEnabled] = useState(false);
   // 'standard' | 'chaos' | 'maxkills' - see the new-roles/modes plan. Special
   // roles stay off in Chaos/Max Kills games (see the specialRoles reset in
   // the mode switcher below) - keeps the per-round killer rotation the only
@@ -158,13 +243,24 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // 'shortened' (Paarzahl-2 rounds, default) or 'doubleTurn' (everyone once
   // plus a couple of uncounted decoy repeats).
   const [maxKillsVariant, setMaxKillsVariant] = useState('shortened');
-  const [maxKillsSongLengthSec, setMaxKillsSongLengthSec] = useState(90);
-  // Special roles (see SPECIAL_ROLE_KEYS in server/gameStore.js) - only
-  // 'puzzle' is wired up with real behavior so far, the rest of the plan's
-  // 5 roles get their own toggle here as they're built.
+  const [maxKillsSongLengthSec, setMaxKillsSongLengthSec] = useState(150);
+  // Special roles (see SPECIAL_ROLE_KEYS in server/gameStore.js). Each value
+  // is now a count (how many couples get that role, distributed via the
+  // gear-icon modal below) rather than a plain on/off boolean - 0 means off.
+  // specialRolesEnabled is the master switch: turning it off doesn't clear
+  // the configured counts (so re-enabling remembers the last distribution),
+  // it's only what actually gets sent to startGame (see the emit below).
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
-  const [specialRoles, setSpecialRoles] = useState({ puzzle: false, martyr: false, seer: false, protector: false, toucher: false });
-  const [martyrWinsOnVote, setMartyrWinsOnVote] = useState(false);
+  const [specialRolesEnabled, setSpecialRolesEnabled] = useState(false);
+  const [showSpecialRolesModal, setShowSpecialRolesModal] = useState(false);
+  const [specialRoles, setSpecialRoles] = useState({ puzzle: 0, martyr: 0, seer: 0, protector: 0, toucher: 0 });
+  // Special roles on, but the GM never set any per-role count: the app
+  // distributes them itself (one per every second couple, as many different
+  // roles as possible - see gameStore.buildAutoSpecialRoleDraw). Only ever
+  // applies in standard mode, the only mode that has special roles at all.
+  const specialRolesAutoActive = gameMode === 'standard'
+    && specialRolesEnabled
+    && SPECIAL_ROLE_ORDER.every(key => !specialRoles[key]);
 
   // Dev-adjustable (see Dev Dashboard / server/admin.js's dev_settings) -
   // public read, no admin_users gate needed since every GM's dashboard uses
@@ -183,6 +279,16 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const totalPairedPlayers = room.couples.length > 0
     ? room.couples.reduce((sum, c) => sum + c.playerIds.length, 0)
     : room.players.length;
+  // Same "real couples once they exist, otherwise a plain 2-and-2 estimate"
+  // fallback as totalPairedPlayers above - needed for the Max Kills variant
+  // gate below, which cares about couple count, not player headcount.
+  const estimatedCoupleCount = room.couples.length > 0 ? room.couples.length : Math.floor(room.players.length / 2);
+  // 'shortened' leaves (couples - 2) never drawn at all (see
+  // buildMaxKillsOrder) - with 3 couples that's a single real round with 2
+  // of the 3 left over, not genuinely ambiguous, and with fewer than that
+  // there's effectively no tournament left. 4 is the first size where two
+  // held-back couples still leave a real multi-round game.
+  const MAX_KILLS_SHORTENED_MIN_COUPLES = 4;
   const suggestedKillerCount = Math.max(1, Math.round(totalPairedPlayers / killerRatioDivisor));
   // Hard rule (also enforced server-side in gameStore.startGame, which is
   // authoritative): killers must stay a strict minority of individual
@@ -191,6 +297,21 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // the larger ones. Computed greedily (smallest couples first) to find the
   // actual highest couple-count achievable without crossing that headcount
   // line, so the stepper's max matches what the server will really allow.
+  //
+  // Also can't claim more couples than special roles will leave as plain
+  // dancers - a killer couple never doubles as a special-role holder (see
+  // gameStore.startGame, special roles are only ever handed to a couple
+  // already resolved as 'dancer'), so the two settings compete for the same
+  // pool of couples. specialRolesReservedCouples below is the literal
+  // configured sum normally, but the server's own auto-draw count (see
+  // gameStore.buildAutoSpecialRoleDraw) once the GM leaves every count at 0
+  // with the master switch on (see specialRolesAutoActive) - matching that
+  // here keeps this cap honest about what auto mode will actually reserve,
+  // not "nothing" just because the configured counts happen to read zero.
+  const specialRolesConfiguredCount = SPECIAL_ROLE_ORDER.reduce((sum, key) => sum + (Number(specialRoles[key]) || 0), 0);
+  const specialRolesReservedCouples = !specialRolesEnabled ? 0
+    : specialRolesAutoActive ? Math.floor(estimatedCoupleCount / 2)
+    : specialRolesConfiguredCount;
   const maxKillerCouples = (() => {
     const maxKillerPlayers = Math.ceil(totalPairedPlayers / 2) - 1;
     const sizes = room.couples.length > 0
@@ -202,17 +323,98 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
       used += size;
       count++;
     }
-    return count;
+    return Math.max(0, Math.min(count, sizes.length - specialRolesReservedCouples));
   })();
 
-  const killerCountInitializedRef = React.useRef(false);
+  // Seeds the stepper from the recommendation and keeps following it while
+  // the GM hasn't overridden it themselves; the moment they touch the
+  // stepper (see handleSetKillerCount below) their choice is final and
+  // nothing here writes to it again.
+  //
+  // This replaces a second, older effect that unconditionally did
+  // `if (room.status === 'lobby') setKillerCount(room.couples?.length >= 9 ? 2 : 1)`.
+  // That dated from when Game Settings still lived in the 'paired' phase, so
+  // room.couples was actually populated when it ran; once the settings moved
+  // into the lobby (where couples don't exist yet - see totalPairedPlayers
+  // above) it could only ever resolve to 1, and being declared *after* the
+  // seeding effect it overwrote the real suggestion on the very same mount.
+  // So every dashboard mount that already had players in it (rejoining a
+  // running room from the start screen - i.e. every page reload, since "/"
+  // always lands on the start screen) and every "play again" (resetRoom
+  // returns the room to 'lobby' with couples cleared, changing both of that
+  // effect's deps) silently snapped the setting back to a single killer
+  // couple. That is what was reported as "Chaos mode always has only one
+  // killer": Chaos re-picks each round from room.killerCount (see
+  // gameStore.startChaosRound), so a count clobbered to 1 before startGame
+  // stays 1 for the entire game, every round.
+  const killerCountTouchedRef = React.useRef(false);
   React.useEffect(() => {
-    if (killerCountInitializedRef.current) return;
+    if (killerCountTouchedRef.current) return;
+    if (room.status !== 'lobby') return;
     if (room.players.length === 0) return; // wait until someone's actually joined
-    killerCountInitializedRef.current = true;
-    setKillerCount(Math.max(1, Math.min(maxKillerCouples, suggestedKillerCount)));
+    setKillerCount(Math.max(1, Math.min(Math.max(1, maxKillerCouples), suggestedKillerCount)));
+  }, [room.status, room.players.length, maxKillerCouples, suggestedKillerCount]);
+
+  // A count the GM already picked can become unreachable afterwards (players
+  // leaving, or couples turning out bigger than the plain 2-and-2 estimate
+  // the lobby works from) - the server would then just quietly assign fewer
+  // killer couples than the stepper promised, so clamp instead of letting the
+  // two disagree. Only ever clamps *down*: a deliberately low count is a
+  // perfectly valid choice, not something to "correct" upwards.
+  React.useEffect(() => {
+    const max = Math.max(1, maxKillerCouples);
+    setKillerCount(prev => (prev > max ? max : prev));
+  }, [maxKillerCouples]);
+
+  const handleSetKillerCount = (value) => {
+    killerCountTouchedRef.current = true;
+    setKillerCount(value);
+  };
+
+  // Mirror of the clamp above, other direction: the per-role steppers in the
+  // distribution modal already cap themselves against the killer count at
+  // click time (see roleMax there), so a GM interacting with the modal alone
+  // can never over-allocate - but raising the killer count *afterwards* (or
+  // the room simply shrinking) can leave an already-configured total that no
+  // longer fits. Trim it back down rather than let the modal quietly promise
+  // more special roles than gameStore.startGame will ever actually assign
+  // (it silently skips the remainder once dancer couples run out - correct
+  // as a last resort, but the GM's own configured counts should already
+  // match what's achievable, same reasoning as the killer-count clamp
+  // above). Trims from the end of SPECIAL_ROLE_ORDER first - arbitrary but
+  // deterministic, this only needs to converge, not favor any one role.
+  React.useEffect(() => {
+    const available = Math.max(0, estimatedCoupleCount - killerCount);
+    if (specialRolesConfiguredCount <= available) return;
+    setSpecialRoles(prev => {
+      const next = { ...prev };
+      let over = specialRolesConfiguredCount - available;
+      for (let i = SPECIAL_ROLE_ORDER.length - 1; i >= 0 && over > 0; i--) {
+        const key = SPECIAL_ROLE_ORDER[i];
+        const cut = Math.min(next[key] || 0, over);
+        next[key] = (next[key] || 0) - cut;
+        over -= cut;
+      }
+      return next;
+    });
+    // specialRolesConfiguredCount deliberately not a dep: it only ever
+    // changes via the modal's own steppers, which already can't exceed the
+    // bound at click time (see roleMax) - only a shrinking pool (this
+    // effect's actual deps) can make an already-valid total invalid later.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room.players.length, killerRatioDivisor]);
+  }, [estimatedCoupleCount, killerCount]);
+
+  // 'shortened' needs at least MAX_KILLS_SHORTENED_MIN_COUPLES couples (see
+  // its own comment) - if the room shrinks below that after the GM already
+  // picked it (players leaving, or the real couple count coming in smaller
+  // than the lobby's plain-pairs estimate), fall back to 'doubleTurn' rather
+  // than let the GM start a game whose "tournament" is one round with the
+  // group instantly able to deduce the last two couples anyway.
+  React.useEffect(() => {
+    if (maxKillsVariant === 'shortened' && estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_SHORTENED_MIN_COUPLES) {
+      setMaxKillsVariant('doubleTurn');
+    }
+  }, [estimatedCoupleCount, maxKillsVariant]);
 
   // Which couples' voting-phase boxes are expanded to show their full
   // controls (meta line, GM-vote-on-behalf dropdown, kick button) - default
@@ -302,13 +504,6 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // (server/playlists.js) - local, non-account Spotify playlists (source:
   // 'local' in gmPlaylists) are read-only browsing, nothing to persist to.
   const accountGmPlaylists = gmPlaylists.filter(pl => pl.source !== 'local');
-
-  // Update default killer count when couples array changes
-  React.useEffect(() => {
-    if (room.status === 'lobby') {
-      setKillerCount(room.couples?.length >= 9 ? 2 : 1);
-    }
-  }, [room.couples?.length, room.status]);
 
   React.useEffect(() => {
     if (room.status !== 'paired') setBypassPaired(false);
@@ -563,7 +758,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     if (room.gameMode !== 'maxkills' || room.status !== 'dancing') return;
     if (!spotifyPlayer || !room.nowPlaying?.uri) return;
     if (maxKillsFadeTriggeredRef.current === room.nowPlaying.uri) return;
-    const targetMs = (room.maxKillsSongLengthSec || 90) * 1000;
+    const targetMs = (room.maxKillsSongLengthSec || 150) * 1000;
     if (playbackProgress < targetMs) return;
 
     maxKillsFadeTriggeredRef.current = room.nowPlaying.uri;
@@ -901,8 +1096,15 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const handleStartGame = () => {
     socket.emit('startGame', {
       roomId: room.id, killerCount, killMode, deadPlayersKeepDancing,
-      specialRoles: (gameMode === 'chaos' || gameMode === 'maxkills') ? {} : specialRoles,
-      martyrWinsOnVote, gameMode, maxKillsVariant, maxKillsSongLengthSec,
+      // Configured counts are kept in local state even while the master
+      // switch is off (so re-enabling it remembers the last distribution) -
+      // this is the one place that actually gates what reaches the server.
+      specialRoles: (gameMode === 'chaos' || gameMode === 'maxkills' || !specialRolesEnabled) ? {} : specialRoles,
+      // Switch on but no distribution configured: the server picks both the
+      // count and the roles itself (see gameStore.startGame's specialRolesAuto)
+      // rather than the switch quietly meaning "no special roles at all".
+      specialRolesAuto: specialRolesAutoActive,
+      gameMode, maxKillsVariant, maxKillsSongLengthSec, explanationsEnabled,
     });
   };
 
@@ -1093,6 +1295,10 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   // worked on (resolvingQueueEntryId, e.g. a confirmed free-text suggestion
   // - see item 8) or, normally, just gets appended to the queue.
   const handleSearchResultClick = (track) => {
+    if (isTooShortForMaxKills(track.duration_ms)) {
+      setAlertState({ message: t('gm.maxKillsSongTooShort') });
+      return;
+    }
     const normalized = { uri: track.uri, name: track.name, artist: track.artists.map(a => a.name).join(', ') };
     if (resolvingQueueEntryId) {
       socket.emit('resolveQueueTextEntry', { roomId: room.id, entryId: resolvingQueueEntryId, track: normalized });
@@ -1111,22 +1317,52 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [playlistAddChoice, setPlaylistAddChoice] = useState(null);
   const [specificTrackPicker, setSpecificTrackPicker] = useState(null); // { playlist, tracks } | null
 
+  // Max Kills mode: every round's song should reach the same GM-configured
+  // target length (room.maxKillsSongLengthSec) so no couple gets an unfair
+  // shorter (or - via the separate fade-out effect above - longer) window
+  // than anyone else. Tracks with a known duration under the target are
+  // dropped before they're ever offered, rather than added and then quietly
+  // finishing early. Only Spotify-sourced tracks (search results, and now
+  // 'delegate'-source playlists - see server/spotify.js's
+  // fetchPlaylistTracksWithToken) carry a durationMs at all; the app's own
+  // DB-backed playlists (delegateApp/GM's own, see server/db.js's
+  // playlist_tracks) never stored it, so those pass through unfiltered -
+  // there's no data to filter on, not a deliberate exemption.
+  // During 'lobby' (before the first startGame() call ever), room.gameMode
+  // doesn't exist yet - it's only ever assigned inside startGame() itself,
+  // so it's undefined the whole time a GM is still configuring the game.
+  // Reading it unconditionally here meant pre-queueing a song for round 1
+  // while Max Kills was only selected locally (not started yet) never
+  // triggered this check at all - a real bug, confirmed live in the code,
+  // not just a hypothetical. Falls back to the local gameMode/
+  // maxKillsSongLengthSec draft state during lobby; once a game is actually
+  // running, the server value is the correct source instead (a co-GM's own
+  // local draft state may never have touched these selectors).
+  const isTooShortForMaxKills = (durationMs) => {
+    const effectiveMode = room.status === 'lobby' ? gameMode : room.gameMode;
+    const effectiveTargetSec = room.status === 'lobby' ? maxKillsSongLengthSec : room.maxKillsSongLengthSec;
+    return effectiveMode === 'maxkills' && typeof durationMs === 'number' && durationMs > 0
+      && durationMs < (effectiveTargetSec || 150) * 1000;
+  };
+
   const loadPlaylistTracks = async (playlist) => {
+    let tracks;
     if (playlist.source === 'delegate') {
       const result = await fetchRoomSpotifyPlaylistTracks(room.id, playlist.id);
       if (result.error) return [];
       // Spotify tracks have no DB row id - the specific-track picker below
       // keys/renders by `.id`, so use the uri (already unique per track).
-      return result.tracks.map(t => ({ ...t, id: t.uri }));
-    }
-    if (playlist.source === 'delegateApp') {
+      tracks = result.tracks.map(t => ({ ...t, id: t.uri }));
+    } else if (playlist.source === 'delegateApp') {
       const result = await fetchRoomDeathstepPlaylistTracks(room.id, playlist.id);
       if (result.error) return [];
-      return result.tracks;
+      tracks = result.tracks;
+    } else {
+      const result = await fetchPlaylist(playlist.id);
+      if (result.error) return [];
+      tracks = result.playlist.tracks;
     }
-    const result = await fetchPlaylist(playlist.id);
-    if (result.error) return [];
-    return result.playlist.tracks;
+    return tracks.filter(t => !isTooShortForMaxKills(t.durationMs));
   };
 
   const handleAddWholePlaylistToQueue = async (playlist) => {
@@ -2278,7 +2514,22 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
     }
 
     if (!spotifyToken) {
-      return <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>{t('gm.connectFirstForMusic')}</p>;
+      // A plain "connect Spotify first" sentence made the visitor go find the
+      // connect button back in the lobby's Song Playback panel themselves -
+      // the button itself belongs right here instead, where it's actually
+      // needed (same connect action/notice as renderSpotifyConnectionBox above).
+      return (
+        <div style={{ textAlign: 'center' }}>
+          <button
+            className="cyber-button"
+            style={{ background: 'var(--neon-green)', color: 'black', width: 'auto', padding: '0 24px' }}
+            onClick={() => (currentUser ? loginWithSpotifyForAccountLink() : loginWithSpotify())}
+          >
+            {t('spotify.connect')}
+          </button>
+          <p className="info-note"><Info size={13} /> {t('spotify.inviteOnlyNotice')}</p>
+        </div>
+      );
     }
 
     return (
@@ -2303,20 +2554,35 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
 
         {searchResults.length > 0 && (
           <div className="couple-list" style={{ marginTop: 0, marginBottom: '15px' }}>
-            {searchResults.map(track => (
-              <div key={track.id}
-                onClick={() => handleSearchResultClick(track)}
-                className="list-item list-item--purple"
-                style={{ cursor: 'pointer' }}
-              >
-                <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
-                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{track.artists.map(a => a.name).join(', ')}</div>
+            {searchResults.map(track => {
+              const tooShort = isTooShortForMaxKills(track.duration_ms);
+              return (
+                <div key={track.id}
+                  onClick={() => handleSearchResultClick(track)}
+                  className="list-item list-item--purple"
+                  style={{ cursor: 'pointer', opacity: tooShort ? 0.45 : 1 }}
+                  title={tooShort ? t('gm.maxKillsSongTooShort') : undefined}
+                >
+                  <img src={track.album.images[2]?.url} alt="" style={{ width: '40px', height: '40px', borderRadius: '4px' }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: 'white' }}>{track.name}</div>
+                    <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{track.artists.map(a => a.name).join(', ')}</span>
+                      {typeof track.duration_ms === 'number' && (
+                        <span style={{ flexShrink: 0, color: tooShort ? 'var(--neon-red)' : 'var(--text-muted)' }}>
+                          · {formatTrackDuration(track.duration_ms)}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {tooShort ? (
+                    <AlertTriangle size={16} className="icon-inline" style={{ color: 'var(--neon-red)', flexShrink: 0 }} />
+                  ) : (
+                    <Plus size={16} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
+                  )}
                 </div>
-                <Plus size={16} className="icon-inline" style={{ color: 'var(--neon-green)', flexShrink: 0 }} />
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
@@ -2427,16 +2693,6 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
       <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '10px 14px', marginBottom: '20px', marginTop: '20px' }}>
         <h2 style={{ color: 'var(--neon-purple)', margin: 0 }}>{t('gm.title')}</h2>
         <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '8px' }}>
-          {/* The room code only matters for getting players in - once the
-              lobby's closed it's just clutter up here (still visible to
-              anyone who needs it via the "Manage team"/invite views). */}
-          {room.status === 'lobby' && (
-            <div className="gm-code-chip">
-              <span>{t('gm.ballroomCode')}</span>
-              <strong>{room.id}</strong>
-            </div>
-          )}
-
           {!isMainGM && (
             <div className="badge badge--purple" title={t('gm.youAreCoGm')}>
               <Crown size={14} className="icon-inline" /> {t('gm.coGmBadge')}
@@ -2493,6 +2749,18 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
             </button>
           );
         })()}
+        {/* Glows (same treatment as the music button's red pulse, just the
+            plain accent color since this isn't urgent) whenever the phase
+            has moved on since the GM last opened this - see
+            readAloudSeenStatus above. Never glows in the lobby: the content
+            shown there (the mode overview) doesn't change per phase. */}
+        <button
+          className={`kebab-menu-btn ${room.status !== 'lobby' && room.status !== readAloudSeenStatus ? 'pulse-animation' : ''}`}
+          onClick={() => { setShowReadAloudModal(true); setReadAloudSeenStatus(room.status); }}
+          title={t('gm.readAloudButtonTitle')}
+        >
+          <Mic size={20} />
+        </button>
         <button
           className="kebab-menu-btn"
           onClick={() => setShowChatModal(true)}
@@ -2578,9 +2846,20 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
         {/* end of the title row's right-hand cluster (code chip/badges/privacy toggle/icon toolbar) */}
       </div>
 
-      <div className="panel" style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 20px' }}>
+      <div className="panel" style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px 20px' }}>
         <p>{t('gm.status')} <strong style={{ textTransform: 'uppercase', color: (room.status === 'dancing' || room.status === 'role_reveal') ? 'var(--neon-blue)' : 'var(--neon-purple)' }}>{t(`phase.${room.status}`)}</strong></p>
         {room.round > 0 && <p>{t('gm.round')} <strong>{room.round}</strong></p>}
+        {/* The room code only matters for getting players in - once the
+            lobby's closed it's just clutter (still visible to anyone who
+            needs it via the "Manage team"/invite views). Right-aligned via
+            the auto margin so it stays clear of Status/Round on the left
+            even as this panel wraps on a narrow phone screen. */}
+        {room.status === 'lobby' && (
+          <div className="gm-code-chip" style={{ marginLeft: 'auto' }}>
+            <span>{t('gm.ballroomCode')}</span>
+            <strong>{room.id}</strong>
+          </div>
+        )}
       </div>
 
       {/* PENDING REJOIN REQUESTS */}
@@ -2722,46 +3001,22 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
 
           <div className="panel panel--purple" style={{ marginBottom: '20px' }}>
             <h4 style={{ color: 'var(--neon-purple)', marginBottom: '15px' }}>{t('gm.gameSettings')}</h4>
-            {gameMode !== 'maxkills' && (
-              <>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                  <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.killerCount')}</label>
-                  <div className="stepper">
-                    <button className="stepper-btn" onClick={() => setKillerCount(Math.max(1, killerCount - 1))} disabled={killerCount <= 1} style={{ opacity: killerCount <= 1 ? 0.3 : 1, cursor: killerCount <= 1 ? 'not-allowed' : 'pointer' }}><Minus size={18} /></button>
-                    <span className="stepper-value">{killerCount}</span>
-                    <button className="stepper-btn" onClick={() => setKillerCount(Math.min(Math.max(1, maxKillerCouples), killerCount + 1))} disabled={killerCount >= Math.max(1, maxKillerCouples)} style={{ opacity: killerCount >= Math.max(1, maxKillerCouples) ? 0.3 : 1, cursor: killerCount >= Math.max(1, maxKillerCouples) ? 'not-allowed' : 'pointer' }}><Plus size={18} /></button>
-                  </div>
-                </div>
-                {killerCount !== suggestedKillerCount && (
-                  <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <Lightbulb size={14} className="icon-inline" />
-                    {suggestedKillerCount === 1
-                      ? t('gm.killerRecSuggestedOne', { total: totalPairedPlayers })
-                      : t('gm.killerRecSuggestedMany', { total: totalPairedPlayers, count: suggestedKillerCount })}
-                  </p>
-                )}
-              </>
-            )}
-            <div style={{ marginTop: '15px' }}>
-              <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.killMode')}</label>
-              <select className="cyber-select" value={killMode} onChange={(e) => setKillMode(e.target.value)} style={{ width: '100%' }}>
-                <option value="classic">{t('gm.killModeClassic')}</option>
-                <option value="silent">{t('gm.killModeSilent')}</option>
-              </select>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
-                {gameMode === 'maxkills'
-                  ? (killMode === 'silent' ? t('gm.killModeSilentMaxKillsDesc') : t('gm.killModeClassicMaxKillsDesc'))
-                  : (killMode === 'silent' ? t('gm.killModeSilentDesc') : t('gm.killModeClassicDesc'))}
-              </p>
-            </div>
-            <div style={{ marginTop: '15px' }}>
+
+            {/* Game mode first - it's what everything else on this panel
+                (which fields even apply, what Kill Mode's own description
+                says, whether special roles are offered at all) branches on,
+                so it has to be decided before any of the rest makes sense. */}
+            <div>
               <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.gameMode')}</label>
               <select
                 className="cyber-select"
                 value={gameMode}
                 onChange={(e) => {
                   setGameMode(e.target.value);
-                  if (e.target.value === 'chaos' || e.target.value === 'maxkills') setSpecialRoles({ puzzle: false, martyr: false, seer: false, protector: false, toucher: false });
+                  if (e.target.value === 'chaos' || e.target.value === 'maxkills') {
+                    setSpecialRolesEnabled(false);
+                    setSpecialRoles({ puzzle: 0, martyr: 0, seer: 0, protector: 0, toucher: 0 });
+                  }
                 }}
                 style={{ width: '100%' }}
               >
@@ -2773,16 +3028,170 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 {gameMode === 'chaos' ? t('gm.gameModeChaosDesc') : gameMode === 'maxkills' ? t('gm.gameModeMaxKillsDesc') : t('gm.gameModeStandardDesc')}
               </p>
             </div>
+
+            {/* Advanced settings - Kill Mode, Voting Right, and (Standard
+                mode only) special roles. Always has at least Kill Mode in it
+                regardless of game mode, so unlike the special-roles gear
+                further down, this toggle itself never needs to hide. */}
+            <button
+              onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+              style={{ background: 'transparent', border: 'none', padding: 0, marginTop: '18px', color: 'var(--neon-purple)', fontSize: '0.9rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              {showAdvancedSettings ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              {t('gm.advancedSettings')}
+            </button>
+            {showAdvancedSettings && (
+              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+                <div>
+                  <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.killMode')}</label>
+                  <select className="cyber-select" value={killMode} onChange={(e) => setKillMode(e.target.value)} style={{ width: '100%' }}>
+                    <option value="classic">{t('gm.killModeClassic')}</option>
+                    <option value="silent">{t('gm.killModeSilent')}</option>
+                  </select>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
+                    {gameMode === 'maxkills'
+                      ? (killMode === 'silent' ? t('gm.killModeSilentMaxKillsDesc') : t('gm.killModeClassicMaxKillsDesc'))
+                      : (killMode === 'silent' ? t('gm.killModeSilentDesc') : t('gm.killModeClassicDesc'))}
+                  </p>
+                </div>
+
+                {/* Applies in every mode (unlike special roles below), since
+                    dancing/kill_reveal etc. exist regardless of gameMode - see
+                    this file's own auto-explain effect further up (the GM's
+                    per-phase popup), gated on room.explanationsEnabled. */}
+                <div style={{ marginTop: '15px' }}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={explanationsEnabled}
+                      onChange={(e) => setExplanationsEnabled(e.target.checked)}
+                    />
+                    <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.explanationsEnable')}</span>
+                  </label>
+                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 0', fontStyle: 'italic' }}>
+                    {t('gm.explanationsEnableHint')}
+                  </p>
+                </div>
+
+                {/* Max Kills has no voting phase at all (proceedToVoting/
+                    executeVote both reject it server-side - see the plan), so
+                    this would be dead configuration with no effect in that
+                    mode. */}
+                {gameMode !== 'maxkills' && (
+                  <div style={{ marginTop: '15px' }}>
+                    <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
+                    <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
+                      <option value="random">{t('gm.votingRandom')}</option>
+                      <option value="lead">{t('gm.leadsOnly')}</option>
+                      <option value="follow">{t('gm.followsOnly')}</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* Chaos/Max Kills force every special role off with no way to
+                    re-enable them here (see the onChange above), so there's
+                    nothing for this sub-section to offer in those modes. */}
+                {gameMode === 'standard' && (
+                  <div style={{ marginTop: '15px', paddingTop: '15px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', flex: 1 }}>
+                        <input
+                          type="checkbox"
+                          checked={specialRolesEnabled}
+                          onChange={(e) => setSpecialRolesEnabled(e.target.checked)}
+                        />
+                        <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRolesEnable')}</span>
+                      </label>
+                      {/* Disabled until the master switch is on: with the
+                          switch off nothing configured in here has any effect
+                          at all (see handleStartGame), so offering a live
+                          distribution dialog there just invited GMs to set
+                          counts and wonder why no special roles turned up. */}
+                      <button
+                        onClick={() => setShowSpecialRolesModal(true)}
+                        className="icon-btn"
+                        disabled={!specialRolesEnabled}
+                        title={specialRolesEnabled ? t('gm.specialRolesDistribute') : t('gm.specialRolesDistributeDisabled')}
+                        style={{ opacity: specialRolesEnabled ? 1 : 0.35, cursor: specialRolesEnabled ? 'pointer' : 'not-allowed' }}
+                      >
+                        <Settings size={18} />
+                      </button>
+                    </div>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 34px', fontStyle: 'italic' }}>
+                      {t('gm.specialRolesEnableHint')}
+                    </p>
+
+                    {specialRolesEnabled && (
+                      <div style={{ marginTop: '10px', marginLeft: '34px' }}>
+                        {specialRolesAutoActive ? (
+                          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic' }}>
+                            {t('gm.specialRolesAutoHint')}
+                          </p>
+                        ) : (
+                          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                            {SPECIAL_ROLE_ORDER.filter(key => specialRoles[key] > 0).map((key, i, arr) => (
+                              <React.Fragment key={key}>
+                                {i > 0 && ', '}
+                                {t(SPECIAL_ROLE_LABEL_KEYS[key])} × {specialRoles[key]}
+                              </React.Fragment>
+                            ))}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Mode-specific settings, below advanced settings - which of
+                these applies depends entirely on the game mode chosen above. */}
+            {gameMode !== 'maxkills' && (
+              <div style={{ marginTop: '18px', paddingTop: '15px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                  <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.killerCount')}</label>
+                  <div className="stepper">
+                    <button className="stepper-btn" onClick={() => handleSetKillerCount(Math.max(1, killerCount - 1))} disabled={killerCount <= 1} style={{ opacity: killerCount <= 1 ? 0.3 : 1, cursor: killerCount <= 1 ? 'not-allowed' : 'pointer' }}><Minus size={18} /></button>
+                    <span className="stepper-value">{killerCount}</span>
+                    <button className="stepper-btn" onClick={() => handleSetKillerCount(Math.min(Math.max(1, maxKillerCouples), killerCount + 1))} disabled={killerCount >= Math.max(1, maxKillerCouples)} style={{ opacity: killerCount >= Math.max(1, maxKillerCouples) ? 0.3 : 1, cursor: killerCount >= Math.max(1, maxKillerCouples) ? 'not-allowed' : 'pointer' }}><Plus size={18} /></button>
+                  </div>
+                </div>
+                {killerCount !== suggestedKillerCount && (
+                  <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', margin: '10px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Lightbulb size={14} className="icon-inline" />
+                    {suggestedKillerCount === 1
+                      ? t('gm.killerRecSuggestedOne', { total: totalPairedPlayers })
+                      : t('gm.killerRecSuggestedMany', { total: totalPairedPlayers, count: suggestedKillerCount })}
+                  </p>
+                )}
+
+                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', cursor: 'pointer' }}>
+                  <input type="checkbox" checked={deadPlayersKeepDancing} onChange={(e) => setDeadPlayersKeepDancing(e.target.checked)} />
+                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.deadPlayersKeepDancing')}</span>
+                </label>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
+                  {t('gm.deadPlayersKeepDancingHint')}
+                </p>
+              </div>
+            )}
             {gameMode === 'maxkills' && (
-              <div style={{ marginTop: '15px', paddingTop: '15px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+              <div style={{ marginTop: '18px', paddingTop: '15px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
                 <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.maxKillsVariant')}</label>
                 <select className="cyber-select" value={maxKillsVariant} onChange={(e) => setMaxKillsVariant(e.target.value)} style={{ width: '100%' }}>
-                  <option value="shortened">{t('gm.maxKillsVariantShortened')}</option>
+                  <option value="shortened" disabled={estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_SHORTENED_MIN_COUPLES}>
+                    {t('gm.maxKillsVariantShortened')}
+                  </option>
                   <option value="doubleTurn">{t('gm.maxKillsVariantDoubleTurn')}</option>
                 </select>
                 <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '8px 0 0 0', fontStyle: 'italic' }}>
                   {maxKillsVariant === 'doubleTurn' ? t('gm.maxKillsVariantDoubleTurnDesc') : t('gm.maxKillsVariantShortenedDesc')}
                 </p>
+                {estimatedCoupleCount > 0 && estimatedCoupleCount < MAX_KILLS_SHORTENED_MIN_COUPLES && (
+                  <p style={{ color: 'var(--neon-blue)', fontSize: '0.85rem', margin: '6px 0 0 0', fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                    <Lightbulb size={14} className="icon-inline" />
+                    {t('gm.maxKillsVariantShortenedMinCouples', { count: MAX_KILLS_SHORTENED_MIN_COUPLES })}
+                  </p>
+                )}
 
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '15px' }}>
                   <label style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.maxKillsSongLength')}</label>
@@ -2797,123 +3206,69 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 </p>
               </div>
             )}
-            {/* Max Kills has no voting phase at all (proceedToVoting/executeVote
-                both reject it server-side - see the plan) and couple.status
-                never leaves 'alive' (elimination is round-scoped only), so
-                both settings below would be dead configuration with no effect
-                in this mode - hidden here the same way killerCount already is
-                above, rather than left visible and silently ignored. */}
-            {gameMode !== 'maxkills' && (
-              <div style={{ marginTop: '15px' }}>
-                <label style={{ color: 'white', fontWeight: 'bold', display: 'block', marginBottom: '8px' }}>{t('gm.votingRight')}</label>
-                <select className="cyber-select" value={room.votingRole} onChange={handleSetVotingRole} style={{ width: '100%' }}>
-                  <option value="random">{t('gm.votingRandom')}</option>
-                  <option value="lead">{t('gm.leadsOnly')}</option>
-                  <option value="follow">{t('gm.followsOnly')}</option>
-                </select>
-              </div>
-            )}
-            {gameMode !== 'maxkills' && (
-              <>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '15px', cursor: 'pointer' }}>
-                  <input type="checkbox" checked={deadPlayersKeepDancing} onChange={(e) => setDeadPlayersKeepDancing(e.target.checked)} />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.deadPlayersKeepDancing')}</span>
-                </label>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-                  {t('gm.deadPlayersKeepDancingHint')}
-                </p>
-              </>
-            )}
-
-            <button
-              onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
-              style={{ background: 'transparent', border: 'none', padding: 0, marginTop: '18px', color: 'var(--neon-purple)', fontSize: '0.9rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px' }}
-            >
-              {showAdvancedSettings ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              {t('gm.advancedSettings')}
-            </button>
-            {showAdvancedSettings && (
-              <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
-              {gameMode === 'chaos' || gameMode === 'maxkills' ? (
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', fontStyle: 'italic', margin: 0 }}>
-                  {t('gm.specialRolesDisabledInChaos')}
-                </p>
-              ) : (
-              <>
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!specialRoles.puzzle}
-                    onChange={(e) => setSpecialRoles({ ...specialRoles, puzzle: e.target.checked })}
-                  />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRolePuzzle')}</span>
-                </label>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-                  {t('gm.specialRolePuzzleHint')}
-                </p>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!specialRoles.martyr}
-                    onChange={(e) => setSpecialRoles({ ...specialRoles, martyr: e.target.checked })}
-                  />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleMartyr')}</span>
-                </label>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-                  {t('gm.specialRoleMartyrHint')}
-                </p>
-                {specialRoles.martyr && (
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '10px', marginLeft: '24px' }}>
-                    <input
-                      type="checkbox"
-                      checked={martyrWinsOnVote}
-                      onChange={(e) => setMartyrWinsOnVote(e.target.checked)}
-                    />
-                    <span style={{ color: 'white' }}>{t('gm.martyrWinsOnVote')}</span>
-                  </label>
-                )}
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!specialRoles.seer}
-                    onChange={(e) => setSpecialRoles({ ...specialRoles, seer: e.target.checked })}
-                  />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleSeer')}</span>
-                </label>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-                  {t('gm.specialRoleSeerHint')}
-                </p>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!specialRoles.protector}
-                    onChange={(e) => setSpecialRoles({ ...specialRoles, protector: e.target.checked })}
-                  />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleProtector')}</span>
-                </label>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-                  {t('gm.specialRoleProtectorHint')}
-                </p>
-
-                <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', marginTop: '14px' }}>
-                  <input
-                    type="checkbox"
-                    checked={!!specialRoles.toucher}
-                    onChange={(e) => setSpecialRoles({ ...specialRoles, toucher: e.target.checked })}
-                  />
-                  <span style={{ color: 'white', fontWeight: 'bold' }}>{t('gm.specialRoleToucher')}</span>
-                </label>
-                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '4px 0 0 24px', fontStyle: 'italic' }}>
-                  {t('gm.specialRoleToucherHint')}
-                </p>
-              </>
-              )}
-              </div>
-            )}
           </div>
+
+          {showSpecialRolesModal && createPortal(
+            <div className="modal-overlay" onClick={() => setShowSpecialRolesModal(false)}>
+              <div className="modal-card cyber-card" style={{ maxWidth: '440px', border: '1px solid var(--neon-purple)' }} onClick={(e) => e.stopPropagation()}>
+                <button className="icon-btn modal-close-btn" onClick={() => setShowSpecialRolesModal(false)}>
+                  <X size={20} />
+                </button>
+                <h3 style={{ color: 'var(--neon-purple)', marginBottom: '15px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+                  <Settings size={20} /> {t('gm.specialRolesDistribute')}
+                </h3>
+                {/* "Everything at 0" isn't "no special roles" anymore, it's
+                    the automatic draw (see specialRolesAutoActive) - say so
+                    here, since this dialog is the only place a GM would go
+                    looking for how the counts work. */}
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '18px', fontStyle: 'italic' }}>
+                  {t('gm.specialRolesAutoHint')}
+                </p>
+                {SPECIAL_ROLE_ORDER.map(key => {
+                  // Mirrors maxKillerCouples' own cap in the other direction:
+                  // killers and special-role holders draw from the same pool
+                  // of couples (a killer never doubles as a special-role
+                  // holder - see gameStore.startGame), so this role can only
+                  // grow into whatever's left after the killer count and
+                  // every *other* role's already-configured count are both
+                  // subtracted out - not just the flat per-role UI ceiling.
+                  const otherRolesConfigured = specialRolesConfiguredCount - (Number(specialRoles[key]) || 0);
+                  const roleMax = Math.max(0, Math.min(SPECIAL_ROLE_MAX_COUNT, estimatedCoupleCount - killerCount - otherRolesConfigured));
+                  return (
+                    <div key={key} style={{ marginBottom: '18px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+                        <span style={{ color: 'white', fontWeight: 'bold' }}>{t(SPECIAL_ROLE_LABEL_KEYS[key])}</span>
+                        <div className="stepper">
+                          <button
+                            className="stepper-btn"
+                            onClick={() => setSpecialRoles(prev => ({ ...prev, [key]: Math.max(0, (prev[key] || 0) - 1) }))}
+                          >
+                            <Minus size={16} />
+                          </button>
+                          <span className="stepper-value">{specialRoles[key] || 0}</span>
+                          <button
+                            className="stepper-btn"
+                            disabled={(specialRoles[key] || 0) >= roleMax}
+                            style={{ opacity: (specialRoles[key] || 0) >= roleMax ? 0.3 : 1, cursor: (specialRoles[key] || 0) >= roleMax ? 'not-allowed' : 'pointer' }}
+                            onClick={() => setSpecialRoles(prev => ({ ...prev, [key]: Math.min(roleMax, (prev[key] || 0) + 1) }))}
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
+                      </div>
+                      <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', margin: '4px 0 0 0', fontStyle: 'italic' }}>
+                        {t(SPECIAL_ROLE_HINT_KEYS[key])}
+                      </p>
+                    </div>
+                  );
+                })}
+                <button className="cyber-button" style={{ width: '100%' }} onClick={() => setShowSpecialRolesModal(false)}>
+                  {t('common.close')}
+                </button>
+              </div>
+            </div>,
+            document.body
+          )}
 
           <div className="btn-row" style={{ marginBottom: '20px' }}>
             <button
@@ -3226,19 +3581,27 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
             <h3 style={{ color: 'var(--neon-purple)', marginBottom: '5px' }}>{t('gm.waitingConfirmations')}</h3>
             <p style={{ color: 'var(--text-muted)', marginBottom: '15px', fontSize: '0.9rem' }}>{t('gm.waitingConfirmationsBody')}</p>
             {(() => {
-              const renderPlayerRow = (p) => {
-                const couple = room.couples.find(c => c.playerIds.includes(p.id));
-                const needsGmConfirm = !p.isConfirmed && p.hasNoPhone && couple && isCoupleFullyPhoneless(couple);
+              // One row per COUPLE, not per player - a fully-phoneless couple
+              // has both members individually at isConfirmed=false (see
+              // releasePairs' comment: neither has a device that could ever
+              // flip it themselves), so rendering per-player showed the exact
+              // same "waiting, mark ready" box twice for what is actually one
+              // couple needing one click. Every other phase with an analogous
+              // list (role_reveal's viewed-role list, silent_report's
+              // claims/reports, voting) already renders per-couple - this was
+              // the one holdout still grouped by individual player instead.
+              // A mixed couple (one phone, one not) collapses cleanly the
+              // same way: its phoneless half starts pre-confirmed, so the row
+              // just waits on whichever member actually has a phone to tap
+              // confirm, same real-world condition as before, one row instead
+              // of a same-couple pair split across both lists.
+              const renderCoupleRow = (couple) => {
+                const members = getCoupleMembers(couple);
+                const coupleConfirmed = members.length > 0 && members.every(m => m.isConfirmed);
+                const needsGmConfirm = !coupleConfirmed && isCoupleFullyPhoneless(couple);
                 return (
-                  <div key={p.id} className={`list-item ${p.isConfirmed ? 'list-item--active' : 'list-item--danger'}`}>
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      {maskName(p.name)}
-                      {p.isFlexible && <Repeat size={14} className="icon-inline" title={t('gm.flexibleRoleTitle')} />}
-                      {p.hasNoPhone
-                        ? <PhoneOff size={14} className="icon-inline" title={t('gm.noPhoneTitle')} style={{ color: 'var(--text-muted)' }} />
-                        : <Smartphone size={14} className="icon-inline" title={t('gm.hasPhoneTitle')} style={{ color: 'var(--neon-blue)' }} />}
-                      ({p.danceRole})
-                    </span>
+                  <div key={couple.id} className={`list-item ${coupleConfirmed ? 'list-item--active' : 'list-item--danger'}`}>
+                    {renderMembersWithPhoneIcons(couple)}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
                       {needsGmConfirm && (
                         <button
@@ -3249,34 +3612,44 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                           {t('gm.markReadyGm')}
                         </button>
                       )}
-                      <span className={`badge ${p.isConfirmed ? 'badge--blue' : 'badge--red'}`}>{p.isConfirmed ? t('common.ready') : t('common.waiting')}</span>
+                      <span className={`badge ${coupleConfirmed ? 'badge--blue' : 'badge--red'}`}>{coupleConfirmed ? t('common.ready') : t('common.waiting')}</span>
                     </div>
                   </div>
                 );
               };
-              const waitingPlayers = pairedPlayers.filter(p => !p.isConfirmed);
-              const confirmedPlayers = pairedPlayers.filter(p => p.isConfirmed);
+              const waitingCouples = room.couples.filter(c => !getCoupleMembers(c).every(m => m.isConfirmed));
+              const confirmedCouples = room.couples.filter(c => getCoupleMembers(c).every(m => m.isConfirmed));
               return (
                 <>
-                  <div className="couple-list" style={{ marginBottom: confirmedPlayers.length > 0 ? '10px' : '20px' }}>
-                    {waitingPlayers.map(renderPlayerRow)}
-                  </div>
-                  {confirmedPlayers.length > 0 && (
-                    <>
+                  {/* Skipped entirely (not just left empty) once everyone's
+                      confirmed - an empty couple-list still ate its own
+                      marginBottom, leaving a blank gap above the toggle
+                      button below with nothing in it. */}
+                  {waitingCouples.length > 0 && (
+                    <div className="couple-list" style={{ marginBottom: confirmedCouples.length > 0 ? '10px' : '20px' }}>
+                      {waitingCouples.map(renderCoupleRow)}
+                    </div>
+                  )}
+                  {confirmedCouples.length > 0 && (
+                    // Centered explicitly (same wrapping pattern as the
+                    // bypass button below) rather than relying on an
+                    // ancestor's text-align - this phase's own root has none,
+                    // so the button rendered left-aligned before. Matches the
+                    // Role Reveal phase's equivalent toggle below.
+                    <div style={{ textAlign: 'center', marginTop: waitingCouples.length > 0 ? 0 : '10px', marginBottom: '20px' }}>
                       <button
                         onClick={() => setShowConfirmedPlayers(v => !v)}
                         className="collapse-toggle"
-                        style={{ marginBottom: '10px' }}
                       >
                         {showConfirmedPlayers ? <ChevronUp size={14} className="icon-inline" /> : <ChevronDown size={14} className="icon-inline" />}
-                        {t('gm.confirmedPlayersToggle', { count: confirmedPlayers.length })}
+                        {t('gm.confirmedPlayersToggle', { count: confirmedCouples.length })}
                       </button>
                       {showConfirmedPlayers && (
-                        <div className="couple-list" style={{ marginTop: 0, marginBottom: '20px' }}>
-                          {confirmedPlayers.map(renderPlayerRow)}
+                        <div className="couple-list" style={{ marginTop: '10px', textAlign: 'left' }}>
+                          {confirmedCouples.map(renderCoupleRow)}
                         </div>
                       )}
-                    </>
+                    </div>
                   )}
                 </>
               );
@@ -3406,25 +3779,35 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 const viewed = withViewed.filter(x => x.hasViewed);
                 return (
                   <>
-                    <div className="couple-list" style={{ marginBottom: viewed.length > 0 ? '10px' : '20px', textAlign: 'left' }}>
-                      {waiting.map(x => renderCoupleRow(x.couple, x.hasViewed))}
-                    </div>
+                    {/* Skipped entirely once everyone's viewed their role -
+                        same reasoning as the Paired phase's equivalent
+                        toggle above (an empty couple-list still ate its own
+                        marginBottom for nothing). */}
+                    {waiting.length > 0 && (
+                      <div className="couple-list" style={{ marginBottom: viewed.length > 0 ? '10px' : '20px', textAlign: 'left' }}>
+                        {waiting.map(x => renderCoupleRow(x.couple, x.hasViewed))}
+                      </div>
+                    )}
                     {viewed.length > 0 && (
-                      <>
+                      // Explicitly centered (matches the Paired phase's
+                      // equivalent toggle) rather than relying on this
+                      // section's ancestor text-align:center - keeps both
+                      // toggles' markup homogeneous instead of one leaning
+                      // on inherited alignment the other can't.
+                      <div style={{ textAlign: 'center', marginTop: waiting.length > 0 ? 0 : '10px', marginBottom: '20px' }}>
                         <button
                           onClick={() => setShowRoleViewedCouples(v => !v)}
                           className="collapse-toggle"
-                          style={{ marginBottom: '10px' }}
                         >
                           {showRoleViewedCouples ? <ChevronUp size={14} className="icon-inline" /> : <ChevronDown size={14} className="icon-inline" />}
                           {t('gm.confirmedPlayersToggle', { count: viewed.length })}
                         </button>
                         {showRoleViewedCouples && (
-                          <div className="couple-list" style={{ marginTop: 0, marginBottom: '20px', textAlign: 'left' }}>
+                          <div className="couple-list" style={{ marginTop: '10px', textAlign: 'left' }}>
                             {viewed.map(x => renderCoupleRow(x.couple, x.hasViewed))}
                           </div>
                         )}
-                      </>
+                      </div>
                     )}
                   </>
                 );
@@ -3626,11 +4009,19 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <p style={{ color: 'var(--text-muted)', marginBottom: '10px' }}>
                   {t('gm.observeBody')}
                 </p>
-                {room.protectorPick && (
-                  <p style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginBottom: '10px', fontStyle: 'italic' }}>
-                    {t('gm.protectorPickLabel', { name: room.couples.find(c => c.id === room.protectorPick)?.name || '?' })}
+                {/* room.protectorPicks is keyed by protector coupleId - more
+                    than one entry once the GM enables more than one
+                    Protector (see the gear-icon count distribution above),
+                    each shown on its own line naming both who picked and
+                    who they picked. */}
+                {room.protectorPicks && Object.entries(room.protectorPicks).map(([protectorCoupleId, targetCoupleId]) => (
+                  <p key={protectorCoupleId} style={{ color: 'var(--neon-blue)', fontSize: '0.9rem', marginBottom: '10px', fontStyle: 'italic' }}>
+                    {t('gm.protectorPickLabel', {
+                      protector: room.couples.find(c => c.id === protectorCoupleId)?.name || '?',
+                      name: room.couples.find(c => c.id === targetCoupleId)?.name || '?',
+                    })}
                   </p>
-                )}
+                ))}
 
                 {room.couples.filter(c => c.specialRole === 'toucher' && c.status === 'alive').map(toucher => (
                   <div key={toucher.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', marginBottom: '10px' }}>
@@ -4176,7 +4567,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
           );
         }
         if (room.gameMode === 'maxkills') {
-          const ranking = room.maxKillsFinalRanking || [];
+          const ranking = buildMaxKillsRanks(room.maxKillsFinalRanking || []);
           const topKills = ranking[0]?.kills ?? 0;
           return (
             <div className="panel phase-enter panel--purple" style={{ marginTop: '30px', textAlign: 'center' }}>
@@ -4184,13 +4575,13 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                 <Trophy size={20} className="icon-inline" /> {t('gm.maxKillsFinalRankingTitle')}
               </h3>
               <div className="couple-list" style={{ marginBottom: '20px', textAlign: 'left' }}>
-                {ranking.map((entry, i) => {
+                {ranking.map((entry) => {
                   const couple = room.couples.find(c => c.id === entry.coupleId);
                   const isWinner = entry.kills === topKills && topKills > 0;
                   return (
                     <div key={entry.coupleId} className={`list-item ${isWinner ? 'list-item--active' : ''}`}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flex: 1, minWidth: 0 }}>
-                        <span style={{ color: isWinner ? 'var(--neon-purple)' : 'var(--text-muted)', fontWeight: 'bold', flexShrink: 0 }}>#{i + 1}</span>
+                        <span style={{ color: isWinner ? 'var(--neon-purple)' : 'var(--text-muted)', fontWeight: 'bold', flexShrink: 0 }}>{entry.rankLabel}</span>
                         {isWinner && <Trophy size={16} className="icon-inline" style={{ color: 'var(--neon-purple)', flexShrink: 0 }} />}
                         {renderTruncatedNames(couple?.name || '?')}
                       </div>
@@ -4450,6 +4841,47 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
           document.body
       )}
 
+      {showReadAloudModal && createPortal(
+          <div className="modal-overlay" onClick={() => setShowReadAloudModal(false)}>
+            <div className="modal-card cyber-card" style={{ maxWidth: '480px', border: '1px solid var(--neon-blue)', textAlign: 'left' }} onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => setShowReadAloudModal(false)} className="icon-btn modal-close-btn">
+                <X size={20} />
+              </button>
+              <h3 style={{ marginBottom: '15px', color: 'var(--neon-blue)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <Mic size={20} className="icon-inline" /> {t('gm.readAloudButtonTitle')}
+              </h3>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '12px' }}>{t('gm.readAloudHint')}</p>
+              <p style={{ color: 'white', fontSize: '0.95rem', lineHeight: 1.6, whiteSpace: 'pre-wrap', margin: 0 }}>
+                {room.status === 'lobby'
+                  ? buildReadAloudText(t, { gameMode, killerCount, killMode, specialRolesEnabled, specialRoles })
+                  // In-round: room.gameMode (server-confirmed), not the local
+                  // gameMode draft state above - a co-GM who joined mid-game
+                  // never touched that selector, so their own local copy
+                  // could still be sitting on its 'standard' default.
+                  : (phaseBodyKeyFor(room.status, room.gameMode) ? t(phaseBodyKeyFor(room.status, room.gameMode)) : '')}
+              </p>
+            </div>
+          </div>,
+          document.body
+      )}
+
+      {autoExplainPhase && createPortal(
+          <div className="modal-overlay" onClick={() => setAutoExplainPhase(null)}>
+            <div className="modal-card cyber-card" style={{ maxWidth: '400px', border: '1px solid var(--neon-purple)', textAlign: 'left' }} onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => setAutoExplainPhase(null)} className="icon-btn modal-close-btn">
+                <X size={20} />
+              </button>
+              <h3 style={{ marginBottom: '12px', color: 'var(--neon-purple)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <HelpCircle size={20} className="icon-inline" /> {t('gm.explainPhaseTitle')}
+              </h3>
+              <p style={{ margin: 0, color: 'white', fontSize: '0.95rem', lineHeight: 1.5 }}>
+                {t(gmExplainPhaseBodyKeyFor(autoExplainPhase, room.gameMode, room.killMode))}
+              </p>
+            </div>
+          </div>,
+          document.body
+      )}
+
       <ConfirmModal
         isOpen={!!confirmState}
         message={confirmState?.message}
@@ -4470,7 +4902,19 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
         onClose={() => setAlertState(null)}
       />
 
-      <HowToPlayModal isOpen={showHowTo} onClose={() => setShowHowTo(false)} />
+      <HowToPlayModal
+        isOpen={showHowTo}
+        onClose={() => setShowHowTo(false)}
+        gameMode={room.gameMode}
+        // 'paired' excluded deliberately, not just 'lobby' - couples exist by
+        // then but room.gameMode/couple.role don't (both are only ever set
+        // inside startGame(), which runs after 'paired') - narrowing here
+        // would show a wrong "Standard mode" description whenever Chaos/Max
+        // Kills was picked but not started yet.
+        inRound={room.status !== 'lobby' && room.status !== 'paired'}
+        roomStatus={room.status}
+        activeSpecialRoles={room.couples ? [...new Set(room.couples.map(c => c.specialRole).filter(Boolean))] : []}
+      />
       <LanguageModal isOpen={showLanguageModal} onClose={() => setShowLanguageModal(false)} />
 
       {showSpotifyModal && createPortal(

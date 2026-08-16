@@ -21,7 +21,10 @@ export function sanitizeRoomForGM(room) {
   // for the same reason: gmClientId itself IS broadcast to co-GMs (see its
   // own comment further down), so leaking this too would hand every co-GM
   // everything needed to impersonate the primary GM.
-  const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, ...rest } = room;
+  // spotifyShareDeniedPlayerIds is internal bookkeeping for suppressing a
+  // donor's automatic re-offer (see resolveSpotifyShareRequest) - the GM
+  // already made that decision by hand and nothing in their UI reads it back.
+  const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, spotifyShareDeniedPlayerIds, ...rest } = room;
   return {
     ...rest,
     players: room.players.map(({ socketId, sessionSecret, ...r }) => r),
@@ -103,9 +106,16 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     ? (myCouple && list.includes(myCouple.id) ? [myCouple.id] : [])
     : list);
 
-  const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, pendingRejoinRequests, ...rest } = room;
+  // spotifyShareDeniedPlayerIds is replaced by the one bit of it that
+  // concerns this viewer (mySpotifyShareDenied below) - no player needs the
+  // full list of who else got turned down.
+  const { pairOverrides, killerOverridePlayerIds, gmId, gmClientId, gmUserId, gmSessionSecret, pendingRejoinRequests, spotifyShareDeniedPlayerIds, ...rest } = room;
   return {
     ...rest,
+    // Lets PlayerScreen say why an offer went nowhere instead of silently
+    // resetting to the "share" button, and matches the server-side rule that
+    // stops autoShareSpotify from re-offering after a refusal.
+    mySpotifyShareDenied: (spotifyShareDeniedPlayerIds || []).includes(viewerClientId),
     players: room.players.map(({ socketId, sessionSecret, ...r }) => r),
     coGms: room.coGms.map(({ socketId, sessionSecret, ...r }) => r),
     couples,
@@ -114,12 +124,14 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
     votes: pickOwn(room.votes),
     seerPeeks: pickOwn(room.seerPeeks), // a Seer's peek result is personal, not shared with teammates - same treatment as their specialRole itself
     toucherReports: pickOwn(room.toucherReports), // same pre-reveal secrecy as killClaims/victimReports above - not public until revealKill
-    // Not keyed by couple id like the fields above (there's only ever one
-    // current pick, not one per couple), so pickOwn doesn't apply - only the
-    // Protector's own couple gets to see it, everyone else (including the
-    // killers who'd love to know) gets null. revealAllRoles reuses the same
-    // "game's over, nothing left to hide" condition as couple roles above.
-    protectorPick: (myCouple?.specialRole === 'protector' || revealAllRoles) ? room.protectorPick : null,
+    // room.protectorPicks is keyed by protector coupleId (multiple Protector
+    // couples can each have their own pick, since the GM can now enable more
+    // than one) - this unwraps it down to just this viewer's own pick (a
+    // plain coupleId, same shape PlayerScreen.jsx has always expected here),
+    // same "only your own couple's info" treatment as seerPeeks/toucherReports
+    // above, just not via pickOwn since the caller wants the bare value, not
+    // a one-entry dict.
+    protectorPick: myCouple?.specialRole === 'protector' ? (room.protectorPicks[myCouple.id] ?? null) : null,
     pendingVictimIds: [], // GM's in-progress kill marking is not public until revealKill
     maxKillsOrder: revealAllRoles ? room.maxKillsOrder : [],
     maxKillsTotalRounds: room.maxKillsOrder.length, // harmless to always send - the count alone (unlike the order's contents) reveals nothing about who's up next
@@ -234,7 +246,7 @@ class GameStore {
       // players never triggered it, since they have no socket to broadcast to).
       seerPeeks: {}, // { [seerCoupleId]: { targetCoupleId, targetRole } } - see seerPeek()
       toucherReports: {}, // { [toucherCoupleId]: boolean } - see gmMarkToucherResult()/submitToucherReport()/revealKill()
-      protectorPick: null, // coupleId | null - see submitProtectorPick()/revealKill()
+      protectorPicks: {}, // { [protectorCoupleId]: targetCoupleId } - see submitProtectorPick()/revealKill(). Per-couple like seerPeeks/toucherReports (not a single shared value) since the GM can now enable more than one Protector - each picks their own target independently.
       songSuggestions: [], // { id, playerId, playerName, track, createdAt } - track is a raw Spotify track object, players can suggest any time
       playedSongs: [], // { uri, name, artist, playedAt, round } - reported by the GM's client whenever it actually starts a track; own-audio mode never reports anything since the app has no visibility into what plays on an external device/speaker
       songQueue: [], // { id, type: 'spotify'|'text', uri, name, artist, text } - ordered, GM-managed upcoming picks (see addToSongQueue etc.). Persists across rounds AND across games in this room - only destroyRoom() clears it, resetRoom() deliberately leaves it alone.
@@ -245,6 +257,15 @@ class GameStore {
       spotifyDelegate: null, // { userId, playerId, name } | null - a player's account-linked Spotify connection, temporarily lent to the room for playback (see setSpotifyDelegate/clearSpotifyDelegate)
       gmSpotifyConnected: false, // mirrors whether the GM has their OWN (non-delegated) Spotify connection ready - see setGmSpotifyConnected. Lets players tell a share would be redundant before even asking.
       pendingSpotifyShareRequest: null, // { playerId, userId, name } | null - a player's offer to lend their Spotify, awaiting the GM's explicit accept/deny (see requestSpotifyShare/resolveSpotifyShareRequest)
+      // Players whose offer the GM already declined in this room. Exists
+      // purely to stop the account-wide "always offer my Spotify" setting
+      // (Settings.jsx's autoShareSpotify) from re-asking after every page
+      // reload: PlayerScreen's auto-offer guard is a ref, so it resets on
+      // remount and the GM got a fresh popup each time the player refreshed.
+      // A deliberate manual re-offer clears the entry again (see
+      // requestSpotifyShareToRoom in index.js) - this only ever suppresses
+      // the automatic path, never the player's own explicit click.
+      spotifyShareDeniedPlayerIds: [],
       // Site-owner-only, one-shot manipulation set live from the hidden
       // /admin screen (server/admin.js) - re-set by hand before every round,
       // never persisted, and stripped out in sanitizeRoomForGM/ForPlayer
@@ -266,7 +287,7 @@ class GameStore {
       maxKillsOrder: [], // [{ coupleId, counted }] - tournament order, built once in startGame()
       maxKillsRoundIndex: -1, // pointer into maxKillsOrder for the round currently in progress
       maxKillsVariant: 'shortened', // 'shortened' (Paarzahl-2 rounds) | 'doubleTurn' (everyone once, plus a couple of uncounted decoy repeats)
-      maxKillsSongLengthSec: 90, // GM-configured target song length - see the client's fade-out-at-target-duration effect
+      maxKillsSongLengthSec: 150, // GM-configured target song length - see the client's fade-out-at-target-duration effect
       killCounts: {}, // { coupleId: number } - persists the whole tournament (not reset per round) - the final ranking source
       maxKillsRoundVictimIds: [], // couples confirmed hit *this* round - reset every round
       maxKillsRoundOutIds: [], // couples out of action for *this* round (confirmed victims + wrong accusers) - reset every round
@@ -920,6 +941,16 @@ class GameStore {
     const room = this.rooms.get(roomId);
     if (!room) return null;
     room.useSpotify = !!useSpotify;
+    // Switching to own-audio mode leaves nothing for a delegated connection
+    // to feed into (see requestSpotifyShareToRoom's matching refusal for a
+    // *new* offer) - clear out anything already active/pending too, so a GM
+    // who flips this after a player already shared doesn't leave that share
+    // sitting there unused and confusing (still "active" per room state, but
+    // with no playback path that could ever use it).
+    if (!room.useSpotify) {
+      room.spotifyDelegate = null;
+      room.pendingSpotifyShareRequest = null;
+    }
     return room;
   }
 
@@ -952,14 +983,39 @@ class GameStore {
 
   // GM-only decision on a pending offer (see requestSpotifyShare). Accepting
   // commits it the same way the old direct-grant flow used to; denying just
-  // clears the offer without ever touching room.spotifyDelegate.
+  // clears the offer without ever touching room.spotifyDelegate - and
+  // remembers the refusal, so the donor's automatic re-offer on their next
+  // page reload doesn't put the same popup back in front of the GM (see
+  // room.spotifyShareDeniedPlayerIds).
   resolveSpotifyShareRequest(roomId, accept) {
     const room = this.rooms.get(roomId);
     if (!room || !room.pendingSpotifyShareRequest) return null;
     const { playerId, userId, name } = room.pendingSpotifyShareRequest;
     room.pendingSpotifyShareRequest = null;
-    if (accept) room.spotifyDelegate = { userId, playerId, name };
+    room.spotifyShareDeniedPlayerIds ??= []; // rooms are in-memory only, but see createRoom's note on startGame-only fields
+    if (accept) {
+      room.spotifyDelegate = { userId, playerId, name };
+      // A later accept undoes an earlier refusal - whatever the GM decided
+      // most recently is what the auto-offer path should respect.
+      room.spotifyShareDeniedPlayerIds = room.spotifyShareDeniedPlayerIds.filter(id => id !== playerId);
+    } else if (!room.spotifyShareDeniedPlayerIds.includes(playerId)) {
+      room.spotifyShareDeniedPlayerIds.push(playerId);
+    }
     return room;
+  }
+
+  // Whether this room's GM already declined an offer from this player - see
+  // resolveSpotifyShareRequest above and the `auto` branch of index.js's
+  // requestSpotifyShareToRoom.
+  hasDeclinedSpotifyShare(room, playerId) {
+    return !!room && (room.spotifyShareDeniedPlayerIds || []).includes(playerId);
+  }
+
+  // A player explicitly offering again by hand overrules an earlier refusal -
+  // the suppression only ever exists to silence the automatic path.
+  clearSpotifyShareDenial(room, playerId) {
+    if (!room) return;
+    room.spotifyShareDeniedPlayerIds = room.spotifyShareDeniedPlayerIds.filter(id => id !== playerId);
   }
 
   // Only the player who granted it (or the GM, e.g. if that player leaves
@@ -1242,6 +1298,32 @@ class GameStore {
     room.status = 'role_reveal';
     room.round += 1;
     room.voteResult = null; // harmless no-op from startDancing's branch, clears stale state from proceedFromVoteReveal's
+  }
+
+  // Draws `count` special roles out of SPECIAL_ROLE_KEYS for the GM's
+  // "no custom distribution set" case (see startGame's specialRolesAuto) -
+  // returns a flat list of role keys, possibly with repeats, to be handed out
+  // one per dancer couple.
+  //
+  // Filled level by level: a freshly shuffled full set of the five roles per
+  // level, truncated on the last one. So every role appears once before any
+  // appears twice, twice before any appears three times, and so on - exactly
+  // the "erst alle 2x, bevor eine 3x kommt" rule. With 4 draws that's 4
+  // distinct roles picked at random out of the 5; with 8 it's all 5 once plus
+  // 3 of them a second time. Re-shuffling per level (rather than cycling one
+  // fixed shuffled order) keeps *which* roles get doubled independent of
+  // which order the first level happened to come out in.
+  buildAutoSpecialRoleDraw(count) {
+    const draw = [];
+    while (draw.length < count) {
+      const level = [...SPECIAL_ROLE_KEYS];
+      for (let i = level.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [level[i], level[j]] = [level[j], level[i]];
+      }
+      draw.push(...level.slice(0, count - draw.length));
+    }
+    return draw;
   }
 
   // Max Kills mode's tournament order (see room.maxKillsOrder): every couple
@@ -1568,10 +1650,16 @@ class GameStore {
     killMode = 'classic',
     deadPlayersKeepDancing = false,
     specialRoles = {},
-    martyrWinsOnVote = false, // GM override for the Märtyrer special role's win condition - see couple.eliminatedBy
+    // "Special roles on, but no per-role count configured" - the GM never
+    // opened the distribution gear, so the app picks both how many and which
+    // (see buildAutoSpecialRoleDraw and the assignment block below) instead
+    // of the master switch quietly meaning "none at all". Ignored whenever
+    // specialRoles actually carries counts.
+    specialRolesAuto = false,
     gameMode = 'standard', // 'standard' | 'chaos' | 'maxkills' - see assignKillers()/startDancing()/buildMaxKillsOrder()
     maxKillsVariant = 'shortened', // 'shortened' | 'doubleTurn' - see buildMaxKillsOrder()
-    maxKillsSongLengthSec = 90, // Max Kills mode only - see the client's fade-out-at-target-duration effect
+    maxKillsSongLengthSec = 150, // Max Kills mode only - see the client's fade-out-at-target-duration effect
+    explanationsEnabled = false, // opt-in per-phase tutorial popups for players - see PlayerScreen.jsx's auto-explain effect
   } = {}) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -1598,17 +1686,19 @@ class GameStore {
     // Protector special role: NOT reset at every round boundary like the
     // fields above - see submitProtectorPick()/revealKill() for why it
     // deliberately survives from one round's kill_reveal into the next
-    // round's revealKill before being consumed. null here just means "no
-    // pick yet" (also true for round 1, which has no preceding kill_reveal
-    // to have set one in).
-    room.protectorPick = null;
+    // round's revealKill before being consumed. {} here just means "no picks
+    // yet" (also true for round 1, which has no preceding kill_reveal to
+    // have set any in).
+    room.protectorPicks = {};
     // Cosmetic-only setting (see PlayerScreen.jsx's isEliminated branch) - an
     // eliminated couple gets a rotating physical task prompt instead of just
     // "leave the floor". Never affects game logic/elimination itself, so a
     // plain per-game flag (not reset mid-game) is enough - no server-side
     // validation needed since nothing reads it but that one client branch.
     room.deadPlayersKeepDancing = !!deadPlayersKeepDancing;
-    room.martyrWinsOnVote = !!martyrWinsOnVote;
+    // Plain boolean, not a secret - flows through to players automatically
+    // via sanitizeRoomForPlayer's `...rest` spread, no extra plumbing there.
+    room.explanationsEnabled = !!explanationsEnabled;
 
     room.gameMode = gameMode; // 'standard' | 'chaos' | 'maxkills' - see startDancing()'s chaos branch / advanceMaxKillsRound() below for the per-round re-pick
     room.killerCount = killerCount; // persisted so Chaos mode's per-round re-pick in startDancing() reuses the same count
@@ -1618,10 +1708,15 @@ class GameStore {
       // plan's confirmed assumptions (special roles stay off in this mode
       // too, same as Chaos) and buildMaxKillsOrder()/advanceMaxKillsRound()
       // for the per-round killer rotation this sets up.
-      room.maxKillsVariant = maxKillsVariant;
-      room.maxKillsSongLengthSec = Math.max(20, Math.min(300, Number(maxKillsSongLengthSec) || 90));
+      //
+      // 'shortened' needs at least 4 couples (see buildMaxKillsOrder's own
+      // comment and GMDashboard.jsx's matching UI gate) - authoritative check
+      // here too, same defense-in-depth as every other GM-picked setting this
+      // method validates, in case a stale client still offers it.
+      room.maxKillsVariant = (maxKillsVariant === 'shortened' && room.couples.length < 4) ? 'doubleTurn' : maxKillsVariant;
+      room.maxKillsSongLengthSec = Math.max(20, Math.min(300, Number(maxKillsSongLengthSec) || 150));
       room.killCounts = {};
-      room.maxKillsOrder = this.buildMaxKillsOrder(room, maxKillsVariant);
+      room.maxKillsOrder = this.buildMaxKillsOrder(room, room.maxKillsVariant);
       room.maxKillsRoundIndex = 0;
       room.maxKillsRoundVictimIds = [];
       room.maxKillsRoundOutIds = [];
@@ -1638,20 +1733,45 @@ class GameStore {
 
       // Special-role assignment (see SPECIAL_ROLE_KEYS/couple.specialRole) -
       // runs after killers are picked so a killer couple never doubles as a
-      // special-role holder (these are a dancer-side mechanic). One random
-      // dancer couple per GM-enabled role, one role per couple for v1 (no
-      // stacking) - if there aren't enough dancer couples left for every
-      // enabled role, the remaining ones are simply skipped rather than
-      // failing the whole game start. Chaos mode keeps this permanently empty
-      // (see the new-roles/modes plan) - GMDashboard.jsx hides/clears the
-      // special-role pickers whenever gameMode is 'chaos', so specialRoles is
-      // always {} there in practice, but this isn't re-enforced here too.
+      // special-role holder (these are a dancer-side mechanic). specialRoles[key]
+      // is a count now (GMDashboard.jsx's gear-icon distribution, not just an
+      // on/off checkbox) - that many random dancer couples get that role, one
+      // role per couple still (no couple ever holds two). A boolean true/false
+      // from before this shipped still works here too (Number(true) === 1),
+      // so this reads old-shaped room state exactly as it used to behave. If
+      // there aren't enough dancer couples left for every enabled role's full
+      // count, the remainder is simply skipped rather than failing the whole
+      // game start. Chaos mode keeps this permanently empty (see the new-
+      // roles/modes plan) - GMDashboard.jsx hides/clears the special-role
+      // pickers whenever gameMode is 'chaos', so specialRoles is always {}
+      // there in practice, but this isn't re-enforced here too.
       const unassignedForSpecialRole = room.couples.filter(c => c.role === 'dancer');
-      for (const key of SPECIAL_ROLE_KEYS) {
-        if (!specialRoles[key] || unassignedForSpecialRole.length === 0) continue;
+      const giveToRandomDancerCouple = (key) => {
+        if (unassignedForSpecialRole.length === 0) return false;
         const idx = Math.floor(Math.random() * unassignedForSpecialRole.length);
         unassignedForSpecialRole[idx].specialRole = key;
         unassignedForSpecialRole.splice(idx, 1);
+        return true;
+      };
+
+      if (specialRolesAuto) {
+        // "One special role per every second couple" (8 couples -> 4 roles),
+        // counted off the room's full couple list rather than just the
+        // dancer-team remainder, so the number a GM can predict from the
+        // room in front of them doesn't quietly shift with the killer count.
+        // Still capped at how many dancer couples actually remain to receive
+        // one - killers never hold a special role (see the branch above).
+        const target = Math.min(Math.floor(room.couples.length / 2), unassignedForSpecialRole.length);
+        for (const key of this.buildAutoSpecialRoleDraw(target)) {
+          if (!giveToRandomDancerCouple(key)) break;
+        }
+      } else {
+        for (const key of SPECIAL_ROLE_KEYS) {
+          const count = Math.max(0, Math.floor(Number(specialRoles[key]) || 0));
+          for (let i = 0; i < count; i++) {
+            if (!giveToRandomDancerCouple(key)) break;
+          }
+        }
       }
     }
 
@@ -1953,16 +2073,18 @@ class GameStore {
       .filter(c => c.specialRole === 'toucher' && c.status === 'alive' && room.toucherReports[c.id] !== true)
       .map(c => c.id);
 
-    // Protector special role: a couple picked during the *previous* round's
-    // kill_reveal (see submitProtectorPick) cannot die to a kill this round -
-    // filtered out before anything below ever sees them as a victim, so
-    // there's no separate "un-kill" step to keep in sync elsewhere (win
-    // condition, achievements, DB persistence all just see a survivor).
-    // Consumed here regardless of whether it actually saved anyone, so a
-    // stale pick can never silently protect a couple again next round if the
-    // Protector forgets to submit a fresh one.
-    room.victimIds = [...new Set([...room.pendingVictimIds, ...failedToucherIds])].filter(id => id !== room.protectorPick);
-    room.protectorPick = null;
+    // Protector special role: any couple picked (by any Protector - multiple
+    // are possible now, see room.protectorPicks) during the *previous*
+    // round's kill_reveal cannot die to a kill this round - filtered out
+    // before anything below ever sees them as a victim, so there's no
+    // separate "un-kill" step to keep in sync elsewhere (win condition,
+    // achievements, DB persistence all just see a survivor). Consumed here
+    // regardless of whether it actually saved anyone, so a stale pick can
+    // never silently protect a couple again next round if a Protector
+    // forgets to submit a fresh one.
+    const protectedIds = new Set(Object.values(room.protectorPicks));
+    room.victimIds = [...new Set([...room.pendingVictimIds, ...failedToucherIds])].filter(id => !protectedIds.has(id));
+    room.protectorPicks = {};
 
     room.victimIds.forEach(victimId => {
       const couple = room.couples.find(c => c.id === victimId);
@@ -2011,7 +2133,10 @@ class GameStore {
   // (no once-per-round lock, unlike the Seer) since there's no information
   // asymmetry to protect here, just a choice the Protector might reconsider
   // before it's consumed at the top of the next revealKill(). Only ever
-  // covers a kill, never a vote-out (see the new-roles/modes plan).
+  // covers a kill, never a vote-out (see the new-roles/modes plan). Keyed by
+  // the submitting Protector's own couple id (room.protectorPicks) so
+  // multiple Protector couples (the GM can now enable more than one) each
+  // get their own independent pick instead of overwriting a single shared one.
   submitProtectorPick(roomId, clientId, targetCoupleId) {
     const room = this.rooms.get(roomId);
     if (!room) return null;
@@ -2023,7 +2148,7 @@ class GameStore {
     const target = room.couples.find(c => c.id === targetCoupleId);
     if (!target || target.status !== 'alive') return room;
 
-    room.protectorPick = target.id;
+    room.protectorPicks[couple.id] = target.id;
     return room;
   }
 
@@ -2256,7 +2381,7 @@ class GameStore {
     room.silentReportsResolved = false;
     room.seerPeeks = {};
     room.toucherReports = {};
-    room.protectorPick = null;
+    room.protectorPicks = {};
     room.maxKillsOrder = [];
     room.maxKillsRoundIndex = -1;
     room.killCounts = {};

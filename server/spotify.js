@@ -295,7 +295,7 @@ router.get('/playlists', requireAuth, asyncRoute(async (req, res) => {
 // looks the same as one picked from search (see searchTracksWithToken below).
 export async function fetchPlaylistTracksWithToken(accessToken, playlistId) {
   const tracks = [];
-  let path = `/playlists/${playlistId}/items?limit=100&fields=next,items(item(uri,name,artists(name),album(images)),track(uri,name,artists(name),album(images)))`;
+  let path = `/playlists/${playlistId}/items?limit=100&fields=next,items(item(uri,name,artists(name),album(images),duration_ms),track(uri,name,artists(name),album(images),duration_ms))`;
   while (path && tracks.length < 500) {
     const data = await spotifyFetch(accessToken, path);
     for (const entry of data.items || []) {
@@ -309,6 +309,12 @@ export async function fetchPlaylistTracksWithToken(accessToken, playlistId) {
         name: track.name,
         artist: (track.artists || []).map(a => a.name).join(', '),
         imageUrl: track.album?.images?.[2]?.url || track.album?.images?.[0]?.url || null,
+        // Max Kills mode's fairness filter (see GMDashboard.jsx's
+        // loadPlaylistTracks) needs this to keep a couple whose round-song
+        // came from a playlist from getting an unfairly short window - only
+        // Spotify-sourced playlists carry it at all, the app's own DB-backed
+        // ones never stored it (see server/db.js's playlist_tracks).
+        durationMs: typeof track.duration_ms === 'number' ? track.duration_ms : null,
       });
     }
     path = data.next ? data.next.replace('https://api.spotify.com/v1', '') : null;

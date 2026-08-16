@@ -610,13 +610,32 @@ io.on('connection', (socket) => {
   // client is expected to already hide the entry point in those cases, this
   // is the authoritative check. Doesn't take effect until the GM explicitly
   // accepts (see resolveSpotifyShareRequest below) - see gameStore.requestSpotifyShare.
-  socket.on('requestSpotifyShareToRoom', async ({ roomId }, callback) => {
+  socket.on('requestSpotifyShareToRoom', async ({ roomId, auto }, callback) => {
     if (!authenticatedUserId) return callback?.({ success: false, messageKey: 'notAuthenticated' });
     const room = gameStore.getRoom(roomId);
     if (!room) return callback?.({ success: false, messageKey: 'roomNotFound' });
     const player = getCallingPlayer(room, socket);
     if (!player) return callback?.({ success: false, messageKey: 'playerNotFound' });
     const clientId = player.id;
+    // `auto` marks the account-wide "always offer my Spotify" setting firing
+    // by itself (see PlayerScreen.jsx's auto-offer effect) rather than a
+    // deliberate click. The client-side guard for that is a ref, so it resets
+    // on every remount - which meant a player who reloaded their page after
+    // the GM declined put the same request straight back in the GM's face,
+    // over and over. Refusing it here (not client-side) is what actually
+    // holds, since the refusal has to outlive the reloading tab.
+    if (auto && gameStore.hasDeclinedSpotifyShare(room, clientId)) {
+      return callback?.({ success: false, messageKey: 'shareAlreadyDeclined' });
+    }
+    // Anything not marked `auto` is the player themselves choosing to offer
+    // again, which overrules the earlier refusal.
+    if (!auto) gameStore.clearSpotifyShareDenial(room, clientId);
+    // Own-audio-mode room (see gameStore.setUseSpotify) - there's no
+    // playback path a delegated connection could feed into, so a share here
+    // would just sit unused. Client hides the entry point for this already
+    // (see PlayerScreen.jsx's spotifyShareOffPossible), this is the
+    // authoritative check.
+    if (room.useSpotify === false) return callback?.({ success: false, messageKey: 'roomNotUsingSpotify' });
     if (room.gmSpotifyConnected) return callback?.({ success: false, messageKey: 'gmAlreadyConnected' });
     if (room.spotifyDelegate && room.spotifyDelegate.playerId !== clientId) return callback?.({ success: false, messageKey: 'shareAlreadyActive' });
     if (room.pendingSpotifyShareRequest && room.pendingSpotifyShareRequest.playerId !== clientId) return callback?.({ success: false, messageKey: 'shareAlreadyActive' });
@@ -993,14 +1012,18 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('startGame', ({ roomId, killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote, gameMode, maxKillsVariant, maxKillsSongLengthSec }) => {
+  socket.on('startGame', ({ roomId, killerCount, killMode, deadPlayersKeepDancing, specialRoles, specialRolesAuto, gameMode, maxKillsVariant, maxKillsSongLengthSec, explanationsEnabled }) => {
     if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
     // NOTE: gameMode itself was missing from this destructure until now -
     // every game (including Chaos mode games) was silently starting as
     // 'standard' server-side regardless of what the GM picked in
     // GMDashboard.jsx, since gameStore.startGame()'s own default ('standard')
-    // always won. Found and fixed while wiring up Max Kills mode.
-    const room = gameStore.startGame(roomId, { killerCount, killMode, deadPlayersKeepDancing, specialRoles, martyrWinsOnVote, gameMode, maxKillsVariant, maxKillsSongLengthSec });
+    // always won. Found and fixed while wiring up Max Kills mode. Every new
+    // startGame option since has had to be added here explicitly for the
+    // same reason - this destructure is not a spread, so a forgotten field
+    // here silently falls back to gameStore.startGame()'s own default no
+    // matter what the GM picked client-side.
+    const room = gameStore.startGame(roomId, { killerCount, killMode, deadPlayersKeepDancing, specialRoles, specialRolesAuto, gameMode, maxKillsVariant, maxKillsSongLengthSec, explanationsEnabled });
     if (room) {
       broadcastRoom(room);
       
@@ -1335,6 +1358,16 @@ app.get('/api/fallback-songs/random', async (req, res) => {
   const [rows] = await pool.query('SELECT track_uri, track_name, artist_name FROM fallback_songs ORDER BY RAND() LIMIT 1');
   const row = rows[0];
   res.json({ track: row ? { uri: row.track_uri, name: row.track_name, artist: row.artist_name } : null });
+});
+
+// Public, no login needed - the /roadmap page every visitor can view. Items
+// are only ever written through the gated /api/admin/roadmap-items routes
+// (see server/admin.js); this just reads them back out grouped by status.
+app.get('/api/roadmap', async (req, res) => {
+  const pool = await getPool();
+  if (!pool) return res.json({ items: [] });
+  const [rows] = await pool.query('SELECT id, title, description, status FROM roadmap_items ORDER BY status, sort_order');
+  res.json({ items: rows.map(r => ({ id: r.id, title: r.title, description: r.description, status: r.status })) });
 });
 
 app.get('*', (req, res) => {

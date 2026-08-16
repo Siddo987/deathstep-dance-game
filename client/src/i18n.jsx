@@ -7,7 +7,11 @@ import nl from './locales/nl.js';
 import fr from './locales/fr.js';
 
 const LANG_KEY = 'deathstep_language';
-const dictionaries = { en, de, ru, uk, nl, fr };
+// de first - this app's default/primary audience is German-speaking, and
+// object key order drives SUPPORTED_LANGS below, so every language list
+// derived from it (Home.jsx's picker, Modal.jsx's LanguageModal) shows
+// German first rather than in alphabetical/arbitrary order.
+const dictionaries = { de, en, ru, uk, nl, fr };
 // Exported so every in-app language switcher (Home.jsx's own-screen picker,
 // Modal.jsx's LanguageModal reused from GMDashboard/PlayerScreen's kebab
 // menus) draws from one list - a language added here shows up everywhere
@@ -24,11 +28,13 @@ export function detectLanguage() {
   // don't collide with anything else here; browser tags come as e.g.
   // 'de-DE', 'uk-UA', 'fr-CA', so match on the language subtag only.
   const prefix = browserLang.split('-')[0];
-  return SUPPORTED_LANGS.includes(prefix) ? prefix : 'en';
+  // Falls back to German (this app's default language), not English, for a
+  // browser language this app doesn't support at all.
+  return SUPPORTED_LANGS.includes(prefix) ? prefix : 'de';
 }
 
 const LanguageContext = createContext({
-  lang: 'en',
+  lang: 'de',
   setLang: () => {},
   t: (key) => key,
 });
@@ -44,9 +50,10 @@ export function LanguageProvider({ children }) {
   }, [lang]);
 
   // t('key', { name: 'X' }) replaces {name} placeholders. Unknown keys fall
-  // back to English, then to the raw key so missing entries stay visible.
+  // back to German (this app's default/primary language), then to the raw
+  // key so missing entries stay visible.
   const t = (key, params) => {
-    let text = dictionaries[lang][key] ?? dictionaries.en[key] ?? key;
+    let text = dictionaries[lang][key] ?? dictionaries.de[key] ?? key;
     if (params) {
       Object.keys(params).forEach(p => {
         text = text.split(`{${p}}`).join(String(params[p]));

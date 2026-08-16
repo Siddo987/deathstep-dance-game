@@ -65,10 +65,12 @@ const Datenschutz = lazyWithRetry(() => import('./components/Datenschutz.jsx'));
 const Impressum = lazyWithRetry(() => import('./components/Impressum.jsx'));
 const Stats = lazyWithRetry(() => import('./components/Stats.jsx'));
 const Settings = lazyWithRetry(() => import('./components/Settings.jsx'));
+const ResetPassword = lazyWithRetry(() => import('./components/ResetPassword.jsx'));
 const Leaderboard = lazyWithRetry(() => import('./components/Leaderboard.jsx'));
 const Playlists = lazyWithRetry(() => import('./components/Playlists.jsx'));
 const AchievementsDashboard = lazyWithRetry(() => import('./components/AchievementsDashboard.jsx'));
 const DevDashboard = lazyWithRetry(() => import('./components/DevDashboard.jsx'));
+const Roadmap = lazyWithRetry(() => import('./components/Roadmap.jsx'));
 
 // Minimal, near-invisible fallback for the Suspense boundaries below - these
 // lazy chunks are small and fast on a real connection, so this is only ever
@@ -606,6 +608,20 @@ function App() {
     );
   }
 
+  if (window.location.pathname === '/reset-password') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Suspense fallback={<RouteLoading />}>
+          <ResetPassword onAuthenticated={handleAuthenticated} />
+        </Suspense>
+        <CookieBanner />
+      </div>
+    );
+  }
+
   if (window.location.pathname === '/leaderboard') {
     return (
       <div className="app-container">
@@ -631,6 +647,18 @@ function App() {
           <Playlists currentUser={currentUser} authLoading={!authChecked} onLoginClick={() => setIsAuthModalOpen(true)} />
         </Suspense>
         <AuthModal isOpen={isAuthModalOpen} onClose={() => setIsAuthModalOpen(false)} onAuthenticated={handleAuthenticated} />
+        <CookieBanner />
+      </div>
+    );
+  }
+
+  if (window.location.pathname === '/roadmap') {
+    return (
+      <div className="app-container">
+        <div className="header">
+          <h1 className="glitch-text">Deathstep</h1>
+        </div>
+        <Suspense fallback={<RouteLoading />}><Roadmap /></Suspense>
         <CookieBanner />
       </div>
     );

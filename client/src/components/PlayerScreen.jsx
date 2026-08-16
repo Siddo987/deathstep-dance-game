@@ -8,6 +8,7 @@ import { useLanguage } from '../i18n.jsx';
 import { fetchMyPlaylists, fetchPlaylist, createPlaylist, addTrackToPlaylist, searchTracksInRoom, fetchSpotifyStatus } from '../spotifyPlaylists.js';
 import { getCookieConsent } from './CookieBanner.jsx';
 import AdminOverridesModal from './AdminOverridesModal.jsx';
+import { buildMaxKillsRanks } from '../maxKillsRanking.js';
 
 function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser }) {
   const { t } = useLanguage();
@@ -66,21 +67,32 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
   const isMySpotifyDelegate = room.spotifyDelegate?.playerId === clientId;
   const isMyShareRequestPending = room.pendingSpotifyShareRequest?.playerId === clientId;
-  // A share only makes sense while nobody else already has one active/pending
-  // and the GM doesn't already have a working connection of their own -
-  // matches the authoritative check in server/index.js's
-  // requestSpotifyShareToRoom, so the entry point never invites a request
-  // that's just going to be refused.
-  const spotifyShareOffPossible = !room.gmSpotifyConnected
+  // A share only makes sense while nobody else already has one active/pending,
+  // the GM doesn't already have a working connection of their own, and the
+  // room is actually configured to use Spotify at all - an own-audio-mode
+  // game (room.useSpotify === false, see spotifySuggestionsAllowed above) has
+  // no playback path that a delegated connection could ever feed into, so
+  // offering one there was a dead end that just confused the GM with an
+  // accept/deny prompt for a feature this game isn't using. Matches the
+  // authoritative check in server/index.js's requestSpotifyShareToRoom, so
+  // the entry point never invites a request that's just going to be refused.
+  const spotifyShareOffPossible = room.useSpotify !== false
+    && !room.gmSpotifyConnected
     && (!room.spotifyDelegate || isMySpotifyDelegate)
     && (!room.pendingSpotifyShareRequest || isMyShareRequestPending);
 
-  const handleRequestSpotifyShare = () => {
+  // `auto` distinguishes the account-wide setting firing on its own from a
+  // deliberate tap on "share" - the server refuses the automatic kind once
+  // this room's GM has declined it (see index.js's requestSpotifyShareToRoom)
+  // and treats a manual one as overruling that refusal.
+  const handleRequestSpotifyShare = ({ auto = false } = {}) => {
     setSpotifyShareBusy(true);
     setSpotifyShareError('');
-    socket.emit('requestSpotifyShareToRoom', { roomId: room.id }, (response) => {
+    socket.emit('requestSpotifyShareToRoom', { roomId: room.id, auto }, (response) => {
       setSpotifyShareBusy(false);
-      if (!response?.success) setSpotifyShareError(`server.${response?.messageKey || 'spotifyNotConnected'}`);
+      // An auto-offer being turned down is an expected outcome, not something
+      // to put a red error line in front of a player who never asked for it.
+      if (!response?.success && !auto) setSpotifyShareError(`server.${response?.messageKey || 'spotifyNotConnected'}`);
     });
   };
 
@@ -96,14 +108,22 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   // explicit accept, just so it doesn't have to be redone by hand every room.
   // Guarded by a ref (not state) so it only ever fires once per room per
   // mount, regardless of how many times the room broadcasts in the meantime.
+  //
+  // That ref is per-mount, so it can't remember anything across a page
+  // reload - which is why a reload used to fire a brand-new offer at a GM who
+  // had already said no. room.mySpotifyShareDenied is the server's memory of
+  // that refusal (see gameStore.resolveSpotifyShareRequest) and survives the
+  // reload; the server refuses the auto-request outright either way, this
+  // check just avoids sending one it knows will be refused.
   const autoShareTriedRef = React.useRef(false);
   React.useEffect(() => {
     if (autoShareTriedRef.current) return;
     if (!currentUser?.autoShareSpotify || !mySpotifyLinked) return;
+    if (room.mySpotifyShareDenied) return;
     if (!spotifyShareOffPossible || isMySpotifyDelegate || isMyShareRequestPending) return;
     autoShareTriedRef.current = true;
-    handleRequestSpotifyShare();
-  }, [currentUser?.autoShareSpotify, mySpotifyLinked, spotifyShareOffPossible, isMySpotifyDelegate, isMyShareRequestPending]);
+    handleRequestSpotifyShare({ auto: true });
+  }, [currentUser?.autoShareSpotify, mySpotifyLinked, room.mySpotifyShareDenied, spotifyShareOffPossible, isMySpotifyDelegate, isMyShareRequestPending]);
 
   // Only a logged-in Deathstep account's own DB-backed playlists (server/
   // playlists.js) show up here - a live-browsed "whatever's on your actual
@@ -227,7 +247,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         </div>
       )}
       {!currentUser && copiedLinkFor === song.uri && (
-        <p style={{ color: 'var(--neon-green)', fontSize: '0.8rem', textAlign: 'center', marginTop: '4px', marginBottom: 0 }}>{t('player.linkCopied')}</p>
+        <p style={{ color: 'var(--neon-green)', fontSize: '0.8rem', textAlign: 'center', marginTop: '10px', marginBottom: 0 }}>{t('player.linkCopied')}</p>
       )}
     </div>
   );
@@ -458,45 +478,51 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     });
   };
 
-  const leaveButton = (
+  // Every persistent icon action reachable from anywhere in the game - leave,
+  // how-to-play, language, song suggestion, and (when relevant) Spotify share
+  // - as one horizontal row anchored to the card's top-right corner, instead
+  // of each icon independently absolute-positioned into two stacked rows
+  // (leave alone on top, language+song-suggest below it) the way this used
+  // to be split across the old leaveButton/songSuggestButton consts. The row
+  // itself has no explicit width (anchored via right:10px only), so it just
+  // grows further left as conditional icons (admin kebab, Spotify share)
+  // appear/disappear rather than needing per-button offsets recalculated.
+  const topIconRow = (
     <>
-      {currentUser?.isSuperAdmin && (
-        <button
-          onClick={() => setShowAdminModal(true)}
-          className="kebab-menu-btn"
-          style={{ position: 'absolute', top: '10px', right: '50px', zIndex: 10 }}
-          title={t('admin.menuItem')}
-        >
-          <div className="kebab-dot"></div>
-          <div className="kebab-dot"></div>
-          <div className="kebab-dot"></div>
+      <div style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 10, display: 'flex', alignItems: 'center', gap: '2px' }}>
+        {currentUser?.isSuperAdmin && (
+          <button
+            onClick={() => setShowAdminModal(true)}
+            className="kebab-menu-btn"
+            title={t('admin.menuItem')}
+          >
+            <div className="kebab-dot"></div>
+            <div className="kebab-dot"></div>
+            <div className="kebab-dot"></div>
+          </button>
+        )}
+        {/* Was a lobby-only inline text link further down the card - now a
+            permanent icon here so the rules stay one tap away from every
+            phase of the game, not just the pre-game wait screen. */}
+        <button onClick={() => setShowHowTo(true)} className="icon-btn" title={t('howto.linkLabel')}>
+          <HelpCircle size={20} />
         </button>
-      )}
-      {/* General settings/language menu - for every player, not just the
-          super-admin (whose kebab above opens a different, hidden thing).
-          Just a direct icon+modal (matching songSuggestButton/spotify share's
-          own pattern below) rather than a real dropdown, since language is
-          the only item in it so far - a one-item menu would just be an extra
-          click. Sits at top:54/right:50, the one icon slot in this corner
-          nothing else claims (top:10 has leave/admin, top:10-98/right:10 has
-          song-suggest/spotify-share), so it's always in the same place
-          regardless of which of those are visible in a given room. */}
-      <button
-        onClick={() => setShowLanguageModal(true)}
-        className="icon-btn"
-        style={{ position: 'absolute', top: '54px', right: '50px', zIndex: 10 }}
-        title={t('common.languageMenuItem')}
-      >
-        <Globe size={20} />
-      </button>
-      <button
-        onClick={handleLeaveClick}
-        className="icon-btn"
-        style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 10 }}
-        title={t('common.leave')}
-      >
-        <X size={20} />
-      </button>
+        <button onClick={() => setShowLanguageModal(true)} className="icon-btn" title={t('common.languageMenuItem')}>
+          <Globe size={20} />
+        </button>
+        <button onClick={() => setShowSongSuggest(true)} className="icon-btn" title={t('player.suggestSongTitle')}>
+          <Music2 size={20} />
+        </button>
+        {currentUser && mySpotifyLinked && (isMySpotifyDelegate || isMyShareRequestPending || spotifyShareOffPossible) && (
+          <button onClick={() => setShowSpotifyShare(true)} className="icon-btn" title={t('player.spotifyShareTitle')}>
+            <Share2 size={20} style={isMySpotifyDelegate ? { color: 'var(--neon-green)' } : undefined} />
+          </button>
+        )}
+        <button onClick={handleLeaveClick} className="icon-btn" title={t('common.leave')}>
+          <X size={20} />
+        </button>
+      </div>
+
       <ConfirmModal
         isOpen={!!confirmState}
         message={confirmState?.message}
@@ -505,19 +531,21 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       />
       {showAdminModal && <AdminOverridesModal room={room} onClose={() => setShowAdminModal(false)} />}
       <LanguageModal isOpen={showLanguageModal} onClose={() => setShowLanguageModal(false)} />
-    </>
-  );
+      <HowToPlayModal
+        isOpen={showHowTo}
+        onClose={() => setShowHowTo(false)}
+        gameMode={room.gameMode}
+        // 'paired' excluded deliberately, not just 'lobby' - couples exist by
+        // then but room.gameMode/myCouple.role don't (both are only ever set
+        // inside startGame(), which runs after 'paired') - narrowing here
+        // would show a wrong "Standard mode" description and misjudge this
+        // player's role/context before either actually exists yet.
+        inRound={room.status !== 'lobby' && room.status !== 'paired'}
+        roomStatus={room.status}
+        myRole={myCouple?.role}
+        mySpecialRole={myCouple?.specialRole}
+      />
 
-  const songSuggestButton = (
-    <>
-      <button
-        onClick={() => setShowSongSuggest(true)}
-        className="icon-btn"
-        style={{ position: 'absolute', top: '54px', right: '10px', zIndex: 10 }}
-        title={t('player.suggestSongTitle')}
-      >
-        <Music2 size={20} />
-      </button>
       {showSongSuggest && createPortal(
         <div className="modal-overlay" onClick={() => setShowSongSuggest(false)}>
           <div className="modal-card cyber-card" style={{ maxWidth: '420px', border: '1px solid var(--neon-green)' }} onClick={(e) => e.stopPropagation()}>
@@ -680,16 +708,6 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
         document.body
       )}
 
-      {currentUser && mySpotifyLinked && (isMySpotifyDelegate || isMyShareRequestPending || spotifyShareOffPossible) && (
-        <button
-          onClick={() => setShowSpotifyShare(true)}
-          className="icon-btn"
-          style={{ position: 'absolute', top: '98px', right: '10px', zIndex: 10 }}
-          title={t('player.spotifyShareTitle')}
-        >
-          <Share2 size={20} style={isMySpotifyDelegate ? { color: 'var(--neon-green)' } : undefined} />
-        </button>
-      )}
       {showSpotifyShare && createPortal(
         <div className="modal-overlay" onClick={() => setShowSpotifyShare(false)}>
           <div className="modal-card cyber-card" style={{ maxWidth: '420px', border: '1px solid var(--neon-green)' }} onClick={(e) => e.stopPropagation()}>
@@ -721,9 +739,20 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             ) : room.spotifyDelegate ? (
               <p style={{ color: 'var(--text-muted)', textAlign: 'center' }}>{t('player.spotifyShareOtherActive', { name: room.spotifyDelegate.name })}</p>
             ) : (
-              <button className="cyber-button" disabled={spotifyShareBusy} onClick={handleRequestSpotifyShare}>
-                {t('player.spotifyShareGrant')}
-              </button>
+              <>
+                {/* Says out loud what used to just look like nothing
+                    happening - and, since the automatic re-offer is now
+                    suppressed after a refusal, this button is the only way
+                    back in, so it has to be obvious that it's still there. */}
+                {room.mySpotifyShareDenied && (
+                  <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginBottom: '12px', fontSize: '0.9rem' }}>
+                    {t('player.spotifyShareDeclined')}
+                  </p>
+                )}
+                <button className="cyber-button" disabled={spotifyShareBusy} onClick={() => handleRequestSpotifyShare()}>
+                  {t(room.mySpotifyShareDenied ? 'player.spotifyShareGrantAgain' : 'player.spotifyShareGrant')}
+                </button>
+              </>
             )}
             {spotifyShareError && (
               <p style={{ color: 'var(--neon-red)', textAlign: 'center', marginTop: '10px', fontSize: '0.9rem' }}>{t(spotifyShareError)}</p>
@@ -736,7 +765,11 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   );
 
   const playerNameTag = me ? (
-    <div style={{ position: 'absolute', top: '15px', left: '15px', right: '50px', color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left', zIndex: 5 }}>
+    // Sits below the icon row (top:10px, one row tall) now that every icon
+    // lives on a single horizontal line instead of stacked rows down the
+    // right side - this can use the card's full width again instead of
+    // stopping short to leave room for icons beside it.
+    <div style={{ position: 'absolute', top: '54px', left: '15px', right: '15px', color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left', zIndex: 5 }}>
       <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name}</strong>
       <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>{me.danceRole.toUpperCase()}</span>
       {myCouple && myCouple.playerIds && myCouple.playerIds.length > 1 && (
@@ -747,6 +780,23 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       <div style={{ marginTop: '4px', fontSize: '0.75rem', opacity: 0.5, letterSpacing: '1px' }}>
         {t('player.room')}: {room.id}
       </div>
+      {/* Players previously had no way to tell Chaos/Max Kills apart from a
+          plain Standard game short of asking the GM - shown here (not just
+          on the GM's own dashboard) since it's set once for the whole game
+          and this tag is already visible from every phase.
+          Gated on 'lobby'/'paired', not just 'lobby': room.gameMode doesn't
+          actually exist until startGame() runs (see gameStore.startGame -
+          it's a 'paired'-only action), same reason HowToPlayModal's own
+          `inRound` prop excludes 'paired' too (see PlayerScreen's own call
+          site below). Showing it any earlier read as a real setting - while
+          it was actually always undefined and silently falling through this
+          ternary's final branch, so a room the GM had already set to Chaos
+          or Max Kills still showed "Standard" right up until role_reveal. */}
+      {room.status !== 'lobby' && room.status !== 'paired' && (
+        <div style={{ marginTop: '2px', fontSize: '0.75rem', letterSpacing: '1px', color: room.gameMode && room.gameMode !== 'standard' ? 'var(--neon-purple)' : 'inherit', opacity: room.gameMode && room.gameMode !== 'standard' ? 1 : 0.5 }}>
+          {t('gm.gameMode')}: {t(room.gameMode === 'chaos' ? 'gm.gameModeChaos' : room.gameMode === 'maxkills' ? 'gm.gameModeMaxKills' : 'gm.gameModeStandard')}
+        </div>
+      )}
     </div>
   ) : null;
 
@@ -792,18 +842,14 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
-        {leaveButton}
-        {songSuggestButton}
+        {topIconRow}
         <h2 style={{ color: 'var(--neon-blue)', marginBottom: '20px', marginTop: '20px' }}>{t('phase.lobby')}</h2>
         <div className="pulse-animation" style={{ width: '50px', height: '50px', borderRadius: '50%', background: 'var(--neon-purple)', margin: '0 auto 20px' }}></div>
         <p style={{ color: 'var(--text-muted)' }}>{t('player.lobbyWait')}</p>
-        <button
-          onClick={() => setShowHowTo(true)}
-          style={{ background: 'transparent', border: 'none', padding: 0, marginTop: '10px', color: 'var(--neon-blue)', fontSize: '0.85rem', textDecoration: 'underline', cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
-        >
-          <HelpCircle size={14} className="icon-inline" />
-          {t('howto.linkLabel')}
-        </button>
+        {/* The how-to-play link used to live here as lobby-only inline text -
+            now a persistent icon in topIconRow above, available from every
+            phase (not just this pre-game wait screen), so nothing further
+            is needed here. */}
         <div style={{ textAlign: 'center', margin: '20px 0' }}>
           <div className="qr-frame">
             <img
@@ -813,7 +859,6 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             />
           </div>
         </div>
-        <HowToPlayModal isOpen={showHowTo} onClose={() => setShowHowTo(false)} />
       </div>
     );
   }
@@ -823,8 +868,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       return (
         <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
           {playerNameTag}
-          {leaveButton}
-        {songSuggestButton}
+          {topIconRow}
           <h2 style={{ color: 'var(--text-muted)', marginBottom: '20px', marginTop: '20px' }}>{t('player.spectatorTitle')}</h2>
           <p>{t('player.spectatorBody')}</p>
         </div>
@@ -836,8 +880,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
-        {leaveButton}
-        {songSuggestButton}
+        {topIconRow}
         <h2 style={{ color: 'var(--neon-purple)', marginBottom: '20px', marginTop: '20px' }}>{t('player.partnerTitle')}</h2>
         <p style={{ fontSize: '1.2rem', marginBottom: '20px' }}>
           {t('player.dancingWith')}<br/>
@@ -867,8 +910,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
-        {leaveButton}
-        {songSuggestButton}
+        {topIconRow}
         <h2 style={{ color: 'var(--text-muted)', marginBottom: '20px', marginTop: '20px' }}>{t('player.spectatingTitle')}</h2>
         <p>{t('player.gameInProgress')}</p>
         <p>{t('player.currentPhase')} <strong>{t(`phase.${room.status}`)}</strong></p>
@@ -881,8 +923,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       return (
         <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
           {playerNameTag}
-          {leaveButton}
-        {songSuggestButton}
+          {topIconRow}
           <h2 className="glitch-text" style={{ color: 'var(--text-muted)', fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px', textShadow: 'none' }}>
             {t('player.abortedTitle')}
           </h2>
@@ -894,15 +935,14 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       );
     }
     if (room.gameMode === 'maxkills') {
-      const ranking = room.maxKillsFinalRanking || [];
+      const ranking = buildMaxKillsRanks(room.maxKillsFinalRanking || []);
       const topKills = ranking[0]?.kills ?? 0;
       const myRank = ranking.findIndex(r => r.coupleId === myCouple?.id);
       const iWon = myRank !== -1 && ranking[myRank].kills === topKills && topKills > 0;
       return (
         <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
           {playerNameTag}
-          {leaveButton}
-          {songSuggestButton}
+          {topIconRow}
           <h2 className="glitch-text" style={{
             color: iWon ? '#00ff66' : 'var(--neon-purple)',
             fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px',
@@ -911,13 +951,13 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             {t('player.maxKillsGameOverTitle')}
           </h2>
           <div className="couple-list" style={{ marginBottom: '20px', textAlign: 'left', maxWidth: '400px', margin: '0 auto 20px' }}>
-            {ranking.map((entry, i) => {
+            {ranking.map((entry) => {
               const couple = room.couples.find(c => c.id === entry.coupleId);
               const isWinner = entry.kills === topKills && topKills > 0;
               const isMe = entry.coupleId === myCouple?.id;
               return (
                 <div key={entry.coupleId} className={`list-item ${isWinner ? 'list-item--active' : ''}`} style={{ borderColor: isMe ? 'var(--neon-purple)' : undefined }}>
-                  <span style={{ color: isWinner ? 'var(--neon-purple)' : 'var(--text-muted)', fontWeight: 'bold' }}>#{i + 1} {couple?.name || '?'}{isMe ? ` (${t('player.maxKillsYouLabel')})` : ''}</span>
+                  <span style={{ color: isWinner ? 'var(--neon-purple)' : 'var(--text-muted)', fontWeight: 'bold' }}>{entry.rankLabel} {couple?.name || '?'}{isMe ? ` (${t('player.maxKillsYouLabel')})` : ''}</span>
                   <span className="badge badge--purple">{t('player.maxKillsKillsBadge', { count: entry.kills })}</span>
                 </div>
               );
@@ -934,11 +974,19 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     const killerCouples = room.couples.filter(c => c.role === 'killer');
 
     // Märtyrer-Paar (special role): a personal win condition inverted from
-    // everyone else's - they win if murdered by the killer (also counts a
-    // vote-out if the GM enabled martyrWinsOnVote), independent of who
-    // actually won the game as a team.
+    // everyone else's - they win by being voted out, independent of who
+    // actually won the game as a team. Deliberately NOT a kill: with few
+    // killers against many dancer couples, a kill eventually reaches almost
+    // every dancer before a typical game ends (killers need the dancer team
+    // reduced to their own headcount to win outright, and a group that can't
+    // correctly vote out the real killer early just keeps losing couples to
+    // kills until then) - making "killed at some point" true for the
+    // martyr ~90% of the time in practice, not the special, engineered-
+    // feeling moment a personal win condition should be. A vote-out doesn't
+    // have that problem: it takes the rest of the table actually choosing to
+    // eliminate this couple, an outcome with no such structural bias.
     const isMartyr = myCouple?.specialRole === 'martyr';
-    const martyrObjectiveMet = isMartyr && (myCouple.eliminatedBy === 'kill' || (room.martyrWinsOnVote && myCouple.eliminatedBy === 'vote'));
+    const martyrObjectiveMet = isMartyr && myCouple.eliminatedBy === 'vote';
 
     // Being voted out/eliminated is a personal loss even if teammates (other killer couples) go on to win.
     const playerWon = isMartyr ? martyrObjectiveMet : (!isEliminated && ((role === 'killer' && killersWon) || (role !== 'killer' && !killersWon)));
@@ -946,8 +994,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
-        {leaveButton}
-        {songSuggestButton}
+        {topIconRow}
         <h2 className="glitch-text" style={{
           color: playerWon ? '#00ff66' : 'var(--neon-red)',
           fontSize: '2.5rem',
@@ -1016,8 +1063,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     return (
       <div className="cyber-card phase-enter" style={{ textAlign: 'center', borderColor: 'var(--neon-red)', position: 'relative', paddingTop: '90px' }}>
         {playerNameTag}
-        {leaveButton}
-        {songSuggestButton}
+        {topIconRow}
         <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '20px', marginTop: '20px' }}>{t('player.eliminatedTitle')}</h2>
         {room.deadPlayersKeepDancing ? (
           <>
@@ -1044,8 +1090,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   return (
     <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
       {playerNameTag}
-      {leaveButton}
-        {songSuggestButton}
+      {topIconRow}
       {(room.status === 'dancing' || room.status === 'silent_report' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'vote_reveal') && (
         <p style={{ color: 'var(--text-muted)', marginBottom: '10px', marginTop: '20px' }}>{t('player.round', { n: room.round })}</p>
       )}
@@ -1113,31 +1158,75 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           );
         }
 
-        if (isKillerRound) {
-          if (room.killMode !== 'silent') {
-            return (
-              <div className="panel panel--danger" style={{ marginTop: '15px', textAlign: 'center' }}>
-                <p style={{ color: 'white' }}>{t('player.maxKillsClassicKillerHint')}</p>
-              </div>
-            );
-          }
-          return (
-            <div className="panel panel--danger" style={{ marginTop: '15px' }}>
-              <h3 style={{ color: 'var(--neon-red)', marginBottom: '10px' }}>{t('player.maxKillsWhoDidYouKill')}</h3>
-              <div className="couple-list">
-                {aliveSuspectCouples.map(c => {
-                  const claimed = (room.maxKillsKillClaims || []).includes(c.id);
-                  return (
-                    <button
-                      key={c.id}
-                      className={`cyber-button ${claimed ? 'pulse-animation' : ''}`}
-                      onClick={() => socket.emit('submitMaxKillsKillClaim', { roomId: room.id, targetCoupleId: c.id })}
-                    >
-                      {claimed ? <><Check size={14} className="icon-inline" /> {c.name}</> : c.name}
+        // Shared by both the killer's and every dancer's view below - for
+        // the killer this is a dummy, wired to the exact same event everyone
+        // else's button is: submitMaxKillsAccusation already silently no-ops
+        // for the round's own killer (`accuser.role === 'killer'` returns
+        // null - see gameStore.js), so nothing it does here has any real
+        // effect. It exists so the killer's phone offers the same "raise a
+        // suspicion" move as everyone else's, letting them point the finger
+        // at someone else as an actual social-deduction tactic instead of
+        // visibly lacking a button every other phone on the floor has.
+        const accusePanel = (
+          <div className="panel panel--info">
+            {!showMaxKillsAccusationPicker ? (
+              <button
+                className="cyber-button"
+                style={{ background: 'transparent', border: '1px solid var(--neon-blue)' }}
+                onClick={() => setShowMaxKillsAccusationPicker(true)}
+              >
+                {t('player.maxKillsAccuseButton')}
+              </button>
+            ) : (
+              <>
+                <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px' }}>{t('player.maxKillsAccuseWhoTitle')}</h3>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '10px' }}>{t('player.maxKillsAccuseHint')}</p>
+                <div className="couple-list">
+                  {aliveSuspectCouples.map(c => (
+                    <button key={c.id} className="cyber-button" onClick={() => socket.emit('submitMaxKillsAccusation', { roomId: room.id, suspectCoupleId: c.id })}>
+                      {c.name}
                     </button>
-                  );
-                })}
-              </div>
+                  ))}
+                  <button
+                    className="cyber-button"
+                    style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
+                    onClick={() => setShowMaxKillsAccusationPicker(false)}
+                  >
+                    {t('player.maxKillsAccuseCancelBtn')}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        );
+
+        if (isKillerRound) {
+          return (
+            <div style={{ marginTop: '15px' }}>
+              {room.killMode !== 'silent' ? (
+                <div className="panel panel--danger" style={{ textAlign: 'center', marginBottom: '15px' }}>
+                  <p style={{ color: 'white' }}>{t('player.classicKillerGmMarksHint')}</p>
+                </div>
+              ) : (
+                <div className="panel panel--danger" style={{ marginBottom: '15px' }}>
+                  <h3 style={{ color: 'var(--neon-red)', marginBottom: '10px' }}>{t('player.maxKillsWhoDidYouKill')}</h3>
+                  <div className="couple-list">
+                    {aliveSuspectCouples.map(c => {
+                      const claimed = (room.maxKillsKillClaims || []).includes(c.id);
+                      return (
+                        <button
+                          key={c.id}
+                          className={`cyber-button ${claimed ? 'pulse-animation' : ''}`}
+                          onClick={() => socket.emit('submitMaxKillsKillClaim', { roomId: room.id, targetCoupleId: c.id })}
+                        >
+                          {claimed ? <><Check size={14} className="icon-inline" /> {c.name}</> : c.name}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+              {accusePanel}
             </div>
           );
         }
@@ -1152,36 +1241,7 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                 </button>
               </div>
             )}
-            <div className="panel panel--info">
-              {!showMaxKillsAccusationPicker ? (
-                <button
-                  className="cyber-button"
-                  style={{ background: 'transparent', border: '1px solid var(--neon-blue)' }}
-                  onClick={() => setShowMaxKillsAccusationPicker(true)}
-                >
-                  {t('player.maxKillsAccuseButton')}
-                </button>
-              ) : (
-                <>
-                  <h3 style={{ color: 'var(--neon-blue)', marginBottom: '10px' }}>{t('player.maxKillsAccuseWhoTitle')}</h3>
-                  <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '10px' }}>{t('player.maxKillsAccuseHint')}</p>
-                  <div className="couple-list">
-                    {aliveSuspectCouples.map(c => (
-                      <button key={c.id} className="cyber-button" onClick={() => socket.emit('submitMaxKillsAccusation', { roomId: room.id, suspectCoupleId: c.id })}>
-                        {c.name}
-                      </button>
-                    ))}
-                    <button
-                      className="cyber-button"
-                      style={{ background: 'transparent', border: '1px solid var(--text-muted)', color: 'var(--text-muted)' }}
-                      onClick={() => setShowMaxKillsAccusationPicker(false)}
-                    >
-                      {t('player.maxKillsAccuseCancelBtn')}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
+            {accusePanel}
           </div>
         );
       })()}
@@ -1467,6 +1527,20 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
                   {room.gameMode === 'maxkills' ? t('player.maxKillsKillerInstructions') : t('player.killerInstructions')}
                   {room.gameMode !== 'maxkills' && <><br/><strong style={{color: 'white', marginTop: '10px', display: 'block'}}>{t('player.killerLimit')}</strong></>}
                 </p>
+                {/* Classic kill mode's actual mechanism was never explained
+                    here - a killer only ever learned "the GM marks your
+                    kills" if they happened to see the same line elsewhere
+                    (Max Kills' equivalent moment, a completely different
+                    screen). Silent mode needs no such note: those killers
+                    already see the self-report flow that IS the mechanism.
+                    Max Kills mode gets its own version of this at the actual
+                    moment it matters (during 'dancing', see above) instead of
+                    repeating it here too. */}
+                {room.gameMode !== 'maxkills' && room.killMode !== 'silent' && (
+                  <p style={{ fontSize: '0.95rem', marginTop: '10px', color: 'var(--text-muted)' }}>
+                    {t('player.classicKillerGmMarksHint')}
+                  </p>
+                )}
                 {otherKillerCouples.length > 0 && (
                   <p style={{ fontSize: '1rem', marginTop: '15px', color: 'white' }}>
                     {t('player.otherKillers', { names: otherKillerCouples.map(c => c.name).join(', ') })}
@@ -1490,9 +1564,6 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
               <div className="panel panel--purple" style={{ padding: '30px', marginBottom: 0 }}>
                 <h2 style={{ color: 'var(--neon-purple)', fontSize: '1.8rem', marginBottom: '15px' }}>{t('player.youAreMartyr')}</h2>
                 <p style={{ fontSize: '1.1rem' }}>{t('player.martyrInstructions')}</p>
-                {room.martyrWinsOnVote && (
-                  <p style={{ fontSize: '1rem', marginTop: '10px', color: 'white' }}>{t('player.martyrInstructionsVoteNote')}</p>
-                )}
               </div>
             ) : myCouple?.specialRole === 'seer' ? (
               // Sonderrolle "Seher" - the actual peek happens later, during
