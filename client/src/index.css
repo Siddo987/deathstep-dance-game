@@ -603,7 +603,17 @@ a:focus-visible {
   inset: 0;
   background: rgba(5, 5, 10, 0.85);
   backdrop-filter: blur(4px);
-  z-index: 9999;
+  /* Must outrank .cookie-banner (z-index 10000) - the banner can cover up to
+     80vh on a small phone (see index.css's cookie-banner rules), and with a
+     lower z-index here a freshly opened modal's bottom controls (a login
+     form's submit button, "forgot password" link, etc.) would sit behind it
+     and be unclickable until the banner is dismissed first. Confirmed live
+     via Playwright: a click on the auth modal's "switch to register" link
+     failed for 30s with "cookie-banner-text intercepts pointer events"
+     before this fix. A modal the user just deliberately opened should always
+     take input priority over the passive consent banner underneath it.
+  */
+  z-index: 10001;
   display: flex;
   justify-content: center;
   align-items: center;

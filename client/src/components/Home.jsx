@@ -35,6 +35,7 @@ function LanguageSwitcher() {
 
   const langButton = (code, label) => (
     <button
+      key={code}
       onClick={() => setLang(code)}
       style={{
         background: lang === code ? 'rgba(0,240,255,0.12)' : 'transparent',
@@ -246,6 +247,12 @@ function Home({ onCreateRoom, onJoinRoom, currentUser, authLoading, onLoginClick
             style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
           >
             {t('leaderboard.pageLink')}
+          </a>
+          <a
+            href="/roadmap"
+            style={{ color: 'var(--text-muted)', fontSize: '0.85rem', textDecoration: 'underline', whiteSpace: 'nowrap' }}
+          >
+            {t('roadmap.pageLink')}
           </a>
           <a
             href="/feedback"

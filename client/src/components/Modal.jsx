@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { HelpCircle, CheckCircle2, AlertTriangle, Skull, X, Music2, Puzzle, HeartCrack, Eye, Shield, Hand, Globe } from 'lucide-react';
 import { useLanguage, SUPPORTED_LANGS } from '../i18n.jsx';
+import { phaseBodyKeyFor } from '../phaseExplanations.js';
 
 function useEscapeKey(isOpen, onEscape) {
   useEffect(() => {
@@ -130,30 +131,59 @@ export function LanguageModal({ isOpen, onClose }) {
 // from Home.jsx (both the main screen and the join view, since a player
 // scanning a QR code lands directly on the join view and never sees the main
 // screen at all) and from the lobby-wait screens of GMDashboard.jsx/
-// PlayerScreen.jsx, the other moment someone is idle with nothing else to do
-// but wonder what's about to happen. Content-only (no game-state dependency)
-// so the same component works from any of those call sites unmodified.
-export function HowToPlayModal({ isOpen, onClose }) {
+// PlayerScreen.jsx, plus the persistent (?) icon both show throughout an
+// entire game now (see topIconRow in PlayerScreen.jsx). That last spot is
+// why this got dynamic: read from Home.jsx, or from a lobby with settings
+// still in flux, there's no "current" mode/role to narrow to, so it stays
+// the full generic overview+legend it always was. Read mid-round, showing
+// all 7 roles and a 5-step "how the app works" walkthrough nobody asked for
+// anymore is just noise - so once `inRound` is true this narrows to the
+// mode actually being played and (for a player) the one role they actually
+// have, via the optional gameMode/inRound/myRole/mySpecialRole/
+// activeSpecialRoles/roomStatus props. None of the three call sites are
+// required to pass them - omitting all of them reproduces the original
+// always-show-everything behavior exactly.
+export function HowToPlayModal({ isOpen, onClose, gameMode, inRound, myRole, mySpecialRole, activeSpecialRoles, roomStatus }) {
   const { t } = useLanguage();
   useEscapeKey(isOpen, onClose || (() => {}));
   if (!isOpen) return null;
 
   const steps = [1, 2, 3, 4, 5];
-  // Role legend - deliberately lists every special role regardless of
-  // whether *this* room has any enabled (this modal is content-only, no
-  // game-state dependency, reachable before a room even exists - see the
-  // comment on the component above). Reuses the exact same title/instruction
+  // Role legend - keyed by `key` (not just titleKey) so the narrowing logic
+  // below can filter by plain role/specialRole identifiers instead of
+  // string-matching locale keys. Reuses the exact same title/instruction
   // locale keys as the in-round Role Reveal panels (PlayerScreen.jsx) rather
   // than duplicating the copy, so the two surfaces can never drift apart.
-  const roles = [
-    { icon: Skull, color: 'var(--neon-red)', titleKey: 'player.youAreKillers', bodyKey: 'player.killerInstructions' },
-    { icon: Music2, color: 'var(--neon-blue)', titleKey: 'player.youAreDancers', bodyKey: 'player.dancerInstructions' },
-    { icon: Puzzle, color: 'var(--neon-purple)', titleKey: 'player.youArePuzzleRole', bodyKey: 'player.puzzleRoleInstructions' },
-    { icon: HeartCrack, color: 'var(--neon-purple)', titleKey: 'player.youAreMartyr', bodyKey: 'player.martyrInstructions' },
-    { icon: Eye, color: 'var(--neon-purple)', titleKey: 'player.youAreSeer', bodyKey: 'player.seerInstructions' },
-    { icon: Shield, color: 'var(--neon-purple)', titleKey: 'player.youAreProtector', bodyKey: 'player.protectorInstructions' },
-    { icon: Hand, color: 'var(--neon-purple)', titleKey: 'player.youAreToucher', bodyKey: 'player.toucherInstructions' },
+  const allRoles = [
+    { key: 'killer', icon: Skull, color: 'var(--neon-red)', titleKey: 'player.youAreKillers', bodyKey: 'player.killerInstructions' },
+    { key: 'dancer', icon: Music2, color: 'var(--neon-blue)', titleKey: 'player.youAreDancers', bodyKey: 'player.dancerInstructions' },
+    { key: 'puzzle', icon: Puzzle, color: 'var(--neon-purple)', titleKey: 'player.youArePuzzleRole', bodyKey: 'player.puzzleRoleInstructions' },
+    { key: 'martyr', icon: HeartCrack, color: 'var(--neon-purple)', titleKey: 'player.youAreMartyr', bodyKey: 'player.martyrInstructions' },
+    { key: 'seer', icon: Eye, color: 'var(--neon-purple)', titleKey: 'player.youAreSeer', bodyKey: 'player.seerInstructions' },
+    { key: 'protector', icon: Shield, color: 'var(--neon-purple)', titleKey: 'player.youAreProtector', bodyKey: 'player.protectorInstructions' },
+    { key: 'toucher', icon: Hand, color: 'var(--neon-purple)', titleKey: 'player.youAreToucher', bodyKey: 'player.toucherInstructions' },
   ];
+
+  // A player prop (even just myRole==='dancer' with no special role) means
+  // this is PlayerScreen's call site; a mode with no player props but
+  // inRound means GMDashboard's. Home.jsx's and a still-open lobby's calls
+  // pass none of this, so `narrowed` stays false and every branch below is
+  // skipped - identical to the old unconditional behavior.
+  const isPlayerContext = !!myRole;
+  const narrowed = !!inRound;
+  const roles = !narrowed
+    ? allRoles
+    : isPlayerContext
+      ? allRoles.filter(r => r.key === myRole || r.key === mySpecialRole)
+      : allRoles.filter(r => r.key === 'killer' || r.key === 'dancer' || (activeSpecialRoles || []).includes(r.key));
+
+  const modeDescKey = gameMode === 'chaos' ? 'gm.gameModeChaosDesc' : gameMode === 'maxkills' ? 'gm.gameModeMaxKillsDesc' : 'gm.gameModeStandardDesc';
+  // Same gm.readAloudPhase* keys as GMDashboard's dedicated read-aloud
+  // popup (see phaseExplanations.js) - one source of "what's happening in
+  // this phase" per surface, reused here as a quick reference instead of
+  // GM-toolbar-only.
+  const phaseKey = narrowed ? phaseBodyKeyFor(roomStatus, gameMode) : null;
+
   return createPortal(
     <div className="modal-overlay" onClick={onClose}>
       <div
@@ -170,30 +200,41 @@ export function HowToPlayModal({ isOpen, onClose }) {
 
         <p style={{ color: 'var(--text-muted)', marginBottom: '18px' }}>{t('howto.intro')}</p>
 
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '15px' }}>
-          {steps.map(n => (
-            <div key={n} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
-              <div style={{
-                flexShrink: 0, width: '26px', height: '26px', borderRadius: '50%',
-                border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '0.85rem',
-              }}>
-                {n}
+        {!narrowed && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px', marginBottom: '15px' }}>
+            {steps.map(n => (
+              <div key={n} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
+                <div style={{
+                  flexShrink: 0, width: '26px', height: '26px', borderRadius: '50%',
+                  border: '1px solid var(--neon-purple)', color: 'var(--neon-purple)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '0.85rem',
+                }}>
+                  {n}
+                </div>
+                <div>
+                  <strong style={{ color: 'white', display: 'block', marginBottom: '2px' }}>{t(`howto.step${n}Title`)}</strong>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{t(`howto.step${n}Body`)}</span>
+                </div>
               </div>
-              <div>
-                <strong style={{ color: 'white', display: 'block', marginBottom: '2px' }}>{t(`howto.step${n}Title`)}</strong>
-                <span style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>{t(`howto.step${n}Body`)}</span>
-              </div>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
 
         <div className="panel panel--info" style={{ marginBottom: '15px' }}>
-          <p style={{ margin: 0, color: 'white', fontSize: '0.9rem' }}>{t('howto.winCondition')}</p>
+          <p style={{ margin: 0, color: 'white', fontSize: '0.9rem' }}>{t(narrowed ? modeDescKey : 'howto.winCondition')}</p>
         </div>
 
+        {phaseKey && (
+          <div className="panel panel--purple" style={{ marginBottom: '15px' }}>
+            <h4 style={{ color: 'var(--neon-purple)', margin: '0 0 6px 0', fontSize: '0.85rem' }}>{t('howto.phaseNowTitle')}</h4>
+            <p style={{ margin: 0, color: 'white', fontSize: '0.9rem' }}>{t(phaseKey)}</p>
+          </div>
+        )}
+
         <h4 style={{ color: 'var(--neon-purple)', margin: '0 0 4px 0' }}>{t('howto.rolesTitle')}</h4>
-        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '12px' }}>{t('howto.rolesIntro')}</p>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: '12px' }}>
+          {t(!narrowed ? 'howto.rolesIntro' : isPlayerContext ? 'howto.rolesIntroInRoundPlayer' : 'howto.rolesIntroInRoundGm')}
+        </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           {roles.map(({ icon: Icon, color, titleKey, bodyKey }) => (
             <div key={titleKey} style={{ display: 'flex', gap: '12px', alignItems: 'flex-start' }}>
