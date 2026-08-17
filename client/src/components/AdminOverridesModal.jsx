@@ -7,17 +7,24 @@ import {
   addKillerOverride, removeKillerOverride,
 } from '../admin.js';
 
-// Hidden owner-only control, reachable only via the admin menu item in
-// GMDashboard.jsx's kebab menu (itself only rendered for a currentUser
-// listed in admin_users - see server/db.js/server/admin.js). Lets the site
-// owner pre-decide, live and per round, who dances with whom (during the
-// room's lobby phase) and who becomes the killer (once paired, before the GM
-// starts the game) - see gameStore.applyPairOverrides/startGame. Deliberately
-// re-set fresh every round rather than a standing per-account rule: a
-// persistent "account X always wins" setup would eventually produce a
-// noticeable pattern for regular players. Only takes effect when the GM
-// randomizes; a GM who assigns pairing/killer by hand is never touched, and
-// never sees this modal or its effects as anything but "how the dice landed".
+// Hidden owner-only control, reachable two ways - both gated on a
+// currentUser listed in admin_users (see server/db.js/server/admin.js):
+// the kebab menu item in PlayerScreen.jsx's icon row while actually inside a
+// room, or (with no need to join first) the Dev Dashboard's live-rooms
+// section (DevDashboard.jsx). Lets the site owner pre-decide, live and per
+// round, who dances with whom (during the room's lobby phase) and who
+// becomes the killer (once paired, before the GM starts the game) - see
+// gameStore.applyPairOverrides/startGame. Deliberately re-set fresh every
+// round rather than a standing per-account rule: a persistent "account X
+// always wins" setup would eventually produce a noticeable pattern for
+// regular players. Only takes effect when the GM randomizes; a GM who
+// assigns pairing/killer by hand is never touched, and never sees this modal
+// or its effects as anything but "how the dice landed".
+//
+// `room` is a full socket-synced room object from PlayerScreen's call site,
+// or just the {id, status, players, couples} REST snapshot DevDashboard.jsx
+// polls (see fetchAdminRoomSnapshot) - only those four fields are ever read
+// here, so either shape works.
 function AdminOverridesModal({ room, onClose }) {
   const { t } = useLanguage();
   const [pairOverrides, setPairOverrides] = useState([]);

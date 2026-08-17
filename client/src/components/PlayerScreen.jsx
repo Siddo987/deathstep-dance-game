@@ -784,15 +784,14 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
           plain Standard game short of asking the GM - shown here (not just
           on the GM's own dashboard) since it's set once for the whole game
           and this tag is already visible from every phase.
-          Gated on 'lobby'/'paired', not just 'lobby': room.gameMode doesn't
-          actually exist until startGame() runs (see gameStore.startGame -
-          it's a 'paired'-only action), same reason HowToPlayModal's own
-          `inRound` prop excludes 'paired' too (see PlayerScreen's own call
-          site below). Showing it any earlier read as a real setting - while
-          it was actually always undefined and silently falling through this
-          ternary's final branch, so a room the GM had already set to Chaos
-          or Max Kills still showed "Standard" right up until role_reveal. */}
-      {room.status !== 'lobby' && room.status !== 'paired' && (
+          Gated on 'lobby' only, not 'lobby'/'paired': the mode shouldn't
+          leak while the GM is still configuring things pre-pairing (and used
+          to be undefined then anyway), but should appear the moment pairs
+          are released, not only once the round itself starts - see
+          gameStore.setGameMode, which now mirrors the GM's lobby choice onto
+          the room live so it's already populated by the time releasePairs()
+          flips the status to 'paired'. */}
+      {room.status !== 'lobby' && (
         <div style={{ marginTop: '2px', fontSize: '0.75rem', letterSpacing: '1px', color: room.gameMode && room.gameMode !== 'standard' ? 'var(--neon-purple)' : 'inherit', opacity: room.gameMode && room.gameMode !== 'standard' ? 1 : 0.5 }}>
           {t('gm.gameMode')}: {t(room.gameMode === 'chaos' ? 'gm.gameModeChaos' : room.gameMode === 'maxkills' ? 'gm.gameModeMaxKills' : 'gm.gameModeStandard')}
         </div>

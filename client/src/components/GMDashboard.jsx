@@ -23,13 +23,20 @@ import {
 // Order/labels/hints shared between the special-roles summary line and the
 // gear-icon count-distribution modal below - one place to add a future
 // special role to both instead of two lists that can drift apart.
-const SPECIAL_ROLE_ORDER = ['puzzle', 'martyr', 'seer', 'protector', 'toucher'];
+//
+// 'puzzle' ("Rätsel-Paar") is deliberately not one of these - it's not a
+// role the GM assigns a count to at all, it's the automatic fallback
+// startGame gives any couple a manual distribution left uncovered (see
+// server/gameStore.js's SPECIAL_ROLE_KEYS comment). It can still show up in
+// the game itself (HowToPlayModal's role legend picks it up live via
+// room.couples), just never here.
+const SPECIAL_ROLE_ORDER = ['martyr', 'seer', 'protector', 'toucher'];
 const SPECIAL_ROLE_LABEL_KEYS = {
-  puzzle: 'gm.specialRolePuzzle', martyr: 'gm.specialRoleMartyr', seer: 'gm.specialRoleSeer',
+  martyr: 'gm.specialRoleMartyr', seer: 'gm.specialRoleSeer',
   protector: 'gm.specialRoleProtector', toucher: 'gm.specialRoleToucher',
 };
 const SPECIAL_ROLE_HINT_KEYS = {
-  puzzle: 'gm.specialRolePuzzleHint', martyr: 'gm.specialRoleMartyrHint', seer: 'gm.specialRoleSeerHint',
+  martyr: 'gm.specialRoleMartyrHint', seer: 'gm.specialRoleSeerHint',
   protector: 'gm.specialRoleProtectorHint', toucher: 'gm.specialRoleToucherHint',
 };
 // Purely a sane UI ceiling for the stepper - actual assignment (see
@@ -253,7 +260,7 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
   const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
   const [specialRolesEnabled, setSpecialRolesEnabled] = useState(false);
   const [showSpecialRolesModal, setShowSpecialRolesModal] = useState(false);
-  const [specialRoles, setSpecialRoles] = useState({ puzzle: 0, martyr: 0, seer: 0, protector: 0, toucher: 0 });
+  const [specialRoles, setSpecialRoles] = useState({ martyr: 0, seer: 0, protector: 0, toucher: 0 });
   // Special roles on, but the GM never set any per-role count: the app
   // distributes them itself (one per every second couple, as many different
   // roles as possible - see gameStore.buildAutoSpecialRoleDraw). Only ever
@@ -539,6 +546,19 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
       socket.emit('setUseSpotify', { roomId: room.id, useSpotify });
     }
   }, [useSpotify]);
+
+  // Same live-broadcast pattern as useSpotify just above - room.gameMode
+  // itself doesn't really exist until startGame() commits it (see
+  // gameStore.startGame), but players should be able to see the GM's choice
+  // as soon as pairs are released, not just once the round actually starts
+  // (PlayerScreen.jsx's own display is gated on 'paired'-or-later for exactly
+  // this reason). Mirroring it here while still in the lobby means it's
+  // already sitting on the room by the time releasePairs() flips the status.
+  React.useEffect(() => {
+    if (room.status === 'lobby') {
+      socket.emit('setGameMode', { roomId: room.id, gameMode });
+    }
+  }, [gameMode]);
 
   React.useEffect(() => {
     if (!spotifyAllowed && useSpotify) {
@@ -3310,6 +3330,13 @@ function GMDashboard({ room, onLeave, myGmName, clientId, onSessionSecretUpdated
                     </div>
                   );
                 })}
+                {/* No stepper of its own (see SPECIAL_ROLE_ORDER's comment) -
+                    a couple these counts don't cover gets it automatically,
+                    so it's worth the GM knowing it exists before they wonder
+                    where an unexpected role came from. */}
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', margin: '-6px 0 18px 0', fontStyle: 'italic' }}>
+                  {t('gm.specialRolesPuzzleFallbackHint')}
+                </p>
                 <button className="cyber-button" style={{ width: '100%' }} onClick={() => setShowSpecialRolesModal(false)}>
                   {t('common.close')}
                 </button>

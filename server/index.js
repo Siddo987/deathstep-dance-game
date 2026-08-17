@@ -966,6 +966,15 @@ io.on('connection', (socket) => {
     if (room) broadcastRoom(room);
   });
 
+  // GM-only: mirrors the lobby's in-progress game-mode choice onto the room
+  // (see gameStore.setGameMode) so players can see it as soon as pairs are
+  // released, not just once the round actually starts.
+  socket.on('setGameMode', ({ roomId, gameMode }) => {
+    if (!isRoomGM(gameStore.getRoom(roomId), socket)) return;
+    const room = gameStore.setGameMode(roomId, gameMode);
+    if (room) broadcastRoom(room);
+  });
+
   // Lets the GM's own "pending couples" preview (before they've committed
   // anything via releasePairs) already reflect the site owner's hidden
   // pairing override, instead of only the final release - see

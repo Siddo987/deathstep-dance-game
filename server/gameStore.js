@@ -154,12 +154,19 @@ export function sanitizeRoomForPlayer(room, viewerClientId) {
 // again). Shared by server/stats.js (win/loss participation records) and
 // server/achievements.js (the 'first_win' achievement) so both agree on
 // what "killers won" means.
-// The full set of special-role keys a dancer-team couple can hold, layered
-// on top of (never instead of) their team role - see couple.specialRole.
-// Kept as one flat list (rather than scattered string literals) so the GM
-// settings panel, DB migration, and any future validation can all iterate
-// the same source of truth instead of drifting out of sync.
-export const SPECIAL_ROLE_KEYS = ['seer', 'protector', 'toucher', 'martyr', 'puzzle'];
+// The set of special-role keys a dancer-team couple can hold, layered on top
+// of (never instead of) their team role - see couple.specialRole. Kept as one
+// flat list (rather than scattered string literals) so the GM settings
+// panel, DB migration, and any future validation can all iterate the same
+// source of truth instead of drifting out of sync.
+//
+// 'puzzle' ("Rätsel-Paar") is deliberately NOT in here: it has no real
+// mechanic (see PlayerScreen.jsx - it's pure social-camouflage flavor text,
+// nothing is ever checked), so it isn't one of the roles the GM picks a count
+// for, nor one the automatic draw below hands out. It only exists as the
+// startGame fallback role for couples a *manual* distribution left
+// uncovered - see the specialRolesAuto/else branch there.
+export const SPECIAL_ROLE_KEYS = ['seer', 'protector', 'toucher', 'martyr'];
 
 // Max Kills mode's own minimum couple count (see startGame's authoritative
 // check and GMDashboard.jsx's matching gameMode-dropdown gate) - below this,
@@ -313,6 +320,25 @@ class GameStore {
 
   getRoom(roomId) {
     return this.rooms.get(roomId);
+  }
+
+  // Dev Dashboard's live-rooms browser (server/admin.js) - a lightweight
+  // summary per currently-in-memory room, not the full room object (no
+  // reason to ship every couple/vote/role over the wire just to pick a
+  // room). Newest activity first, same freshness signal
+  // cleanupAbandonedRooms already tracks per room.
+  listRoomsSummary() {
+    return [...this.rooms.values()]
+      .map(room => ({
+        id: room.id,
+        status: room.status,
+        gameMode: room.gameMode || null,
+        round: room.round,
+        playerCount: room.players.length,
+        coupleCount: room.couples.length,
+        lastActivity: this.roomLastActivity.get(room.id) ?? null,
+      }))
+      .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
   }
 
   addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socketId, userId = null) {
@@ -962,6 +988,24 @@ class GameStore {
     return room;
   }
 
+  // Mirrors the GM's still-in-progress lobby gameMode choice onto the room,
+  // same reasoning/pattern as setUseSpotify just above - lets players see the
+  // chosen mode as soon as pairs are released (PlayerScreen.jsx's own
+  // display is gated to 'paired'-or-later) instead of only once the round
+  // actually starts. startGame() overwrites this with the same field once
+  // the round genuinely begins, so there's no staleness risk either way -
+  // this is purely a "make the eventual value visible earlier" mirror, never
+  // itself treated as authoritative for gameplay (every gameplay check on
+  // room.gameMode is additionally gated on room.status, which only reaches
+  // the relevant phases via startGame() - see its own comment).
+  setGameMode(roomId, gameMode) {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+    if (!['standard', 'chaos', 'maxkills'].includes(gameMode)) return null;
+    room.gameMode = gameMode;
+    return room;
+  }
+
   // Mirrors whether the GM's own browser currently has a working, non-
   // delegated Spotify connection (GMDashboard.jsx reports this whenever it
   // changes) - lets players tell a share offer would be redundant (or that
@@ -1313,14 +1357,13 @@ class GameStore {
   // returns a flat list of role keys, possibly with repeats, to be handed out
   // one per dancer couple.
   //
-  // Filled level by level: a freshly shuffled full set of the five roles per
+  // Filled level by level: a freshly shuffled full set of the four roles per
   // level, truncated on the last one. So every role appears once before any
   // appears twice, twice before any appears three times, and so on - exactly
-  // the "erst alle 2x, bevor eine 3x kommt" rule. With 4 draws that's 4
-  // distinct roles picked at random out of the 5; with 8 it's all 5 once plus
-  // 3 of them a second time. Re-shuffling per level (rather than cycling one
-  // fixed shuffled order) keeps *which* roles get doubled independent of
-  // which order the first level happened to come out in.
+  // the "erst alle 2x, bevor eine 3x kommt" rule. With 4 draws that's all 4
+  // roles once each; with 8 it's all 4 twice. Re-shuffling per level (rather
+  // than cycling one fixed shuffled order) keeps *which* roles get doubled
+  // independent of which order the first level happened to come out in.
   buildAutoSpecialRoleDraw(count) {
     const draw = [];
     while (draw.length < count) {
@@ -1793,6 +1836,15 @@ class GameStore {
             if (!giveToRandomDancerCouple(key)) break;
           }
         }
+        // A manual distribution that adds up to fewer roles than there are
+        // dancer couples would otherwise leave the rest looking visibly idle
+        // next to their real-special-role neighbours - "Rätsel-Paar" exists
+        // exactly for this (see SPECIAL_ROLE_KEYS's comment: pure camouflage,
+        // no real mechanic), so every couple the GM's counts didn't cover
+        // gets it automatically instead of staying a plain, undecorated
+        // dancer. Auto mode (the branch above) never reaches here - "every
+        // second couple" is its own deliberate, already-partial coverage.
+        unassignedForSpecialRole.forEach(c => { c.specialRole = 'puzzle'; });
       }
     }
 
