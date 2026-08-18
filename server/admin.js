@@ -27,32 +27,6 @@ const router = Router();
 router.use(requireDb);
 router.use(requireSuperAdmin);
 
-// Dev Dashboard's "live rooms" section (DevDashboard.jsx) - lets the owner
-// find and open a currently-running room's pairing/killer-override editor
-// (AdminOverridesModal) without needing to actually join it as a player or
-// co-GM first. See gameStore.listRoomsSummary.
-router.get('/rooms', (req, res) => {
-  res.json({ rooms: gameStore.listRoomsSummary() });
-});
-
-// Snapshot of one room's players/couples/status, for the same Dev Dashboard
-// use case above - AdminOverridesModal normally reads these straight off the
-// live `room` prop it's handed inside an actual game (PlayerScreen.jsx's own
-// socket-synced state), but the Dev Dashboard has no socket subscription to
-// a room its owner never joined, so it polls this REST snapshot instead
-// (see DevDashboard.jsx's handleSelectLiveRoom/refresh interval). Read-only
-// and deliberately minimal - no roles/votes/claims, nothing this tool needs.
-router.get('/rooms/:roomId/snapshot', (req, res) => {
-  const room = gameStore.getRoom(req.params.roomId);
-  if (!room) return res.status(404).json({ error: 'room_not_found' });
-  res.json({
-    id: room.id,
-    status: room.status,
-    players: room.players.map(({ id, name, danceRole }) => ({ id, name, danceRole })),
-    couples: room.couples.map(({ id, name, playerIds }) => ({ id, name, playerIds })),
-  });
-});
-
 // room.pairOverrides/killerOverridePlayerIds live only on the in-memory room
 // object (gameStore.js) - re-set live from GMDashboard's admin menu item
 // before every round, never persisted to the DB. sanitizeRoomForGM/ForPlayer

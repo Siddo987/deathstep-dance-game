@@ -322,25 +322,6 @@ class GameStore {
     return this.rooms.get(roomId);
   }
 
-  // Dev Dashboard's live-rooms browser (server/admin.js) - a lightweight
-  // summary per currently-in-memory room, not the full room object (no
-  // reason to ship every couple/vote/role over the wire just to pick a
-  // room). Newest activity first, same freshness signal
-  // cleanupAbandonedRooms already tracks per room.
-  listRoomsSummary() {
-    return [...this.rooms.values()]
-      .map(room => ({
-        id: room.id,
-        status: room.status,
-        gameMode: room.gameMode || null,
-        round: room.round,
-        playerCount: room.players.length,
-        coupleCount: room.couples.length,
-        lastActivity: this.roomLastActivity.get(room.id) ?? null,
-      }))
-      .sort((a, b) => (b.lastActivity ?? 0) - (a.lastActivity ?? 0));
-  }
-
   addPlayer(roomId, playerName, danceRole, isFlexible, clientId, socketId, userId = null) {
     const room = this.rooms.get(roomId);
     if (!room) return null;

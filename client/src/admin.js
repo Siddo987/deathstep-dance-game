@@ -20,13 +20,6 @@ async function request(url, options = {}) {
   return data;
 }
 
-// Dev Dashboard's live-rooms browser (see server/admin.js) - lets the owner
-// reach AdminOverridesModal from the Dev Dashboard directly instead of only
-// via the hidden kebab menu inside an actual game.
-export const fetchLiveRooms = () => request('/api/admin/rooms');
-
-export const fetchAdminRoomSnapshot = (roomId) => request(`/api/admin/rooms/${roomId}/snapshot`);
-
 export const fetchAdminOverrides = (roomId) => request(`/api/admin/rooms/${roomId}/overrides`);
 
 export const addPairOverride = (roomId, playerIdA, playerIdB) =>

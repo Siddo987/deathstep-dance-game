@@ -7,13 +7,16 @@ import {
   addKillerOverride, removeKillerOverride,
 } from '../admin.js';
 
-// Hidden owner-only control, reachable two ways - both gated on a
-// currentUser listed in admin_users (see server/db.js/server/admin.js):
-// the kebab menu item in PlayerScreen.jsx's icon row while actually inside a
-// room, or (with no need to join first) the Dev Dashboard's live-rooms
-// section (DevDashboard.jsx). Lets the site owner pre-decide, live and per
-// round, who dances with whom (during the room's lobby phase) and who
-// becomes the killer (once paired, before the GM starts the game) - see
+// Hidden owner-only control, gated on a currentUser listed in admin_users
+// (see server/db.js/server/admin.js) and reachable only via the kebab menu
+// item in PlayerScreen.jsx's icon row while actually inside a room -
+// deliberately NOT also reachable from the Dev Dashboard (a standalone page
+// listing every live room to pick from used to offer this too; removed so
+// the capability stays a contextual, easy-to-forget-exists tool rather than
+// a browsable admin panel - same gate either way, this was about where it
+// lives). Lets the site owner pre-decide, live and per round, who dances
+// with whom (during the room's lobby phase) and who becomes the killer
+// (once paired, before the GM starts the game) - see
 // gameStore.applyPairOverrides/startGame. Deliberately re-set fresh every
 // round rather than a standing per-account rule: a persistent "account X
 // always wins" setup would eventually produce a noticeable pattern for
@@ -21,10 +24,8 @@ import {
 // assigns pairing/killer by hand is never touched, and never sees this modal
 // or its effects as anything but "how the dice landed".
 //
-// `room` is a full socket-synced room object from PlayerScreen's call site,
-// or just the {id, status, players, couples} REST snapshot DevDashboard.jsx
-// polls (see fetchAdminRoomSnapshot) - only those four fields are ever read
-// here, so either shape works.
+// `room` is the full socket-synced room object from PlayerScreen's call site
+// - only its {id, status, players, couples} fields are ever read here.
 function AdminOverridesModal({ room, onClose }) {
   const { t } = useLanguage();
   const [pairOverrides, setPairOverrides] = useState([]);
@@ -85,6 +86,11 @@ function AdminOverridesModal({ room, onClose }) {
   const playerName = (id) => room.players.find(p => p.id === id)?.name || '?';
   const coupleForPlayerId = (id) => room.couples.find(c => c.playerIds.includes(id));
 
+  // Players already committed to a pair override above - excluded from the
+  // pick list below (see its render for why).
+  const overriddenPlayerIds = new Set(pairOverrides.flatMap(o => [o.playerIdA, o.playerIdB]));
+  const selectablePlayers = room.players.filter(p => !overriddenPlayerIds.has(p.id));
+
   return createPortal(
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-card cyber-card" style={{ maxWidth: '600px', border: '1px solid var(--neon-red)', background: '#111' }} onClick={(e) => e.stopPropagation()}>
@@ -121,8 +127,14 @@ function AdminOverridesModal({ room, onClose }) {
 
             <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '10px' }}>{t('admin.selectTwoHint')}</p>
             <div className="couple-list" style={{ marginBottom: '15px' }}>
+              {/* A player already locked into a pair override above is hidden
+                  here rather than left pickable - selecting them again would
+                  only earn an already_paired error from the server (see
+                  gameStore.addPairOverride), and this way that's obvious
+                  instead of discoverable by trial and error. */}
               {room.players.length === 0 && <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{t('admin.noPlayers')}</p>}
-              {room.players.map(p => (
+              {room.players.length > 0 && selectablePlayers.length === 0 && <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{t('admin.allPlayersPaired')}</p>}
+              {selectablePlayers.map(p => (
                 <div
                   key={p.id}
                   className={`list-item ${selectedPlayerIds.includes(p.id) ? 'list-item--active' : ''}`}

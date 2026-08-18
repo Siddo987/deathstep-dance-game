@@ -1,14 +1,12 @@
 import React, { useEffect, useState } from 'react';
-import { Trash2, Check, Skull, Music2, Plus, History, ArrowLeft, Users, ExternalLink, MessageSquare, ChevronDown, ChevronUp, Mail, Send, Map, ArrowUp, ArrowDown, Pencil, X, Radio, Shuffle } from 'lucide-react';
+import { Trash2, Check, Skull, Music2, Plus, History, ArrowLeft, Users, ExternalLink, MessageSquare, ChevronDown, ChevronUp, Mail, Send, Map, ArrowUp, ArrowDown, Pencil, X } from 'lucide-react';
 import { useLanguage } from '../i18n.jsx';
 import { Link, navigate } from '../router.jsx';
-import AdminOverridesModal from './AdminOverridesModal.jsx';
 import {
   fetchFeedbackList, markFeedbackRead, deleteFeedbackEntry, fetchDevSettings, updateDevSettings,
   fetchFallbackSongs, addFallbackSong, importFallbackPlaylist, deleteFallbackSong, fetchGamesList, fetchGameDetail,
   fetchNewsList, sendNewsPost, deleteNewsPost,
   fetchRoadmapItems, addRoadmapItem, updateRoadmapItem, deleteRoadmapItem, moveRoadmapItem,
-  fetchLiveRooms, fetchAdminRoomSnapshot,
 } from '../admin.js';
 
 const ROADMAP_STATUSES = ['planned', 'in_progress', 'done'];
@@ -85,17 +83,6 @@ function DevDashboard({ currentUser, authLoading }) {
   const [roadmapStatus, setRoadmapStatus] = useState('planned');
   const [editingItemId, setEditingItemId] = useState(null);
 
-  // Live rooms (see server/gameStore.js's listRoomsSummary) - reaches the
-  // same pairing/killer-override editor (AdminOverridesModal) the hidden
-  // in-game kebab menu opens, but from here a room never has to actually be
-  // joined first. selectedLiveRoomSnapshot stands in for AdminOverridesModal's
-  // usual socket-synced `room` prop - polled below while the modal is open
-  // since this page has no live subscription of its own to fall back on.
-  const [liveRooms, setLiveRooms] = useState(null);
-  const [liveRoomsOpen, setLiveRoomsOpen] = useState(false);
-  const [selectedLiveRoomId, setSelectedLiveRoomId] = useState(null);
-  const [selectedLiveRoomSnapshot, setSelectedLiveRoomSnapshot] = useState(null);
-
   const load = () => {
     fetchFeedbackList().then(r => { if (!r.error) setFeedback(r.feedback); });
     fetchDevSettings().then(r => {
@@ -113,7 +100,6 @@ function DevDashboard({ currentUser, authLoading }) {
     });
     fetchNewsList().then(r => { if (!r.error) setNews(r.news); });
     fetchRoadmapItems().then(r => { if (!r.error) setRoadmapItems(r.items); });
-    fetchLiveRooms().then(r => { if (!r.error) setLiveRooms(r.rooms); });
   };
 
   const handleLoadMoreGames = async () => {
@@ -140,33 +126,6 @@ function DevDashboard({ currentUser, authLoading }) {
   useEffect(() => {
     if (currentUser?.isSuperAdmin) load();
   }, [currentUser?.id]);
-
-  const handleRefreshLiveRooms = () => {
-    setLiveRooms(null);
-    fetchLiveRooms().then(r => { if (!r.error) setLiveRooms(r.rooms); });
-  };
-
-  const handleSelectLiveRoom = (roomId) => {
-    setSelectedLiveRoomSnapshot(null);
-    setSelectedLiveRoomId(roomId);
-  };
-
-  // Keeps the modal's players/couples/status reasonably fresh while it's
-  // open - this page has no socket subscription to a room its owner never
-  // joined (unlike AdminOverridesModal's usual PlayerScreen.jsx call site),
-  // so a REST poll is the only way it'd ever notice e.g. pairs just got
-  // released. 3s is frequent enough to feel live for a GM watching the list
-  // without hammering the endpoint.
-  useEffect(() => {
-    if (!selectedLiveRoomId) return;
-    let cancelled = false;
-    const poll = () => fetchAdminRoomSnapshot(selectedLiveRoomId).then(r => {
-      if (!cancelled && !r.error) setSelectedLiveRoomSnapshot(r);
-    });
-    poll();
-    const interval = setInterval(poll, 3000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [selectedLiveRoomId]);
 
   useEffect(() => {
     if (!authLoading && !currentUser?.isSuperAdmin) {
@@ -319,52 +278,17 @@ function DevDashboard({ currentUser, authLoading }) {
       <div className="cyber-card" style={{ maxWidth: '700px', margin: '0 auto' }}>
         <h2 style={{ color: 'var(--neon-red)', marginBottom: '20px', textAlign: 'center' }}>{t('dev.pageTitle')}</h2>
 
-        <div className="panel panel--purple" style={{ marginBottom: '25px' }}>
-          <div className="panel-title" style={{ color: 'var(--neon-purple)' }}>
-            <Radio size={16} className="icon-inline" />
-            {t('dev.liveRoomsTitle')}
-          </div>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', margin: '0 0 10px 0' }}>{t('dev.liveRoomsHint')}</p>
-          <button onClick={handleRefreshLiveRooms} className="cyber-button" style={{ width: 'auto', padding: '0 16px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Shuffle size={14} className="icon-inline" />
-            {t('dev.liveRoomsRefresh')}
-          </button>
-
-          {liveRooms === null && <p style={{ color: 'var(--text-muted)', marginTop: '10px' }}>{t('common.loading')}</p>}
-          {liveRooms && liveRooms.length === 0 && (
-            <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', marginTop: '10px' }}>{t('dev.liveRoomsEmpty')}</p>
-          )}
-          {liveRooms && liveRooms.length > 0 && (
-            <>
-              <button onClick={() => setLiveRoomsOpen(v => !v)} className="collapse-toggle" style={{ marginTop: '10px' }}>
-                {liveRoomsOpen ? <ChevronUp size={14} className="icon-inline" /> : <ChevronDown size={14} className="icon-inline" />}
-                {t('dev.liveRoomsToggle', { count: liveRooms.length })}
-              </button>
-              {liveRoomsOpen && (
-                <div className="couple-list" style={{ marginTop: '10px' }}>
-                  {liveRooms.map(r => (
-                    <div key={r.id} className="list-item" style={{ cursor: 'pointer' }} onClick={() => handleSelectLiveRoom(r.id)}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ color: 'white', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                          <span>{r.id}</span>
-                          <span className="badge badge--blue">{r.status}</span>
-                          {r.gameMode && r.gameMode !== 'standard' && <span className="badge badge--muted">{r.gameMode}</span>}
-                        </div>
-                        <div style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginTop: '4px' }}>
-                          {t('dev.gamePlayers', { count: r.playerCount })} · {t('dev.liveRoomsCouples', { count: r.coupleCount })}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        {selectedLiveRoomId && selectedLiveRoomSnapshot && (
-          <AdminOverridesModal room={selectedLiveRoomSnapshot} onClose={() => setSelectedLiveRoomId(null)} />
-        )}
+        {/* Pairing/killer overrides (AdminOverridesModal) used to also be
+            reachable from here without joining a room first - moved back to
+            being ONLY the hidden kebab-menu item inside an actual room
+            (PlayerScreen.jsx), consistent with how every other hidden
+            owner-only control in this app works: embedded in an existing
+            in-game menu, never its own standalone page/browsable list. A
+            page listing every live room with one click into "manipulate
+            these pairs" made the capability feel like a self-service admin
+            panel instead of the deliberately obscure, contextual tool it's
+            meant to be - same admin_users gate either way, this was about
+            where it lives, not who can reach it. */}
 
         <div className="panel panel--purple" style={{ marginBottom: '25px' }}>
           <div className="panel-title" style={{ color: 'var(--neon-purple)' }}>
