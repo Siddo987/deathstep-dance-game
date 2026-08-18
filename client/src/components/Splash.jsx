@@ -57,22 +57,35 @@ function shouldShowSplash() {
 }
 
 // Temporary diagnostic escape hatch for the "sessionStorage key gets set but
-// nothing ever visibly appears" report - ?splashDebug=1 forces the overlay
-// on and keeps it on indefinitely (no auto-hide, ignores/doesn't touch the
-// real once-per-tab flag) so it can actually be inspected in DevTools
-// (Elements/computed styles, whether anything else paints over it, etc.)
-// instead of racing a sub-2s window. Remove once the real cause is found.
-function splashDebugForced() {
+// nothing ever visibly appears" report, confirmed live 2026-08-18: with
+// ?splashDebug=1 (stays up forever, see below) the overlay renders and is
+// visible - proven in DevTools - but the real timed flow (even at the new
+// 1400ms) still shows nothing on a genuinely fresh session. Since that rules
+// out both "not actually rendering" and "just too short a window", this
+// mode adds a way to test the *timed* path repeatably too, without needing
+// a fresh incognito window every single time (which also bypasses
+// sessionStorage entirely, not just when forced permanently visible):
+// - ?splashDebug=1        - stays up forever (unchanged, for DOM/CSS inspection)
+// - ?splashDebug=<number> - runs the real fade-in/out timing using that many
+//                           ms as VISIBLE_MS, every reload, ignoring the
+//                           once-per-tab flag - for comparing "does a much
+//                           longer timed window actually get seen" against
+//                           the real 1400ms default.
+// Remove once the real cause is found.
+function getSplashDebugParam() {
   try {
-    return new URLSearchParams(window.location.search).get('splashDebug') === '1';
+    return new URLSearchParams(window.location.search).get('splashDebug');
   } catch {
-    return false;
+    return null;
   }
 }
 
 function Splash() {
-  const forceVisible = splashDebugForced();
-  const [phase, setPhase] = useState(() => (forceVisible || shouldShowSplash() ? 'visible' : 'hidden'));
+  const debugParam = getSplashDebugParam();
+  const forceVisible = debugParam === '1';
+  const debugVisibleMs = debugParam && !forceVisible && !Number.isNaN(Number(debugParam)) ? Number(debugParam) : null;
+  const effectiveVisibleMs = debugVisibleMs ?? VISIBLE_MS;
+  const [phase, setPhase] = useState(() => (forceVisible || debugVisibleMs !== null || shouldShowSplash() ? 'visible' : 'hidden'));
 
   useEffect(() => {
     if (forceVisible) return; // stays 'visible' forever - no timers at all
@@ -83,8 +96,8 @@ function Splash() {
     // fadeTimer fires and flips phase to 'fading', leaving the splash stuck
     // mid-fade forever.)
     if (phase !== 'visible') return;
-    const fadeTimer = setTimeout(() => setPhase('fading'), VISIBLE_MS);
-    const hideTimer = setTimeout(() => setPhase('hidden'), VISIBLE_MS + FADE_MS);
+    const fadeTimer = setTimeout(() => setPhase('fading'), effectiveVisibleMs);
+    const hideTimer = setTimeout(() => setPhase('hidden'), effectiveVisibleMs + FADE_MS);
     return () => { clearTimeout(fadeTimer); clearTimeout(hideTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
