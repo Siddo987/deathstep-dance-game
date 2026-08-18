@@ -480,16 +480,21 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
   // Every persistent icon action reachable from anywhere in the game - leave,
   // how-to-play, language, song suggestion, and (when relevant) Spotify share
-  // - as one horizontal row anchored to the card's top-right corner, instead
+  // - as one horizontal row right-aligned above the player's name tag, instead
   // of each icon independently absolute-positioned into two stacked rows
   // (leave alone on top, language+song-suggest below it) the way this used
-  // to be split across the old leaveButton/songSuggestButton consts. The row
-  // itself has no explicit width (anchored via right:10px only), so it just
-  // grows further left as conditional icons (admin kebab, Spotify share)
-  // appear/disappear rather than needing per-button offsets recalculated.
+  // to be split across the old leaveButton/songSuggestButton consts. Lives in
+  // normal document flow (not absolute/overlaid) so the name tag below it -
+  // whose own height varies with how much it has to show (partner name, room
+  // code, game mode) - can never grow into it; a fixed-height absolute
+  // overlay here previously assumed a name tag short enough to always clear
+  // it and silently overlapped once it wasn't (long partner names, game mode
+  // line). Wraps onto a second line rather than overflowing the card on the
+  // narrowest phones if every conditional icon (admin kebab, Spotify share)
+  // is showing at once.
   const topIconRow = (
     <>
-      <div style={{ position: 'absolute', top: '10px', right: '10px', zIndex: 10, display: 'flex', alignItems: 'center', gap: '2px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', gap: '2px', marginBottom: '4px' }}>
         {currentUser?.isSuperAdmin && (
           <button
             onClick={() => setShowAdminModal(true)}
@@ -552,7 +557,12 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             <button className="icon-btn modal-close-btn" onClick={() => setShowSongSuggest(false)}>
               <X size={20} />
             </button>
-            <h3 style={{ color: 'var(--neon-green)', marginBottom: '15px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+            {/* paddingLeft/Right clears .modal-close-btn's absolute top-right
+                box (see index.css) - without it a centered title long enough
+                to approach the card's edge (this one routinely is, especially
+                once wrapped onto two lines on a narrow phone) renders right
+                under the close button instead of beside it. */}
+            <h3 style={{ color: 'var(--neon-green)', marginBottom: '15px', paddingLeft: '40px', paddingRight: '40px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
               <Music2 size={20} />
               {t('player.suggestSongTitle')}
             </h3>
@@ -714,7 +724,10 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
             <button className="icon-btn modal-close-btn" onClick={() => setShowSpotifyShare(false)}>
               <X size={20} />
             </button>
-            <h3 style={{ color: 'var(--neon-green)', marginBottom: '15px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
+            {/* See the matching comment on the song-suggest modal above -
+                clears .modal-close-btn's absolute box so a centered title
+                can't render underneath it. */}
+            <h3 style={{ color: 'var(--neon-green)', marginBottom: '15px', paddingLeft: '40px', paddingRight: '40px', textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px' }}>
               <Share2 size={20} />
               {t('player.spotifyShareTitle')}
             </h3>
@@ -765,11 +778,17 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   );
 
   const playerNameTag = me ? (
-    // Sits below the icon row (top:10px, one row tall) now that every icon
-    // lives on a single horizontal line instead of stacked rows down the
-    // right side - this can use the card's full width again instead of
-    // stopping short to leave room for icons beside it.
-    <div style={{ position: 'absolute', top: '54px', left: '15px', right: '15px', color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left', zIndex: 5 }}>
+    // Normal document flow, directly below the icon row - previously an
+    // absolutely-positioned overlay pinned to a fixed top offset, which
+    // required every phase's card to reserve exactly enough padding to clear
+    // it. This tag's own height isn't fixed though (a long partner name and/
+    // or the game-mode line both add a full row), so that padding guess
+    // regularly fell short and the phase heading below it (e.g. "RUNDE 3",
+    // "DEIN PARTNER") rendered overlapping this tag's last line or two -
+    // most visible on a real phone with a 2-person couple, i.e. most games.
+    // Flowing normally instead means whatever height this actually needs is
+    // exactly the space it takes, no guessing required.
+    <div style={{ color: 'var(--text-muted)', fontSize: '0.9rem', textAlign: 'left', marginBottom: '20px' }}>
       <strong style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me.name}</strong>
       <span style={{ fontSize: '0.8rem', opacity: 0.7 }}>{me.danceRole.toUpperCase()}</span>
       {myCouple && myCouple.playerIds && myCouple.playerIds.length > 1 && (
@@ -839,9 +858,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
 
   if (room.status === 'lobby') {
     return (
-      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-        {playerNameTag}
+      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
         {topIconRow}
+        {playerNameTag}
         <h2 style={{ color: 'var(--neon-blue)', marginBottom: '20px', marginTop: '20px' }}>{t('phase.lobby')}</h2>
         <div className="pulse-animation" style={{ width: '50px', height: '50px', borderRadius: '50%', background: 'var(--neon-purple)', margin: '0 auto 20px' }}></div>
         <p style={{ color: 'var(--text-muted)' }}>{t('player.lobbyWait')}</p>
@@ -865,9 +884,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   if (room.status === 'paired') {
     if (!myCouple) {
       return (
-        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-          {playerNameTag}
+        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
           {topIconRow}
+          {playerNameTag}
           <h2 style={{ color: 'var(--text-muted)', marginBottom: '20px', marginTop: '20px' }}>{t('player.spectatorTitle')}</h2>
           <p>{t('player.spectatorBody')}</p>
         </div>
@@ -877,9 +896,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     const partners = myCouple.playerIds.filter(id => id !== clientId).map(id => room.players.find(p => p.id === id)?.name);
 
     return (
-      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-        {playerNameTag}
+      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
         {topIconRow}
+        {playerNameTag}
         <h2 style={{ color: 'var(--neon-purple)', marginBottom: '20px', marginTop: '20px' }}>{t('player.partnerTitle')}</h2>
         <p style={{ fontSize: '1.2rem', marginBottom: '20px' }}>
           {t('player.dancingWith')}<br/>
@@ -907,9 +926,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   if (!myCouple) {
     // Spectator view for remaining phases
     return (
-      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-        {playerNameTag}
+      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
         {topIconRow}
+        {playerNameTag}
         <h2 style={{ color: 'var(--text-muted)', marginBottom: '20px', marginTop: '20px' }}>{t('player.spectatingTitle')}</h2>
         <p>{t('player.gameInProgress')}</p>
         <p>{t('player.currentPhase')} <strong>{t(`phase.${room.status}`)}</strong></p>
@@ -920,9 +939,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   if (room.status === 'ended') {
     if (room.endReason === 'aborted') {
       return (
-        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-          {playerNameTag}
+        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
           {topIconRow}
+          {playerNameTag}
           <h2 className="glitch-text" style={{ color: 'var(--text-muted)', fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px', textShadow: 'none' }}>
             {t('player.abortedTitle')}
           </h2>
@@ -939,9 +958,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
       const myRank = ranking.findIndex(r => r.coupleId === myCouple?.id);
       const iWon = myRank !== -1 && ranking[myRank].kills === topKills && topKills > 0;
       return (
-        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-          {playerNameTag}
+        <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
           {topIconRow}
+          {playerNameTag}
           <h2 className="glitch-text" style={{
             color: iWon ? '#00ff66' : 'var(--neon-purple)',
             fontSize: '2.5rem', marginBottom: '20px', marginTop: '20px',
@@ -991,9 +1010,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     const playerWon = isMartyr ? martyrObjectiveMet : (!isEliminated && ((role === 'killer' && killersWon) || (role !== 'killer' && !killersWon)));
 
     return (
-      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-        {playerNameTag}
+      <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
         {topIconRow}
+        {playerNameTag}
         <h2 className="glitch-text" style={{
           color: playerWon ? '#00ff66' : 'var(--neon-red)',
           fontSize: '2.5rem',
@@ -1060,9 +1079,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   // Eliminated players during game
   if (isEliminated) {
     return (
-      <div className="cyber-card phase-enter" style={{ textAlign: 'center', borderColor: 'var(--neon-red)', position: 'relative', paddingTop: '90px' }}>
-        {playerNameTag}
+      <div className="cyber-card phase-enter" style={{ textAlign: 'center', borderColor: 'var(--neon-red)', position: 'relative' }}>
         {topIconRow}
+        {playerNameTag}
         <h2 className="glitch-text" style={{ color: 'var(--neon-red)', fontSize: '2rem', marginBottom: '20px', marginTop: '20px' }}>{t('player.eliminatedTitle')}</h2>
         {room.deadPlayersKeepDancing ? (
           <>
@@ -1087,9 +1106,9 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
     : me?.danceRole === room.votingRole;
 
   return (
-    <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative', paddingTop: '90px' }}>
-      {playerNameTag}
+    <div className="cyber-card phase-enter" style={{ textAlign: 'center', position: 'relative' }}>
       {topIconRow}
+      {playerNameTag}
       {(room.status === 'dancing' || room.status === 'silent_report' || room.status === 'voting' || room.status === 'role_reveal' || room.status === 'kill_reveal' || room.status === 'vote_reveal') && (
         <p style={{ color: 'var(--text-muted)', marginBottom: '10px', marginTop: '20px' }}>{t('player.round', { n: room.round })}</p>
       )}
