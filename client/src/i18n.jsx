@@ -23,14 +23,16 @@ export function detectLanguage() {
     const saved = localStorage.getItem(LANG_KEY);
     if (SUPPORTED_LANGS.includes(saved)) return saved;
   } catch (e) { /* localStorage unavailable */ }
-  const browserLang = (navigator.language || '').toLowerCase();
-  // 'uk' (Ukrainian) is checked before the generic 'uk'-looking prefixes
-  // don't collide with anything else here; browser tags come as e.g.
-  // 'de-DE', 'uk-UA', 'fr-CA', so match on the language subtag only.
-  const prefix = browserLang.split('-')[0];
-  // Falls back to German (this app's default language), not English, for a
-  // browser language this app doesn't support at all.
-  return SUPPORTED_LANGS.includes(prefix) ? prefix : 'de';
+  // Used to also try matching the browser's own language (navigator.language)
+  // before falling back to German - dropped on request: this app's default/
+  // primary audience is German-speaking regardless of what an individual
+  // visitor's OS/browser happens to be set to (e.g. a German user on an
+  // English-language phone), so a first-time visitor with no saved
+  // preference should always land on German, never auto-switched to
+  // whatever the browser reports. The explicit language picker (Globe icon/
+  // LanguageModal) is still there for anyone who actually wants a different
+  // one, and that choice is what LANG_KEY above then remembers.
+  return 'de';
 }
 
 const LanguageContext = createContext({
