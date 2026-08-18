@@ -34,7 +34,13 @@ function PlayerScreen({ room, role, isEliminated, onLeave, clientId, currentUser
   // playlists.js - a link can be saved with no Spotify connection at all, see
   // Playlists.jsx's import-by-link) can pick a track from one of those.
   const [showSongSuggest, setShowSongSuggest] = useState(false);
-  const [suggestMode, setSuggestMode] = useState('text'); // 'text' | 'spotify' | 'playlist'
+  // Defaults straight to the Spotify search tab when that's actually an
+  // option (spotifySuggestionsAllowed) - a plain-text hint the GM has to
+  // manually go find and queue is the fallback, not the first thing most
+  // players actually want to reach for. Falls back to 'text' when Spotify
+  // suggestions aren't available at all, since that segmented control (and
+  // therefore its other tabs) never even renders in that case - see below.
+  const [suggestMode, setSuggestMode] = useState(spotifySuggestionsAllowed ? 'spotify' : 'text'); // 'text' | 'spotify' | 'playlist'
   const [suggestText, setSuggestText] = useState('');
   const [suggestQuery, setSuggestQuery] = useState('');
   const [suggestResults, setSuggestResults] = useState([]);
