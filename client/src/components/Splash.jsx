@@ -35,8 +35,14 @@ import logo from './logo.png';
 // browser restart) means an already-dismissed splash sometimes won't show
 // again right after such a restore - a much smaller miss than either
 // previous version's, and not worth reintroducing a wall-clock cooldown for.
-const VISIBLE_MS = 650;
-const FADE_MS = 300;
+// 650ms/300ms (950ms total) turned out too short to reliably register at
+// all on a real first load - the network fetch for logo.png alone can eat
+// into that window on a cold cache, and reports kept coming back as "never
+// shows" rather than "shows too briefly", suggesting most users never
+// consciously caught it even once. Long enough to actually be seen, still
+// short enough to read as a flourish rather than a delay.
+const VISIBLE_MS = 1400;
+const FADE_MS = 400;
 const SESSION_KEY = 'deathstep_splash_shown';
 
 function shouldShowSplash() {
