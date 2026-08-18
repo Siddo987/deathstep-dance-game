@@ -35,69 +35,74 @@ import logo from './logo.png';
 // browser restart) means an already-dismissed splash sometimes won't show
 // again right after such a restore - a much smaller miss than either
 // previous version's, and not worth reintroducing a wall-clock cooldown for.
-// 650ms/300ms (950ms total) turned out too short to reliably register at
-// all on a real first load - the network fetch for logo.png alone can eat
-// into that window on a cold cache, and reports kept coming back as "never
-// shows" rather than "shows too briefly", suggesting most users never
-// consciously caught it even once. Long enough to actually be seen, still
-// short enough to read as a flourish rather than a delay.
+//
+// v4 (2026-08-18) fixed the real bug: it never showed *at all*, for anyone,
+// confirmed live. Two independent causes stacked on top of each other:
+//
+// 1. shouldShowSplash() below both *read and wrote* the sessionStorage flag
+//    inside useState's lazy initializer. React.StrictMode intentionally
+//    double-invokes state initializers in development to catch exactly this
+//    kind of impurity - the first call would set the flag, and the second
+//    call (whose result React actually keeps) would then see it already set
+//    and return false. The production build should never hit that, since
+//    StrictMode's double-invoking is a dev-only check... except this app's
+//    production build was accidentally shipping React's *development*
+//    bundle the whole time (see root /.env's NODE_ENV, now fixed) - so this
+//    was firing for every real visitor, not just in local dev. Split the
+//    read from the write below so the initializer is pure regardless.
+// 2. The overlay's background was a radial-gradient - reliable everywhere
+//    tested in isolation, but confirmed (via an isolated repro) to fail to
+//    paint, or paint with visible banding, specifically when stacked over
+//    another radial-gradient background (this app's <body>, see index.css).
+//    A real Chromium compositor bug, not anything in this component's logic
+//    - every DOM/computed-style check looked perfect while it silently
+//    painted nothing. Switched to a solid color + inset box-shadow glow,
+//    which has no such interaction.
+//
+// Bug #1 alone was enough to hide it completely, so #2 was never actually
+// visible to a real user - but both are fixed, since #2 would have caused
+// exactly the same "shows nothing" symptom the moment #1 was fixed.
 const VISIBLE_MS = 1400;
 const FADE_MS = 400;
 const SESSION_KEY = 'deathstep_splash_shown';
 
-function shouldShowSplash() {
+// Pure read - never writes. Safe to call from a state initializer even if
+// React invokes it more than once (StrictMode dev checks, or otherwise).
+function wasSplashAlreadyShown() {
   try {
-    if (sessionStorage.getItem(SESSION_KEY)) return false;
-    sessionStorage.setItem(SESSION_KEY, '1');
-    return true;
+    return !!sessionStorage.getItem(SESSION_KEY);
   } catch {
-    // Privacy mode / storage disabled - fail open, it's harmless cosmetics.
-    return true;
+    // Privacy mode / storage disabled - treat as "not shown" (fail open,
+    // it's harmless cosmetics either way).
+    return false;
   }
 }
 
-// Temporary diagnostic escape hatch for the "sessionStorage key gets set but
-// nothing ever visibly appears" report, confirmed live 2026-08-18: with
-// ?splashDebug=1 (stays up forever, see below) the overlay renders and is
-// visible - proven in DevTools - but the real timed flow (even at the new
-// 1400ms) still shows nothing on a genuinely fresh session. Since that rules
-// out both "not actually rendering" and "just too short a window", this
-// mode adds a way to test the *timed* path repeatably too, without needing
-// a fresh incognito window every single time (which also bypasses
-// sessionStorage entirely, not just when forced permanently visible):
-// - ?splashDebug=1        - stays up forever (unchanged, for DOM/CSS inspection)
-// - ?splashDebug=<number> - runs the real fade-in/out timing using that many
-//                           ms as VISIBLE_MS, every reload, ignoring the
-//                           once-per-tab flag - for comparing "does a much
-//                           longer timed window actually get seen" against
-//                           the real 1400ms default.
-// Remove once the real cause is found.
-function getSplashDebugParam() {
+function markSplashShown() {
   try {
-    return new URLSearchParams(window.location.search).get('splashDebug');
+    sessionStorage.setItem(SESSION_KEY, '1');
   } catch {
-    return null;
+    /* ignored - see wasSplashAlreadyShown's fail-open comment */
   }
 }
 
 function Splash() {
-  const debugParam = getSplashDebugParam();
-  const forceVisible = debugParam === '1';
-  const debugVisibleMs = debugParam && !forceVisible && !Number.isNaN(Number(debugParam)) ? Number(debugParam) : null;
-  const effectiveVisibleMs = debugVisibleMs ?? VISIBLE_MS;
-  const [phase, setPhase] = useState(() => (forceVisible || debugVisibleMs !== null || shouldShowSplash() ? 'visible' : 'hidden'));
+  const [phase, setPhase] = useState(() => (wasSplashAlreadyShown() ? 'hidden' : 'visible'));
 
   useEffect(() => {
-    if (forceVisible) return; // stays 'visible' forever - no timers at all
-    // Empty deps: run once at mount only, reading the phase the initializer
-    // above already decided - if this tab already showed it, phase starts
-    // (and stays) 'hidden', no timers at all. (Deliberately not depending on
+    // Empty deps: run once at mount only. (Deliberately not depending on
     // `phase` here: that would clear the still-pending hideTimer the moment
     // fadeTimer fires and flips phase to 'fading', leaving the splash stuck
     // mid-fade forever.)
     if (phase !== 'visible') return;
-    const fadeTimer = setTimeout(() => setPhase('fading'), effectiveVisibleMs);
-    const hideTimer = setTimeout(() => setPhase('hidden'), effectiveVisibleMs + FADE_MS);
+    // The actual "mark as shown" write happens here, in the effect, not in
+    // the state initializer above - effects only ever run once per real
+    // commit (even StrictMode's dev double-invoke immediately cleans the
+    // first one up before the second runs), so this is the safe place for
+    // the one-time side effect the read above deliberately doesn't do.
+    markSplashShown();
+    const fadeTimer = setTimeout(() => setPhase('fading'), VISIBLE_MS);
+    const hideTimer = setTimeout(() => setPhase('hidden'), VISIBLE_MS + FADE_MS);
     return () => { clearTimeout(fadeTimer); clearTimeout(hideTimer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -130,7 +135,10 @@ function Splash() {
         alignItems: 'center',
         justifyContent: 'center',
         gap: '18px',
-        background: 'radial-gradient(circle at 50% 40%, rgba(181,43,255,0.18) 0%, var(--bg-dark) 70%)',
+        // Solid color, deliberately not a radial-gradient - see the v4
+        // comment up top for why a gradient here silently fails to paint.
+        background: 'var(--bg-dark)',
+        boxShadow: 'inset 0 0 120px rgba(181,43,255,0.25)',
         opacity: phase === 'fading' ? 0 : 1,
         transition: `opacity ${FADE_MS}ms ease`,
         pointerEvents: 'none',

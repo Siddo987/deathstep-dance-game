@@ -1,6 +1,17 @@
 # Stage 1: Build the React client
 FROM node:20-alpine AS build
 WORKDIR /app/client
+# Forced regardless of whatever NODE_ENV the shared .env below carries (it's
+# meant for local dev too, so it can legitimately say "development") - Vite
+# build's own default is 'production', but that default can get silently
+# overridden if a loaded .env sets NODE_ENV itself (see client/vite.config.js's
+# envDir). Confirmed live 2026-08-18: the shared .env's NODE_ENV=development
+# was leaking into this build, shipping React's *development* bundle in
+# production - ~20% larger, and React.StrictMode's dev-only double-invoking
+# of impure functions was firing for real users, not just in local dev
+# (root-caused a real bug this way: Splash.jsx's once-per-tab sessionStorage
+# check never showed the splash to any real visitor, ever).
+ENV NODE_ENV=production
 COPY client/package*.json ./
 RUN npm install
 COPY client/ ./
@@ -12,6 +23,10 @@ RUN npm run build
 # Stage 2: Setup the Node.js server
 FROM node:20-alpine
 WORKDIR /app
+# Same reasoning as the build stage above - a production deployment must run
+# as 'production' (e.g. server/authToken.js's Secure-cookie flag) regardless
+# of what the shared .env says.
+ENV NODE_ENV=production
 
 # Copy server files
 COPY server/package*.json ./server/
