@@ -56,10 +56,26 @@ function shouldShowSplash() {
   }
 }
 
+// Temporary diagnostic escape hatch for the "sessionStorage key gets set but
+// nothing ever visibly appears" report - ?splashDebug=1 forces the overlay
+// on and keeps it on indefinitely (no auto-hide, ignores/doesn't touch the
+// real once-per-tab flag) so it can actually be inspected in DevTools
+// (Elements/computed styles, whether anything else paints over it, etc.)
+// instead of racing a sub-2s window. Remove once the real cause is found.
+function splashDebugForced() {
+  try {
+    return new URLSearchParams(window.location.search).get('splashDebug') === '1';
+  } catch {
+    return false;
+  }
+}
+
 function Splash() {
-  const [phase, setPhase] = useState(() => (shouldShowSplash() ? 'visible' : 'hidden'));
+  const forceVisible = splashDebugForced();
+  const [phase, setPhase] = useState(() => (forceVisible || shouldShowSplash() ? 'visible' : 'hidden'));
 
   useEffect(() => {
+    if (forceVisible) return; // stays 'visible' forever - no timers at all
     // Empty deps: run once at mount only, reading the phase the initializer
     // above already decided - if this tab already showed it, phase starts
     // (and stays) 'hidden', no timers at all. (Deliberately not depending on
